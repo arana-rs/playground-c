@@ -678,6 +678,11 @@ function MemoryViewerAggregateBlock({
 }) {
   const name = aggregate.name ?? 'Agregado temporal';
   const placeholder = aggregateStatusMessage(aggregate);
+  const aggregateTypeName = aggregate.type.startsWith(`${aggregate.kind} `)
+    ? aggregate.type.slice(aggregate.kind.length + 1)
+    : aggregate.type.startsWith(`${aggregate.kind}#`)
+      ? 'anónimo'
+      : aggregate.type;
   const layoutItems: MemoryViewerAggregateLayoutItem[] = [
     ...aggregate.members.map(member => ({ kind: 'member' as const, offset: member.offset, member })),
     ...aggregate.padding.map(span => ({ kind: 'padding' as const, offset: span.offset, size: span.size, key: span.key })),
@@ -726,10 +731,15 @@ function MemoryViewerAggregateBlock({
                   </span>
                 </li>
               ) : (
-                <li className="memory-viewer-aggregate-padding" key={item.key} data-padding-offset={item.offset} data-padding-size={item.size}>
-                  <span>Padding</span>
-                  <span>+{item.offset} · {item.size} B</span>
-                </li>
+                <li
+                  className="memory-viewer-aggregate-padding"
+                  key={item.key}
+                  data-aggregate-kind={aggregate.kind}
+                  data-padding-offset={item.offset}
+                  data-padding-size={item.size}
+                  title={`Padding de ${aggregate.type} · +${item.offset} · ${item.size} B`}
+                  aria-label={`Padding de ${aggregate.type} · offset +${item.offset} · ${item.size} B`}
+                />
               ))}
             </ol>
           )
@@ -746,7 +756,7 @@ function MemoryViewerAggregateBlock({
         </span>
         <MemoryViewerMetadataFooter
           name={name}
-          type={aggregate.type}
+          type={aggregateTypeName}
           size={aggregate.size}
           readOnly={aggregate.readOnly}
           objectKind="aggregate"
