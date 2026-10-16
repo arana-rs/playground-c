@@ -6,6 +6,7 @@ import { Button, ButtonSpinner } from './components/arc/button/button.tsx';
 import { ThemeSwitch } from './components/arc/theme-switch/theme-switch.tsx';
 import { SelectedFileTab } from './components/SelectedFileTab.tsx';
 import { CodeEditor } from './editor/CodeEditor.tsx';
+import { createEditorSourcePersister, readEditorSource } from './editor/sourcePersistence.ts';
 import { useCodeEditor } from './editor/useCodeEditor.ts';
 import { formatConsoleSegments, getConsoleStatus, useRunner } from './execution/useRunner.ts';
 import { copyReportText } from './execution/copyReport.ts';
@@ -111,7 +112,12 @@ function Playground() {
   const [colorTheme, setColorTheme] = useState<ColorTheme>(initialColorTheme);
   const requestedColorTheme = useRef(colorTheme);
   const themeTransitionGeneration = useRef(0);
-  const { ref, cursor, text, limitMessage } = useCodeEditor(initialSource);
+  const [editorInitialSource] = useState(() => readEditorSource(() => window.localStorage, initialSource));
+  const persistEditorSource = useMemo(
+    () => createEditorSourcePersister(editorInitialSource, () => window.localStorage),
+    [editorInitialSource],
+  );
+  const { ref, cursor, text, limitMessage } = useCodeEditor(editorInitialSource, persistEditorSource);
   const { state, run, stop, sendStdinLine, sendStdinEOF, isRunning } = useRunner();
   const timeoutReport = state.status === 'timeout' ? state.diagnosticsReport : null;
   const timeoutReportRef = useRef(timeoutReport);
@@ -578,7 +584,7 @@ function Playground() {
         <CodeEditor
           editorRef={ref}
           text={text}
-          initialText={initialSource}
+          initialText={editorInitialSource}
           activeLine={cursor.line}
           limitMessage={limitMessage}
         />

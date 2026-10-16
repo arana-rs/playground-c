@@ -13,6 +13,7 @@ import {
   normalizeEditorText,
 } from './limits.ts';
 import { getPlaygroundShortcut } from '../keyboardShortcuts.ts';
+import { notifyEditorSourceChange } from './sourcePersistence.ts';
 import type { EditorCommand, EditorSelection, EditorSnapshot } from './types.ts';
 import type { EditorCommandEvaluation } from './operations.ts';
 
@@ -108,7 +109,7 @@ function keepCaretVisible(editor: HTMLTextAreaElement, snapshot: EditorSnapshot,
   }
 }
 
-export function useCodeEditor(initialText = '') {
+export function useCodeEditor(initialText = '', onSourceChange?: (source: string) => void) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const normalizedInitialText = normalizeEditorText(initialText);
@@ -136,9 +137,13 @@ export function useCodeEditor(initialText = '') {
     let compositionViewport: EditorViewport | null = null;
     let compositionTimer: ReturnType<typeof setTimeout> | undefined;
     let writing = false;
+    let publishedText = text;
 
-    function publishEditorState() {
+    function publishEditorState(persistSource = true) {
       setText(snapshot.text);
+      if (persistSource) {
+        publishedText = notifyEditorSourceChange(snapshot.text, publishedText, onSourceChange);
+      }
       const next = getCursorPosition(snapshot);
       setCursor((current) => current.line === next.line && current.column === next.column ? current : next);
     }
@@ -186,7 +191,9 @@ export function useCodeEditor(initialText = '') {
         snapshot = { ...snapshot, selection };
       }
       snapshotViewport = getViewport(editor!);
-      if (!compositionBefore || isEditorTextWithinLineLimit(snapshot.text)) publishEditorState();
+      if (!compositionBefore || isEditorTextWithinLineLimit(snapshot.text)) {
+        publishEditorState(!compositionBefore);
+      }
       return snapshot;
     }
 
@@ -335,7 +342,7 @@ export function useCodeEditor(initialText = '') {
         snapshot = reconcileNativeEdit(snapshot, editor!.value, getSelection(editor!));
         snapshotViewport = getViewport(editor!);
         pending = null;
-        if (isEditorTextWithinLineLimit(snapshot.text)) publishEditorState();
+        if (isEditorTextWithinLineLimit(snapshot.text)) publishEditorState(false);
         return;
       }
       const before = pending?.before ?? snapshot;
