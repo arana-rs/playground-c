@@ -1,4 +1,4 @@
-# @playground/c11-engine · P4 parcial · 0.4.0
+# @playground/c11-engine · P4 parcial · 0.1.0
 
 Motor incremental de C para navegador y Node.js con perfil x86-64 Linux LP64. Interpreta C en una máquina virtual propia; no compila ni ejecuta instrucciones nativas. El core no depende de React, DOM, Worker, File ni filesystem. El paquete **no implementa C11 completo**: `CAPABILITIES` publica el perfil y una capacidad fuera de alcance produce un diagnóstico explícito.
 

@@ -330,7 +330,7 @@ export interface DebugExecutionSession {
   inspectHeapObjects(): readonly DebugHeapObjectSnapshot[];
 }
 
-export const ENGINE_VERSION = '0.4.0';
+export const ENGINE_VERSION = '0.1.0';
 export const TARGET_PROFILE = Object.freeze({
   id: 'x86_64-linux-lp64' as const, endianness: 'little', charBits: 8, charSigned: true,
   boolBytes: 1, shortBits: 16, intBits: 32, intBytes: 4, intAlignment: 4,

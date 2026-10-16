@@ -52,3 +52,12 @@
 - Completa las compilaciones antes de probar en navegador:
   reconstruir el motor puede provocar recargas de Vite.
 - Al crear un commit solicitado, incluye solo los cambios de esa tarea.
+
+## Mensajes de commit
+
+- Usa Conventional Commits con el formato `tipo(ámbito): descripción breve en español`. Los tipos son `feat`, `fix`, `docs`, `refactor`, `test`, `build`, `ci`, `perf` y `chore`, en minúsculas y en inglés.
+- El ámbito es opcional y debe corresponder al cambio; ejemplos habituales son `engine`, `editor`, `memory-viewer`, `license`, `release` y `deps`, sin limitarse a ellos si el contexto requiere otro.
+- Escribe la descripción con un verbo directo en imperativo, sin emoji ni punto final. Si hace falta, añade un cuerpo opcional separado por una línea en blanco para explicar motivos o impactos relevantes.
+- Marca los cambios incompatibles con `!` después del tipo o ámbito, o usa el pie `BREAKING CHANGE:` para describirlos.
+- Ejemplos: `fix(memory-viewer): alinea las celdas de los structs` y `chore(release): unifica las versiones en 0.1.0`.
+- Esta convención no autoriza a crear commits sin solicitud del usuario.

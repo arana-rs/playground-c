@@ -22,13 +22,13 @@ const heapLifecycleSource = [
   '}',
 ].join('\n');
 
-test('the initial memory example runs to return zero without I/O', async () => {
+test('the initial memory example reports its struct pointer update and returns zero', async () => {
   const file = new File([initialExampleSource], 'main.c', { type: 'text/x-c' });
   const result = await runFile(file, RUN_CONFIGURATION.options);
   assert.equal(result.kind, 'terminated', JSON.stringify(result));
   assert.equal(result.mainReturn, 0);
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(result.stdout, new Uint8Array());
+  assert.deepEqual(result.stdout, new TextEncoder().encode('B: 20 (base=20)\n'));
   assert.deepEqual(result.stderr, new Uint8Array());
 });
 

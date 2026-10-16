@@ -10,7 +10,7 @@ import {
 } from '../src/memory/pointerSnapshots.ts';
 
 const pointerExampleSource = readFileSync(new URL('./fixtures/memory-viewer-pointers.c', import.meta.url), 'utf8');
-const arrayPointerExampleSource = readFileSync(new URL('../src/examples/main.c', import.meta.url), 'utf8');
+const arrayPointerExampleSource = readFileSync(new URL('./fixtures/memory-viewer-pointer-arrays.c', import.meta.url), 'utf8');
 
 function pointerSnapshot(id, name, displayValue, status, target, type = 'int *') {
   return {

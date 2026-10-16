@@ -1,6 +1,6 @@
 # Motor C11: matriz y hoja de ruta
 
-Estado del motor **0.4.0: P4 implementado parcialmente** en `packages/c11-engine`, con Run/Stop y consola integrados en el editor. La matriz mantiene el alcance completo como hoja de ruta: de las 65 familias —35 del lenguaje, 29 headers y una extensión opcional—, **44 están iniciadas parcialmente, 21 pendientes y ninguna completa**. P1–P4 tienen capacidades parciales; P5–P6 siguen pendientes. Una flecha señala ampliación parcial, no cobertura completa desde la primera fase.
+Estado del motor **0.1.0: P4 implementado parcialmente** en `packages/c11-engine`, con Run/Stop y consola integrados en el editor. La matriz mantiene el alcance completo como hoja de ruta: de las 65 familias —35 del lenguaje, 29 headers y una extensión opcional—, **44 están iniciadas parcialmente, 21 pendientes y ninguna completa**. P1–P4 tienen capacidades parciales; P5–P6 siguen pendientes. Una flecha señala ampliación parcial, no cobertura completa desde la primera fase.
 
 ## Estado implementado: P4
 
@@ -60,7 +60,7 @@ P1–P4 están implementados parcialmente. Cada fila conserva capacidades pendie
 
 ## API y límites entre módulos
 
-Paquete portable implementado como `@playground/c11-engine` 0.4.0 con entradas `core`, `browser` y `node`, JavaScript ESM y declaraciones TypeScript. El core no importa React, DOM, `File`, filesystem ni Worker. Recibe `{entry, files, translationUnits?}`; `files` contiene fuentes y headers virtuales, y por defecto `translationUnits` vale `[entry]`. Los includes quoted buscan junto al archivo actual y en la raíz virtual; los angle buscan en la raíz y los headers virtuales incorporados. Los adaptadores resuelven la interacción con su entorno.
+Paquete portable implementado como `@playground/c11-engine` 0.1.0 con entradas `core`, `browser` y `node`, JavaScript ESM y declaraciones TypeScript. El core no importa React, DOM, `File`, filesystem ni Worker. Recibe `{entry, files, translationUnits?}`; `files` contiene fuentes y headers virtuales, y por defecto `translationUnits` vale `[entry]`. Los includes quoted buscan junto al archivo actual y en la raíz virtual; los angle buscan en la raíz y los headers virtuales incorporados. Los adaptadores resuelven la interacción con su entorno.
 
 ```ts
 // core: síncrono; API implementada

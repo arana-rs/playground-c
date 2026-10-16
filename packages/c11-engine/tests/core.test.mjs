@@ -33,7 +33,7 @@ test('P1 executes its 42 acceptance example and publishes a truthful versioned t
   const result = terminated('int x = 6; return x * 7;', 42);
   assert.equal(result.exitCode, 42);
   assert.equal(result.rawExitStatus, 42);
-  assert.equal(ENGINE_VERSION, '0.4.0');
+  assert.equal(ENGINE_VERSION, '0.1.0');
   assert.equal(TARGET_PROFILE.id, 'x86_64-linux-lp64');
   assert.equal(TARGET_PROFILE.intBits, 32);
   assert.equal(CAPABILITIES.completeC11, false);

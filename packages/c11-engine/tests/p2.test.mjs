@@ -33,7 +33,7 @@ const runtimeError = (source, code) => {
 };
 
 test('P4 preserves P2 scalar/control coverage and publishes current capabilities', () => {
-  assert.equal(ENGINE_VERSION, '0.4.0');
+  assert.equal(ENGINE_VERSION, '0.1.0');
   assert.equal(CAPABILITIES.phase, 'P4');
   assert.equal(CAPABILITIES.completeC11, false);
   assert.equal(CAPABILITIES.multipleFiles, true);

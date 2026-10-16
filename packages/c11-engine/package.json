@@ -1,6 +1,7 @@
 {
   "name": "@playground/c11-engine",
-  "version": "0.4.0",
+  "version": "0.1.0",
+  "license": "MIT",
   "description": "Incremental C11 interpreter with an x86-64 Linux data model for browsers and Node.js",
   "type": "module",
   "sideEffects": false,
