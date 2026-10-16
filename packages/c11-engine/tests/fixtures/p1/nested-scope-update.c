@@ -1,0 +1,1 @@
+int main(void) { int x = 1; { int y = 8; { int z = 3; x += y * z; } } return x; }

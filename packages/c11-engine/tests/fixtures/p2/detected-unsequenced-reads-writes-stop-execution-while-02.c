@@ -1,0 +1,1 @@
+int main(void) { int i = 0; return (i = 1, i += 2, i); }

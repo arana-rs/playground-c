@@ -1,0 +1,1 @@
+int main(void) { int x = 0; 0 && ++x; 1 || ++x; int a = 1 ? (x = 4) : (1 / 0); int b = 0 ? (1 / 0) : (x += 3); return x + a + b; }

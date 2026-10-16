@@ -1,0 +1,1 @@
+int main(void) { float f = 1.0f; f += 0x1p-24f; return f == 1.0f; }

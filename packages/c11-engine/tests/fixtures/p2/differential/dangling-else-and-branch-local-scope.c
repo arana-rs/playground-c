@@ -1,0 +1,1 @@
+int main(void) { int x = 0; if (1) if (0) x = 99; else x = 3; if (0) x = 9; else { int x = 8; ++x; } return x; }

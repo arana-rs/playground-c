@@ -1,0 +1,1 @@
+int main(void) { unsigned char c = 255; unsigned short s = 65535; return c + 1 == 256 && s + 1 == 65536 && sizeof(c + s) == 4; }

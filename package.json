@@ -1,0 +1,29 @@
+{
+  "name": "c-playground-v2",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@11.26.0",
+  "scripts": {
+    "dev": "pnpm run build:engine && vite",
+    "build:engine": "tsc -p packages/c11-engine/tsconfig.json",
+    "build": "pnpm run build:engine && tsc --noEmit && vite build",
+    "typecheck": "pnpm run build:engine && tsc --noEmit",
+    "test": "pnpm run build:engine && pnpm --filter @playground/c11-engine test:types && node --experimental-strip-types --test tests/*.test.mjs packages/c11-engine/tests/*.test.mjs",
+    "run-c": "pnpm --silent build:engine && node --experimental-strip-types scripts/run-c.ts",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@playground/c11-engine": "workspace:*",
+    "motion": "^14.1.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.6"
+  }
+}

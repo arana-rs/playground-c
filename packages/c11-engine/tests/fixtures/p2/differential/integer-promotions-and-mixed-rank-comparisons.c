@@ -1,0 +1,1 @@
+int main(void) { unsigned char c = 255; unsigned short s = 65535; return c + s == 65790 && !(-1 < 1U) && -1L < 1U; }

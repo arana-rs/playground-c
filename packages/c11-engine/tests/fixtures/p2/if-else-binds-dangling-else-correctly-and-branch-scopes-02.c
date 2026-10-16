@@ -1,0 +1,1 @@
+int main(void) { int x = 1; if (x) { int y = 4; x += y; } else { int y = 10; x += y; } return x; }

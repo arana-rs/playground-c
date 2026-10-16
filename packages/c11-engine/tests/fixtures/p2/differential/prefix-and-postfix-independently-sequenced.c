@@ -1,0 +1,1 @@
+int main(void) { int i = 4; int a = i++; int b = ++i; int c = i--; int d = --i; return a + b + c + d + i; }

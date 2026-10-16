@@ -1,0 +1,1 @@
+int main(void) { unsigned long long x = 1ULL << 63; return x == 0x8000000000000000ULL && (x >> 63) == 1ULL && ~0ULL == 18446744073709551615ULL; }

@@ -1,0 +1,1 @@
+int main(void) { return !(-1 < 1U) && -1L < 1U && !(-1LL < 1UL) && -1 == 4294967295U; }

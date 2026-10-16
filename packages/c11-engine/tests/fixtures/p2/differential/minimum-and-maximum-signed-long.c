@@ -1,0 +1,1 @@
+int main(void) { long a = 9223372036854775807L; long b = -9223372036854775807L - 1L; return a + b; }

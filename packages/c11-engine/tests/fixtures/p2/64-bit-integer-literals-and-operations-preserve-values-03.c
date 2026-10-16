@@ -1,0 +1,1 @@
+int main(void) { return 0xffffffffffffffffULL == 18446744073709551615ULL && 01777777777777777777777ULL == 0xffffffffffffffffULL; }

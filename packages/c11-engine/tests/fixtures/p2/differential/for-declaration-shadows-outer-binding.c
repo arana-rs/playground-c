@@ -1,0 +1,1 @@
+int main(void) { int i = 99; int sum = 0; for (int i = 0; i < 6; ++i) { if (i == 2) continue; if (i == 5) break; sum += i; } return i + sum; }

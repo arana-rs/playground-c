@@ -1,0 +1,1 @@
+unsigned char next(unsigned char x) { return x + 1; } int main(void) { return next(255) == 0; }

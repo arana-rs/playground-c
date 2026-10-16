@@ -1,0 +1,1 @@
+int main(void) { goto target; { int x = 7; target: return x; } }

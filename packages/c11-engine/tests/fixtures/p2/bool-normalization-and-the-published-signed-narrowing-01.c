@@ -1,0 +1,1 @@
+int main(void) { _Bool a = -99; _Bool b = 0; _Bool c = 0.5; a = 9; return a == 1 && b == 0 && c == 1 && (_Bool)256 == 1; }

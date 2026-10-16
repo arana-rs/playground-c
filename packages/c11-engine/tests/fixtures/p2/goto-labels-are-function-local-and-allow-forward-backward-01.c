@@ -1,0 +1,1 @@
+int main(void) { int x = 1; goto next; x = 99; next: x += 2; goto done; x = 99; done: return x; }

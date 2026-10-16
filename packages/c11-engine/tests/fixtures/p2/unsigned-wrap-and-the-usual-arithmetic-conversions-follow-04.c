@@ -1,0 +1,1 @@
+int main(void) { unsigned long long x = 0xffffffffffffffffULL; x *= x; return x == 1ULL; }

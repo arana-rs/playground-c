@@ -1,0 +1,1 @@
+int sum(int n) { if (n == 0) return 0; int saved = n; return saved + sum(n - 1); } int main(void) { return sum(10); }

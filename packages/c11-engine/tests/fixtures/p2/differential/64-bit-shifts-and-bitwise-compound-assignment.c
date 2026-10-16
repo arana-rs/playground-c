@@ -1,0 +1,1 @@
+int main(void) { unsigned long long x = 1ULL << 63; x |= 3ULL; x ^= 1ULL; x &= ~0ULL; return (x >> 63) == 1 && (x & 3ULL) == 2; }

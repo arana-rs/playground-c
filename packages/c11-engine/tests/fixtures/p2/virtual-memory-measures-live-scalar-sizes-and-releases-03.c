@@ -1,0 +1,1 @@
+int main(void) { char c = 1; short s = 2; long l = 3; float f = 4.0f; double d = 5.0; return c + s + (int)l + (int)f + (int)d; }

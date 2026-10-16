@@ -1,0 +1,1 @@
+int main(void) { int x; x = 18; x += 5; x *= 3; x -= 4; x /= 5; x %= 7; +x; -x; ; return x; }

@@ -1,0 +1,1 @@
+int main(void) { return sizeof(2147483648) == 8 && sizeof(0xffffffff) == 4 && sizeof(0x100000000) == 8 && sizeof(42u) == 4 && sizeof(42l) == 8 && sizeof(42ULL) == 8; }

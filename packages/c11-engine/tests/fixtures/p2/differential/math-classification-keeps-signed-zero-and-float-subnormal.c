@@ -1,0 +1,2 @@
+#include <math.h>
+int main(void) { float z = -0.0f; float tiny = 0x1p-149f; return signbit(z) && z == 0.0f && fpclassify(tiny) == FP_SUBNORMAL && !isnormal(tiny) && isfinite(tiny) && isnan(NAN) && isinf(INFINITY); }

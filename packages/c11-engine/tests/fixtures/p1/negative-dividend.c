@@ -1,0 +1,1 @@
+int main(void) { int a = -29; int b = 6; return a / b * 10 + a % b; }

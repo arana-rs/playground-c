@@ -1,0 +1,1 @@
+_Noreturn void f(void) { for (;;) {} } int main(void) { return 0; }

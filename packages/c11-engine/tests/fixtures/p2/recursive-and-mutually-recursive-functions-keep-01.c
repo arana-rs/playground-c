@@ -1,0 +1,1 @@
+long fact(int n) { if (n <= 1) return 1; long saved = n; return saved * fact(n - 1); } int main(void) { return fact(20) == 2432902008176640000L; }

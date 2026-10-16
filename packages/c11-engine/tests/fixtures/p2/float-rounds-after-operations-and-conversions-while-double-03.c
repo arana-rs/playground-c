@@ -1,0 +1,1 @@
+int main(void) { return (int)3.9 == 3 && (int)-3.9 == -3 && (unsigned int)3.9 == 3U && (float)16777217 == 16777216.0f && (double)9007199254740993ULL == 9007199254740992.0; }

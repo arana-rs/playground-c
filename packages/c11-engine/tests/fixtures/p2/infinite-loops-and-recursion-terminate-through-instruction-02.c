@@ -1,0 +1,1 @@
+int recurse(void) { return recurse(); } int main(void) { return recurse(); }

@@ -1,0 +1,1 @@
+int main(void) { signed char c = (signed char)255; short s = (short)65535; int i = (int)4294967295U; return c == -1 && s == -1 && i == -1 && (-8 >> 2) == -2; }

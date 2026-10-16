@@ -1,0 +1,1 @@
+int define_value(void); int check_value(void); int main(void) { return define_value() == 40 && check_value() == 2; }

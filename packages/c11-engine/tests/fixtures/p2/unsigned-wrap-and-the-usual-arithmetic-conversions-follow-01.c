@@ -1,0 +1,1 @@
+int main(void) { unsigned int u = 4294967295U; u += 1U; unsigned long long v = 18446744073709551615ULL; v++; return u == 0U && v == 0ULL && 0ULL - 1ULL == 18446744073709551615ULL; }

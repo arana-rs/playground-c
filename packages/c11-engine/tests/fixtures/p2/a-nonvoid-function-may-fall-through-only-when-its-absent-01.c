@@ -1,0 +1,1 @@
+int f(void) {} int main(void) { f(); (void)f(); int x = (f(), 7); 1 ? f() : 42; 0 ? 7 : f(); return x; }

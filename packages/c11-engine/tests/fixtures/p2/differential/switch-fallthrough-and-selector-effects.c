@@ -1,0 +1,1 @@
+int main(void) { int x = 1; int sum = 0; switch (x++) { case 0: sum = 99; break; case 1: sum += 3; case 2: sum += 4; break; default: sum = 50; } return x + sum; }

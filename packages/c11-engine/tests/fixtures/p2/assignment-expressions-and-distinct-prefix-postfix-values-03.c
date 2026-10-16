@@ -1,0 +1,1 @@
+int main(void) { unsigned char c = 255; int previous = c++; return previous == 255 && c == 0; }

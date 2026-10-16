@@ -1,0 +1,1 @@
+void noop(void) { return; } int main(void) { noop(); (void)42; return 8; }

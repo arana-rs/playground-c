@@ -1,0 +1,1 @@
+int main(void) { float f = 0.1f; double d = f; return d == 0.100000001490116119384765625 && sizeof(f + 1.0) == 8; }

@@ -1,0 +1,1 @@
+int main(void) { _Bool b = 7; unsigned char c = 257; return b == 1 && c == 1 && (unsigned int)-1 == 4294967295U; }

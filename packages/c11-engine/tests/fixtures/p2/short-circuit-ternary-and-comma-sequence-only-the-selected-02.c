@@ -1,0 +1,1 @@
+int main(void) { int x = 0; int y = 1 ? (x = 4) : (1 / 0); int z = 0 ? (1 / 0) : (x += 3); return x + y + z; }

@@ -1,0 +1,1 @@
+int main(void) { int i = 4; unsigned long n = sizeof(i++); return i == 4 && n == 4 && sizeof(1 / 0) == 4; }

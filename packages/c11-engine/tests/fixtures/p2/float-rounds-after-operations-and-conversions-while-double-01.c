@@ -1,0 +1,1 @@
+int main(void) { float f = 16777217; double d = 16777217; return f == 16777216.0f && d == 16777217.0 && ((f + 1.0f) - f) == 0.0f; }

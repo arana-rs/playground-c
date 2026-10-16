@@ -1,0 +1,1 @@
+int f(int value) { value += 7; return value; } int main(void) { int value = 2; int result = f(value); return value == 2 && result == 9; }

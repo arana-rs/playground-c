@@ -1,0 +1,1 @@
+unsigned char id(unsigned char x) { return x; } _Bool truth(int x) { return x; } float rounder(double x) { return x; } int main(void) { return id(257) == 1 && truth(-4) == 1 && rounder(16777217.0) == 16777216.0f; }

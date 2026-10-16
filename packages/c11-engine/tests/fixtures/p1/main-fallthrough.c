@@ -1,0 +1,1 @@
+int main(void) { int x = 99; x *= 4; }

@@ -1,0 +1,1 @@
+int main(void) { return .5 + 1.5e1 == 15.5 && 0x1.8p+1 == 3.0 && 0X1P-2F == 0.25f && 2.f == 2.0f && sizeof(1.0f) == 4 && sizeof(1.0) == 8; }

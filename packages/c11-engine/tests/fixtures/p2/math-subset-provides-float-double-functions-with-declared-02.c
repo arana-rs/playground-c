@@ -1,0 +1,2 @@
+#include <math.h>
+int main(void) { return fabsf(-2.5f) == 2.5f && fmodf(-7.0f, 3.0f) == -1.0f && powf(2.0f, 3.0f) == 8.0f && sinf(0.0f) == 0.0f && cosf(0.0f) == 1.0f && tanf(0.0f) == 0.0f && expf(0.0f) == 1.0f && logf(1.0f) == 0.0f && floorf(-2.5f) == -3.0f && ceilf(-2.5f) == -2.0f && truncf(-2.5f) == -2.0f && fminf(2.0f, 3.0f) == 2.0f && fmaxf(2.0f, 3.0f) == 3.0f && copysignf(2.0f, -1.0f) == -2.0f; }

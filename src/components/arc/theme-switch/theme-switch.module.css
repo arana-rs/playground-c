@@ -1,0 +1,38 @@
+/* Arc UI Theme Switch, adapted to the compact px0 control. */
+.iconWrap {
+  position: relative;
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-items: center;
+}
+
+/* Reuse the compact control tokens for the source component's small reveal nudge. */
+.settled .iconWrap {
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.icon {
+  position: absolute;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+}
+
+.icon svg {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+.reveal[data-theme="dark"] .iconWrap {
+  transform: scale(1.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settled .iconWrap {
+    transition: none;
+  }
+}

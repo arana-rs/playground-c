@@ -1,0 +1,2 @@
+#include <math.h>
+int main(void) { return sqrt(81.0) == 9.0 && sqrtf(81.0f) == 9.0f && fmod(-7.0, 3.0) == -1.0 && pow(2.0, 10.0) == 1024.0 && floor(-2.5) == -3.0 && ceil(-2.5) == -2.0 && trunc(-2.5) == -2.0 && copysign(2.0, -1.0) == -2.0; }

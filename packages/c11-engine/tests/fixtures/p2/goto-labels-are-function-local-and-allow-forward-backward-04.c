@@ -1,0 +1,1 @@
+int f(void) { same: return 3; } int main(void) { same: return f(); }

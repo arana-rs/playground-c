@@ -1,0 +1,698 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { Diagnostic, RunResult } from '@playground/c11-engine/browser';
+import {
+  emptyRunDiagnosticMetrics,
+  emptyRunDiagnosticStages,
+  RUN_DIAGNOSTIC_STAGE,
+} from './diagnostics.ts';
+import type {
+  RunDiagnosticBudgets,
+  RunDiagnosticMetrics,
+  RunDiagnosticStage,
+  RunDiagnosticStages,
+  RunDiagnosticsReport,
+  RunWorkerProgress,
+} from './diagnostics.ts';
+import type { RunRequest, RunResponse, WorkerCommand } from './protocol.ts';
+import { RUN_CONFIGURATION } from './configuration.ts';
+import { formatDiagnosticLocation } from './diagnosticFormatting.ts';
+import type { RunConfiguration } from './configuration.ts';
+
+export { RUN_CONFIGURATION } from './configuration.ts';
+export type { RunConfiguration } from './configuration.ts';
+export type { RunDiagnosticsReport } from './diagnostics.ts';
+
+export type ConsoleSystemTone = 'system' | 'warning' | 'error';
+export type ConsoleOutputTone = 'program' | ConsoleSystemTone;
+
+export type ConsoleEntry =
+  | { stream: 'stdout' | 'stderr' | 'stdin'; text: string }
+  | { stream: 'system'; text: string; tone?: ConsoleSystemTone };
+
+export interface ConsoleOutputSegment {
+  tone: ConsoleOutputTone;
+  text: string;
+}
+
+export type RunnerState =
+  | { status: 'idle'; transcript: readonly ConsoleEntry[] }
+  | { status: 'running'; transcript: readonly ConsoleEntry[]; inputRequestId: number | null }
+  | { status: 'cancelled'; transcript: readonly ConsoleEntry[] }
+  | { status: 'finished'; result: RunResult; transcript: readonly ConsoleEntry[] }
+  | { status: 'error'; file: string; reason: 'start' | 'run' | 'response' | 'send'; message: string; transcript: readonly ConsoleEntry[] }
+  | { status: 'timeout'; file: string; timeoutMs: number; diagnosticsReport: RunDiagnosticsReport; transcript: readonly ConsoleEntry[] };
+
+export type ConsoleStatusTone = 'ready' | 'running' | 'waiting' | 'finished' | 'stopped' | 'cancelled' | 'error';
+
+export interface ConsoleStatus {
+  label: string;
+  tone: ConsoleStatusTone;
+}
+
+/** A visible label derived directly from the runner's current state. */
+export function getConsoleStatus(state: RunnerState): ConsoleStatus {
+  if (state.status === 'idle') return { label: 'Listo', tone: 'ready' };
+  if (state.status === 'running') {
+    return state.inputRequestId == null
+      ? { label: 'Ejecutando', tone: 'running' }
+      : { label: 'Esperando entrada', tone: 'waiting' };
+  }
+  if (state.status === 'cancelled') return { label: 'Cancelado', tone: 'cancelled' };
+  if (state.status === 'error') return { label: 'Error', tone: 'error' };
+  if (state.status === 'timeout') return { label: 'Tiempo agotado', tone: 'stopped' };
+
+  switch (state.result.kind) {
+    case 'cancelled': return { label: 'Cancelado', tone: 'cancelled' };
+    case 'limit': return { label: 'Detenido', tone: 'stopped' };
+    case 'prepare-error':
+    case 'read-error':
+    case 'runtime-error': return { label: 'Error', tone: 'error' };
+    case 'terminated': return { label: 'Finalizado', tone: 'finished' };
+  }
+}
+
+interface ActiveRun {
+  jobId: number;
+  worker: Worker;
+  startedAt: number;
+  fileName: string;
+  fileSizeBytes: number;
+  timeout: ReturnType<typeof setTimeout> | undefined;
+  timeoutStartedAt: number | null;
+  timeoutRemainingMs: number;
+  watchdogActiveElapsedMs: number;
+  inputRequestId: number | null;
+  lastRequestId: number;
+  lastOutputSequence: number;
+  inputEnded: boolean;
+  decoders: Record<'stdout' | 'stderr', TextDecoder>;
+  stages: RunDiagnosticStages;
+  metrics: RunDiagnosticMetrics;
+  lastStage: RunDiagnosticStage;
+  lastStageObservedAt: number | null;
+  sourceLineCount: number | null;
+  dispatchStartedAt: number | null;
+  firstWorkerEventAt: number | null;
+}
+
+function createWorker(): Worker {
+  return new Worker(new URL('./engine.worker.ts', import.meta.url), { type: 'module' });
+}
+
+function closeRun(run: ActiveRun) {
+  if (run.timeout !== undefined) clearTimeout(run.timeout);
+  run.worker.onmessage = null;
+  run.worker.onerror = null;
+  run.worker.onmessageerror = null;
+  run.worker.terminate();
+}
+
+function appendEntry(transcript: readonly ConsoleEntry[], entry: ConsoleEntry): readonly ConsoleEntry[] {
+  const previous = transcript.at(-1);
+  if (previous?.stream === entry.stream && entry.stream !== 'stdin' && entry.stream !== 'system') {
+    return [...transcript.slice(0, -1), { stream: entry.stream, text: previous.text + entry.text }];
+  }
+  return [...transcript, entry];
+}
+
+function appendOutputSegment(
+  segments: ConsoleOutputSegment[],
+  text: string,
+  tone: ConsoleOutputTone,
+) {
+  if (!text) return;
+  const previous = segments.at(-1);
+  if (previous?.tone === tone) previous.text += text;
+  else segments.push({ tone, text });
+}
+
+function appendOutputSection(
+  segments: ConsoleOutputSegment[],
+  next: { tone: ConsoleOutputTone; text: string },
+) {
+  if (!next.text) return;
+  const previous = segments.at(-1);
+  const separator = previous && !previous.text.endsWith('\n') ? '\n' : '';
+  appendOutputSegment(segments, `${separator}${next.text}`, next.tone);
+}
+
+function formatTranscriptSegments(transcript: readonly ConsoleEntry[]): ConsoleOutputSegment[] {
+  const segments: ConsoleOutputSegment[] = [];
+  for (const entry of transcript) {
+    if (entry.stream === 'stderr') {
+      appendOutputSection(segments, { tone: 'program', text: `stderr:\n${entry.text}` });
+    } else {
+      const tone = entry.stream === 'system' ? entry.tone ?? 'system' : 'program';
+      appendOutputSegment(segments, entry.text, tone);
+    }
+  }
+  return segments;
+}
+
+function addSystemEntry(
+  transcript: readonly ConsoleEntry[],
+  message: string,
+  tone: ConsoleSystemTone = 'system',
+): readonly ConsoleEntry[] {
+  const current = transcript.at(-1)?.text ?? '';
+  const separator = transcript.length > 0 && current.length > 0 && !current.endsWith('\n') ? '\n' : '';
+  return appendEntry(transcript, { stream: 'system', text: `${separator}${message}`, tone });
+}
+
+function diagnosticBudgets(configuration: RunConfiguration): RunDiagnosticBudgets {
+  const prepare = configuration.options.prepare?.limits;
+  const execute = configuration.options.execute?.limits;
+  return {
+    uiWatchdogMs: configuration.timeoutMs,
+    prepare: {
+      maxSourceChars: prepare?.maxSourceChars ?? null,
+      maxTokens: prepare?.maxTokens ?? null,
+      maxPreprocessSteps: prepare?.maxPreprocessSteps ?? null,
+      maxDepth: prepare?.maxDepth ?? null,
+    },
+    execute: {
+      maxInstructions: execute?.maxInstructions ?? null,
+      maxMemoryBytes: execute?.maxMemoryBytes ?? null,
+      maxIOBytes: execute?.maxIOBytes ?? null,
+      maxDepth: execute?.maxDepth ?? null,
+    },
+  };
+}
+
+function errorText(file: string, reason: 'start' | 'run' | 'response' | 'send', message: string): string {
+  const quotedFile = `«${file}»`;
+  if (reason === 'start') return `No se pudo iniciar el motor de ejecución para ${quotedFile}: ${message}`;
+  if (reason === 'response') return `El motor terminó, pero no se pudo leer su respuesta para ${quotedFile}: ${message}`;
+  if (reason === 'send') return `No se pudo enviar ${quotedFile} al motor de ejecución: ${message}`;
+  return `El motor de ejecución falló mientras procesaba ${quotedFile}: ${message}`;
+}
+
+export class RunnerController {
+  private active: ActiveRun | null = null;
+  private nextJobId = 0;
+  private currentState: RunnerState = { status: 'idle', transcript: [] };
+  private readonly listeners = new Set<(state: RunnerState) => void>();
+  private readonly configuration: RunConfiguration;
+  private readonly workerFactory: () => Worker;
+
+  constructor(
+    configuration: RunConfiguration = RUN_CONFIGURATION,
+    workerFactory: () => Worker = createWorker,
+  ) {
+    this.configuration = configuration;
+    this.workerFactory = workerFactory;
+  }
+
+  get state(): RunnerState { return this.currentState; }
+
+  subscribe(listener: (state: RunnerState) => void): () => void {
+    this.listeners.add(listener);
+    listener(this.currentState);
+    return () => this.listeners.delete(listener);
+  }
+
+  private publish(state: RunnerState) {
+    this.currentState = state;
+    for (const listener of this.listeners) listener(state);
+  }
+
+  private append(current: ActiveRun, entry: ConsoleEntry) {
+    if (this.active !== current) return;
+    const state = this.currentState;
+    if (state.status !== 'running') return;
+    this.publish({ ...state, transcript: appendEntry(state.transcript, entry) });
+  }
+
+  private flushDecoders(current: ActiveRun): readonly ConsoleEntry[] {
+    let transcript = this.currentState.transcript;
+    for (const stream of ['stdout', 'stderr'] as const) {
+      const text = current.decoders[stream].decode();
+      if (text) transcript = appendEntry(transcript, { stream, text });
+    }
+    return transcript;
+  }
+
+  private finish(current: ActiveRun, state: RunnerState) {
+    if (this.active !== current) return;
+    this.active = null;
+    closeRun(current);
+    this.publish(state);
+  }
+
+  private timeout(current: ActiveRun) {
+    const diagnosticsReport = this.timeoutReport(current);
+    const transcript = addSystemEntry(
+      this.flushDecoders(current),
+      `Se agotó el tiempo máximo (${formatDuration(this.configuration.timeoutMs)}) mientras se iniciaba, leía, preparaba o ejecutaba «${current.fileName}»; se detuvo la ejecución. Revisa código lento, como bucles o recursión; un programa válido también puede necesitar más tiempo.`,
+      'warning',
+    );
+    this.finish(current, {
+      status: 'timeout',
+      file: current.fileName,
+      timeoutMs: this.configuration.timeoutMs,
+      diagnosticsReport,
+      transcript,
+    });
+  }
+
+  private armWatchdog(current: ActiveRun) {
+    if (current.timeout !== undefined) clearTimeout(current.timeout);
+    current.timeoutStartedAt = performance.now();
+    current.timeout = setTimeout(() => {
+      if (this.active !== current || current.inputRequestId !== null) return;
+      const elapsed = performance.now() - (current.timeoutStartedAt ?? performance.now());
+      current.watchdogActiveElapsedMs += elapsed;
+      current.timeoutRemainingMs = Math.max(0, current.timeoutRemainingMs - elapsed);
+      current.timeout = undefined;
+      current.timeoutStartedAt = null;
+      if (current.timeoutRemainingMs <= 0) this.timeout(current);
+      else this.armWatchdog(current);
+    }, Math.max(0, current.timeoutRemainingMs));
+  }
+
+  private pauseWatchdog(current: ActiveRun): boolean {
+    if (current.timeout !== undefined) clearTimeout(current.timeout);
+    current.timeout = undefined;
+    if (current.timeoutStartedAt !== null) {
+      const elapsed = performance.now() - current.timeoutStartedAt;
+      current.watchdogActiveElapsedMs += elapsed;
+      current.timeoutRemainingMs = Math.max(0, current.timeoutRemainingMs - elapsed);
+      current.timeoutStartedAt = null;
+    }
+    if (current.timeoutRemainingMs <= 0) {
+      this.timeout(current);
+      return false;
+    }
+    return true;
+  }
+
+  private timeoutReport(current: ActiveRun): RunDiagnosticsReport {
+    const now = performance.now();
+    const lastStageObservedMs = current.lastStageObservedAt === null
+      ? null
+      : Math.max(0, now - current.lastStageObservedAt);
+    return {
+      schemaVersion: 1,
+      outcome: 'timeout',
+      reason: 'ui-watchdog',
+      file: {
+        name: current.fileName,
+        sizeBytes: current.fileSizeBytes,
+        lineCount: current.sourceLineCount,
+      },
+      budgets: diagnosticBudgets(this.configuration),
+      stages: {
+        ...current.stages,
+        watchdogActiveMs: this.watchdogActiveMs(current, now),
+        mainTotalObservedMs: Math.max(0, now - current.startedAt),
+        lastStageObservedMs,
+      },
+      lastStage: current.lastStage,
+      metrics: { ...current.metrics },
+      diagnostic: {
+        code: 'RUN_TIMEOUT_UI',
+        message: `El watchdog de interfaz detuvo el Worker tras ${formatDuration(this.configuration.timeoutMs)} de tiempo activo; la espera de stdin queda excluida del presupuesto.`,
+      },
+    };
+  }
+
+  private watchdogActiveMs(current: ActiveRun, now = performance.now()): number {
+    const activeSegmentMs = current.timeoutStartedAt === null ? 0 : Math.max(0, now - current.timeoutStartedAt);
+    return current.watchdogActiveElapsedMs + activeSegmentMs;
+  }
+
+  private observeWorkerEvent(current: ActiveRun, now = performance.now()) {
+    if (current.firstWorkerEventAt !== null) return;
+    current.firstWorkerEventAt = now;
+    if (current.dispatchStartedAt !== null) {
+      current.stages.dispatchToFirstWorkerEventMs = Math.max(0, now - current.dispatchStartedAt);
+    }
+  }
+
+  private setObservedStage(current: ActiveRun, stage: RunDiagnosticStage, at = performance.now()) {
+    current.lastStage = stage;
+    current.lastStageObservedAt = at;
+  }
+
+  private updateWorkerProgress(current: ActiveRun, progress: RunWorkerProgress) {
+    this.setObservedStage(current, progress.stage);
+    if (progress.sourceLineCount !== undefined) current.sourceLineCount = progress.sourceLineCount;
+    if (progress.stages) Object.assign(current.stages, progress.stages);
+    if (progress.metrics) {
+      for (const [key, value] of Object.entries(progress.metrics) as Array<[keyof RunDiagnosticMetrics, number | null | undefined]>) {
+        // null means this phase has not produced a snapshot. Keep any earlier
+        // observation; each counter is a snapshot, never a delta to add.
+        if (value !== null && value !== undefined) current.metrics[key] = value;
+      }
+    }
+  }
+
+  private fail(current: ActiveRun, reason: 'start' | 'run' | 'response' | 'send', message: string) {
+    const transcript = addSystemEntry(this.flushDecoders(current), errorText(current.fileName, reason, message), 'error');
+    this.finish(current, { status: 'error', file: current.fileName, reason, message, transcript });
+  }
+
+  run(file: File): void {
+    if (this.active) return;
+    const startedAt = performance.now();
+    const jobId = ++this.nextJobId;
+    let worker: Worker;
+    const workerCreateStartedAt = performance.now();
+    let workerCreateMs: number;
+    try {
+      worker = this.workerFactory();
+      workerCreateMs = performance.now() - workerCreateStartedAt;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'El navegador no pudo iniciar el motor de ejecución.';
+      this.publish({
+        status: 'error', file: file.name, reason: 'start', message,
+        transcript: [{ stream: 'system', text: errorText(file.name, 'start', message), tone: 'error' }],
+      });
+      return;
+    }
+
+    const current: ActiveRun = {
+      jobId,
+      worker,
+      startedAt,
+      fileName: file.name,
+      fileSizeBytes: file.size,
+      timeout: undefined,
+      timeoutStartedAt: null,
+      timeoutRemainingMs: this.configuration.timeoutMs,
+      watchdogActiveElapsedMs: 0,
+      inputRequestId: null,
+      lastRequestId: 0,
+      lastOutputSequence: 0,
+      inputEnded: false,
+      decoders: { stdout: new TextDecoder(), stderr: new TextDecoder() },
+      stages: { ...emptyRunDiagnosticStages(), workerCreateMs },
+      metrics: emptyRunDiagnosticMetrics(),
+      lastStage: RUN_DIAGNOSTIC_STAGE.workerStartup,
+      lastStageObservedAt: null,
+      sourceLineCount: null,
+      dispatchStartedAt: null,
+      firstWorkerEventAt: null,
+    };
+    this.active = current;
+    this.publish({ status: 'running', transcript: [], inputRequestId: null });
+
+    worker.onmessage = (event: MessageEvent<RunResponse>) => this.onWorkerMessage(current, event.data);
+    worker.onerror = event => {
+      this.observeWorkerEvent(current);
+      event.preventDefault();
+      this.fail(current, 'run', event.message || 'El motor de ejecución terminó inesperadamente sin devolver un diagnóstico.');
+    };
+    worker.onmessageerror = () => {
+      this.observeWorkerEvent(current);
+      this.fail(current, 'response', 'El navegador no pudo leer la respuesta del motor de ejecución.');
+    };
+
+    this.armWatchdog(current);
+    const request: RunRequest = { type: 'run', jobId, file, options: this.configuration.options };
+    const dispatchStartedAt = performance.now();
+    current.dispatchStartedAt = dispatchStartedAt;
+    current.lastStageObservedAt = dispatchStartedAt;
+    try {
+      worker.postMessage(request);
+      current.stages.runPostMessageMs = Math.max(0, performance.now() - dispatchStartedAt);
+    } catch (error) {
+      this.fail(current, 'send', error instanceof Error ? error.message : 'El navegador no pudo enviar el archivo al motor.');
+    }
+  }
+
+  private onWorkerMessage(current: ActiveRun, response: RunResponse) {
+    if (this.active !== current || response.jobId !== current.jobId) return;
+    this.observeWorkerEvent(current);
+    if (response.type === 'output') {
+      if (response.sequence <= current.lastOutputSequence) return;
+      current.lastOutputSequence = response.sequence;
+      const text = current.decoders[response.stream].decode(response.chunk, { stream: true });
+      if (text) this.append(current, { stream: response.stream, text });
+      return;
+    }
+    if (response.type === 'progress') {
+      this.updateWorkerProgress(current, response.progress);
+      return;
+    }
+    if (response.type === 'input-needed') {
+      if (current.inputEnded || response.requestId <= current.lastRequestId || current.inputRequestId !== null) return;
+      this.updateWorkerProgress(current, response.progress);
+      current.lastRequestId = response.requestId;
+      if (!this.pauseWatchdog(current)) return;
+      current.inputRequestId = response.requestId;
+      this.publish({ status: 'running', transcript: this.currentState.transcript, inputRequestId: response.requestId });
+      return;
+    }
+    if (response.type === 'result') {
+      const transcript = this.flushDecoders(current);
+      const summary = formatResultSummary(response.result);
+      const completeTranscript = summary ? addSystemEntry(transcript, summary.text, summary.tone) : transcript;
+      this.finish(current, { status: 'finished', result: response.result, transcript: completeTranscript });
+      return;
+    }
+    this.fail(current, response.phase === 'startup' ? 'start' : 'run', response.message);
+  }
+
+  sendStdinLine(line: string): boolean {
+    const current = this.active;
+    const requestId = current?.inputRequestId;
+    if (!current || requestId === null || requestId === undefined || current.inputEnded) return false;
+    const bytes = new TextEncoder().encode(`${line}\n`);
+    current.inputRequestId = null;
+    try {
+      const command: WorkerCommand = { type: 'stdin', jobId: current.jobId, requestId, bytes };
+      this.setObservedStage(current, RUN_DIAGNOSTIC_STAGE.stdinDispatch);
+      current.worker.postMessage(command);
+    } catch (error) {
+      this.fail(current, 'send', error instanceof Error ? error.message : 'El navegador no pudo enviar la entrada al motor.');
+      return false;
+    }
+    const state = this.currentState;
+    if (state.status === 'running') {
+      this.publish({
+        status: 'running',
+        transcript: appendEntry(state.transcript, { stream: 'stdin', text: `${line}\n` }),
+        inputRequestId: null,
+      });
+    }
+    this.armWatchdog(current);
+    return true;
+  }
+
+  sendStdinEOF(): boolean {
+    const current = this.active;
+    const requestId = current?.inputRequestId;
+    if (!current || requestId === null || requestId === undefined || current.inputEnded) return false;
+    current.inputRequestId = null;
+    current.inputEnded = true;
+    try {
+      const command: WorkerCommand = { type: 'stdin-eof', jobId: current.jobId, requestId };
+      this.setObservedStage(current, RUN_DIAGNOSTIC_STAGE.stdinDispatch);
+      current.worker.postMessage(command);
+    } catch (error) {
+      this.fail(current, 'send', error instanceof Error ? error.message : 'El navegador no pudo enviar el fin de entrada al motor.');
+      return false;
+    }
+    const state = this.currentState;
+    if (state.status === 'running') {
+      this.publish({
+        status: 'running',
+        transcript: appendEntry(state.transcript, { stream: 'system', text: '[EOF]\n' }),
+        inputRequestId: null,
+      });
+    }
+    this.armWatchdog(current);
+    return true;
+  }
+
+  stop(): void {
+    const current = this.active;
+    if (!current) return;
+    const transcript = addSystemEntry(this.flushDecoders(current), 'Ejecución cancelada por el usuario.', 'warning');
+    this.finish(current, { status: 'cancelled', transcript });
+  }
+
+  dispose(): void {
+    const current = this.active;
+    if (!current) return;
+    this.active = null;
+    closeRun(current);
+  }
+}
+
+export function useRunner(configuration: RunConfiguration = RUN_CONFIGURATION) {
+  const controller = useRef<RunnerController | null>(null);
+  if (!controller.current) controller.current = new RunnerController(configuration);
+  const runner = controller.current;
+  const [state, setState] = useState<RunnerState>(runner.state);
+
+  useEffect(() => {
+    setState(runner.state);
+    return runner.subscribe(setState);
+  }, [runner]);
+  useEffect(() => () => runner.dispose(), [runner]);
+
+  const run = useCallback((file: File) => runner.run(file), [runner]);
+  const stop = useCallback(() => runner.stop(), [runner]);
+  const sendStdinLine = useCallback((line: string) => runner.sendStdinLine(line), [runner]);
+  const sendStdinEOF = useCallback(() => runner.sendStdinEOF(), [runner]);
+
+  return { state, run, stop, sendStdinLine, sendStdinEOF, isRunning: state.status === 'running' };
+}
+
+function formatDiagnostic(item: Diagnostic) {
+  return `${formatDiagnosticLocation(item)}: ${item.message}`;
+}
+
+function formatLocation(item: Diagnostic) {
+  return formatDiagnosticLocation(item);
+}
+
+function appendConsoleSection(current: string, next: string): string {
+  if (!next) return current;
+  if (!current) return next;
+  return `${current}${current.endsWith('\n') ? '' : '\n'}${next}`;
+}
+
+function formatOutputSegments(result: RunResult): ConsoleOutputSegment[] {
+  const segments: ConsoleOutputSegment[] = [];
+  if ('stdout' in result) appendOutputSection(segments, { tone: 'program', text: new TextDecoder().decode(result.stdout) });
+  if ('stderr' in result) {
+    const stderr = new TextDecoder().decode(result.stderr);
+    if (stderr) appendOutputSection(segments, { tone: 'program', text: `stderr:\n${stderr}` });
+  }
+  return segments;
+}
+
+type LimitRunResult = Extract<RunResult, { kind: 'limit' }>;
+type LimitResource = LimitRunResult['resource'];
+
+const limitDescriptions: Record<LimitResource, { label: string; unit: string; reason: string }> = {
+  maxSourceChars: {
+    label: 'tamaño del código fuente',
+    unit: 'caracteres',
+    reason: 'Este tope mantiene acotada la lectura y preparación de archivos grandes.',
+  },
+  maxTokens: {
+    label: 'tamaño del código analizado',
+    unit: 'tokens',
+    reason: 'Este tope mantiene acotado el análisis de programas grandes.',
+  },
+  maxPreprocessSteps: {
+    label: 'trabajo del preprocesador',
+    unit: 'pasos',
+    reason: 'Una expansión grande de macros o archivos incluidos puede alcanzar este tope.',
+  },
+  maxDepth: {
+    label: 'profundidad de anidamiento',
+    unit: 'niveles',
+    reason: 'Revisa expresiones, bloques o llamadas muy anidadas; esto no identifica por sí solo la causa.',
+  },
+  maxInstructions: {
+    label: 'pasos de ejecución',
+    unit: 'pasos',
+    reason: 'Revisa bucles o recursión extensos; un cálculo válido también puede superar este presupuesto.',
+  },
+  maxMemoryBytes: {
+    label: 'memoria del programa',
+    unit: 'bytes',
+    reason: 'El presupuesto protege el playground de datos u objetos de gran tamaño.',
+  },
+  maxIOBytes: {
+    label: 'datos de entrada y salida',
+    unit: 'bytes',
+    reason: 'El presupuesto cubre los datos que el programa puede leer y escribir.',
+  },
+};
+
+function formatCount(value: number) {
+  return new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatDuration(milliseconds: number) {
+  const seconds = milliseconds / 1_000;
+  return Number.isInteger(seconds) ? `${formatCount(seconds)} s` : `${formatCount(milliseconds)} ms`;
+}
+
+function limitUsage(result: LimitRunResult): number | undefined {
+  switch (result.resource) {
+    case 'maxSourceChars': return result.metrics.sourceChars;
+    case 'maxTokens': return result.metrics.tokenCount;
+    case 'maxPreprocessSteps': return result.metrics.preprocessSteps;
+    case 'maxInstructions': return result.metrics.instructionCount;
+    default: return undefined;
+  }
+}
+
+function formatLimit(result: LimitRunResult) {
+  const description = limitDescriptions[result.resource];
+  const stage = result.stage === 'prepare' ? 'La preparación se detuvo' : 'La ejecución se detuvo';
+  const usage = limitUsage(result);
+  const counts = usage === undefined || usage <= result.limit
+    ? `${formatCount(result.limit)} ${description.unit} permitidos`
+    : `${formatCount(result.limit)} ${description.unit} permitidos; se contabilizaron ${formatCount(usage)}`;
+  const locations = result.diagnostics.map(formatLocation).join('\n');
+  return appendConsoleSection(
+    `${stage}: se alcanzó el límite de ${description.label} (${counts}). ${description.reason}`,
+    locations,
+  );
+}
+
+interface ConsoleSystemMessage {
+  tone: ConsoleSystemTone;
+  text: string;
+}
+
+function formatResultSummary(result: RunResult): ConsoleSystemMessage {
+  if (result.kind === 'terminated') {
+    return { tone: 'system', text: `exit code: ${result.exitCode}` };
+  }
+  if (result.kind === 'cancelled') {
+    return { tone: 'warning', text: `La ejecución se canceló durante la etapa de ${result.stage}.` };
+  }
+  if (result.kind === 'limit') {
+    return { tone: 'warning', text: formatLimit(result) };
+  }
+  if (result.kind === 'runtime-error') {
+    return {
+      tone: 'error',
+      text: appendConsoleSection('Error durante la ejecución:', result.diagnostics.map(formatDiagnostic).join('\n')),
+    };
+  }
+  if (result.kind === 'prepare-error') {
+    return {
+      tone: 'error',
+      text: appendConsoleSection('No se pudo preparar el programa:', result.diagnostics.map(formatDiagnostic).join('\n')),
+    };
+  }
+  return {
+    tone: 'error',
+    text: appendConsoleSection('No se pudo leer el archivo para ejecutar el programa:', result.diagnostics.map(formatDiagnostic).join('\n')),
+  };
+}
+
+export function formatConsoleSegments(state: RunnerState): readonly ConsoleOutputSegment[] {
+  if (state.status === 'idle') return [];
+  const transcript = 'transcript' in state ? state.transcript : undefined;
+  if (transcript?.length) return formatTranscriptSegments(transcript);
+  if (state.status === 'running') return [];
+  if (state.status === 'cancelled') return [{ tone: 'warning', text: 'Ejecución cancelada por el usuario.' }];
+  if (state.status === 'error') {
+    return [{ tone: 'error', text: errorText(state.file, state.reason, state.message) }];
+  }
+  if (state.status === 'timeout') {
+    return [{
+      tone: 'warning',
+      text: `Se agotó el tiempo máximo (${formatDuration(state.timeoutMs)}) mientras se iniciaba, leía, preparaba o ejecutaba «${state.file}»; se detuvo la ejecución. Revisa código lento, como bucles o recursión; un programa válido también puede necesitar más tiempo.`,
+    }];
+  }
+  const segments = formatOutputSegments(state.result);
+  const summary = formatResultSummary(state.result);
+  appendOutputSection(segments, summary);
+  return segments;
+}
+
+export function formatConsole(state: RunnerState): string {
+  return formatConsoleSegments(state).map(segment => segment.text).join('');
+}

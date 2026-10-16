@@ -1,0 +1,1 @@
+int main(void) { int sum = 0; for (int i = 0; i < 4; ++i) { switch (i) { case 1: continue; case 2: break; default: sum += 10; } sum++; } return sum; }

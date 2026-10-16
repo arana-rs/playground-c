@@ -1,0 +1,1 @@
+int main(void) { int x = 0; again: ++x; if (x < 5) goto again; { int y = 2; x += y; goto done; } done: return x; }

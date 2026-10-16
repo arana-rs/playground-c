@@ -1,0 +1,1 @@
+int main(void) { float f = 0x1.8p+1f; double d = .5e1; return f == 3.0f && d == 5.0 && (int)-3.75 == -3 && sizeof(f + d) == 8; }

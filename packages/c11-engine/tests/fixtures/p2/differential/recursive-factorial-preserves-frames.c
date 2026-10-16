@@ -1,0 +1,1 @@
+long factorial(int n) { if (n <= 1) return 1; long saved = n; return saved * factorial(n - 1); } int main(void) { return factorial(20) == 2432902008176640000L; }

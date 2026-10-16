@@ -1,0 +1,1 @@
+int main(void) { int x = 0; switch (9) { case 1: x = 99; break; default: x = 4; case 2: x += 3; } return x; }

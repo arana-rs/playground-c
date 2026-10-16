@@ -1,0 +1,1 @@
+int twice(int); int main(void) { return twice(21); } int twice(int value) { return value * 2; }

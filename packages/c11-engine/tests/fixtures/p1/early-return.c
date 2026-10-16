@@ -1,0 +1,1 @@
+int main(void) { { return 258; } int x; x / 0; }

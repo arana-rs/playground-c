@@ -1,0 +1,27 @@
+{
+  "name": "@playground/c11-engine",
+  "version": "0.4.0",
+  "description": "Incremental C11 interpreter with an x86-64 Linux data model for browsers and Node.js",
+  "type": "module",
+  "sideEffects": false,
+  "files": ["dist", "README.md"],
+  "exports": {
+    ".": { "types": "./dist/core/index.d.ts", "import": "./dist/core/index.js" },
+    "./core": { "types": "./dist/core/index.d.ts", "import": "./dist/core/index.js" },
+    "./browser": { "types": "./dist/browser.d.ts", "import": "./dist/browser.js" },
+    "./node": { "types": "./dist/node.d.ts", "import": "./dist/node.js" },
+    "./syntax": { "types": "./dist/syntax.d.ts", "import": "./dist/syntax.js" }
+  },
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "pnpm run build && pnpm run test:types",
+    "test:types": "tsc -p tests/types/tsconfig.core.json && tsc -p tests/types/tsconfig.adapters.json",
+    "test": "pnpm run build && pnpm run test:types && node --test tests/*.test.mjs",
+    "prepack": "pnpm run build"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "typescript": "5.9.3"
+  }
+}

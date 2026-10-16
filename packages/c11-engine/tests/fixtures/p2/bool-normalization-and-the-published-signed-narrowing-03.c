@@ -1,0 +1,1 @@
+int main(void) { char c = (char)128; return c == -128 && sizeof c == 1; }

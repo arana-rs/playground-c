@@ -1,0 +1,1 @@
+int main(void) { int x = 0; int y = 0; int z = (x = y = 5); z += (x += 2); return x == 7 && y == 5 && z == 12; }

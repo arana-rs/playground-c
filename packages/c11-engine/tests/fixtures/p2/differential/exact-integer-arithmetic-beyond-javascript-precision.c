@@ -1,0 +1,1 @@
+int main(void) { unsigned long long x = 9007199254740993ULL; return x - 9007199254740992ULL == 1ULL && x / 3ULL == 3002399751580331ULL; }

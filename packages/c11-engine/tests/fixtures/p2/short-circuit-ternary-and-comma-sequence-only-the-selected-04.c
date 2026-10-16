@@ -1,0 +1,1 @@
+int main(void) { return (1 ? -1 : 1U) == 4294967295U && sizeof(1 ? 1.0f : 2.0) == 8; }

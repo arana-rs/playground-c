@@ -1,0 +1,1 @@
+int add(int a, int b) { return a + b; } int main(void) { int i = 0; return add(i++, i); }
