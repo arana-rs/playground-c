@@ -1632,7 +1632,7 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
     stop,
   } = useMemoryViewer(source);
   const hasStdioInclude = useMemo(() => hasDirectStdioInclude(frozenSource), [frozenSource]);
-  const [ioPreference, setIoPreference] = useState(true);
+  const [ioPreference, setIoPreference] = useState(false);
   const showIoConsole = hasStdioInclude && ioPreference;
   useEffect(() => {
     setStdinInteractiveEnabled(showIoConsole);
