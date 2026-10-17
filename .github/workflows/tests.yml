@@ -24,5 +24,11 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Show native oracle toolchain
+        run: |
+          node --version
+          pnpm --version
+          gcc --version
+          clang --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm test

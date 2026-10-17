@@ -47,6 +47,7 @@
 - Pruebas: pnpm test
 - Compilación y TypeScript: pnpm build
 - Elige las comprobaciones según el cambio.
+- Antes de crear un commit que añada o modifique fixtures u oráculos nativos P1–P5, ejecuta `pnpm test:ci`; exige GCC y Clang y prueba la suite en Ubuntu 24. Compara sus versiones impresas con CI, porque `ubuntu-24.04` no fija todas las versiones de las herramientas.
 - Para cambios del editor, comprueba edición, deshacer y rehacer.
 - Para cambios de ejecución, comprueba Run, Stop y diagnósticos.
 - Completa las compilaciones antes de probar en navegador:

@@ -11,6 +11,7 @@
     "build": "pnpm run build:engine && tsc --noEmit && vite build",
     "typecheck": "pnpm run build:engine && tsc --noEmit",
     "test": "pnpm run build:engine && pnpm --filter @playground/c11-engine test:types && node --experimental-strip-types --test tests/*.test.mjs packages/c11-engine/tests/*.test.mjs",
+    "test:ci": "bash scripts/test-ci-ubuntu24.sh",
     "run-c": "pnpm --silent build:engine && node --experimental-strip-types scripts/run-c.ts",
     "preview": "vite preview"
   },

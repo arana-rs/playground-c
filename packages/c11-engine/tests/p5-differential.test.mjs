@@ -7,6 +7,14 @@ import test from 'node:test';
 import { execute, prepare } from '../dist/core/index.js';
 import { decodeBytes, fixtureSourceFor, writeNativeSource } from './p4-test-helpers.mjs';
 
+// Under -pedantic-errors, Clang 18 still makes -Wstrict-prototypes fatal here.
+// Keep its C23 deprecation warning visible for the intentionally old-style C11 fixtures.
+const c11NoPrototypeClangFlags = [
+  '-Wno-strict-prototypes',
+  '-Wdeprecated-non-prototype',
+  '-Wno-error=deprecated-non-prototype',
+];
+
 const fixtures = [
   { name: 'generic selection does not evaluate its control or unselected association', files: ['generic-selection.c'], expected: 1 },
   { name: 'generic selection preserves the selected lvalue', files: ['generic-lvalue.c'], expected: 1 },
@@ -19,7 +27,12 @@ const fixtures = [
   { name: 'typedef aliases compose with arrays and function pointers', files: ['typedef-declarators.c'], expected: 1 },
   { name: 'qualifiers, prototype arguments and default argument promotions', files: ['qualifiers-promotions.c'], expected: 1 },
   { name: 'array parameter static bounds and adjusted pointer qualifiers', files: ['array-parameter-modifiers.c'], expected: 1 },
-  { name: 'old-style no-prototype calls and variadic promotions', files: ['prototype-default-promotions.c'], expected: 1 },
+  {
+    name: 'old-style no-prototype calls and variadic promotions',
+    files: ['prototype-default-promotions.c'],
+    expected: 1,
+    clangFlags: c11NoPrototypeClangFlags,
+  },
   { name: 'storage duration, byte representation and effective type', files: ['duration-effective-type.c'], expected: 1 },
   { name: 'thread-local storage in the single-thread profile', files: ['thread-local.c'], expected: 1 },
   {
@@ -79,6 +92,7 @@ const fixtures = [
     name: 'compatible typedefs and prototype composites use C11 defaults',
     files: ['linkage-composite.c'],
     expected: 1,
+    clangFlags: c11NoPrototypeClangFlags,
   },
 ];
 
@@ -127,10 +141,9 @@ for (const compiler of ['gcc', 'clang']) {
             .map(({ name }) => name);
           const compilation = spawnSync(compiler, [
             '-std=c11', '-pedantic-errors',
-            // Clang has begun diagnosing C11's valid but obsolescent no-prototype
-            // declarations as errors. Keep those C11 cases as warnings for this
-            // differential suite; retain strict diagnostics for other constructs.
-            ...(compiler === 'clang' ? ['-Werror=newline-eof', '-Wno-error=strict-prototypes', '-Wno-error=deprecated-non-prototype'] : []),
+            ...(compiler === 'clang'
+              ? ['-Werror=newline-eof', '-Werror=strict-prototypes', ...(fixture.clangFlags ?? [])]
+              : []),
             ...sourcePaths, '-o', executable,
           ], { cwd: directory, encoding: 'utf8', timeout: 10_000 });
           assert.ifError(compilation.error);
