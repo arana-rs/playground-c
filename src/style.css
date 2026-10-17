@@ -1,4 +1,4 @@
-/* Preserve px0 GitHub Dark by default; the Light selector below overrides the same tokens. */
+/* Apply shared GitHub Dark roles by default; GitHub Light overrides them. See ../docs/STYLE.md. */
 :root {
   color-scheme: dark;
   --bg: #0d1117;
@@ -275,7 +275,7 @@ body,
 }
 
 .run-button {
-  /* Arc tokens scoped to this control, using the compact px0 palette. */
+  /* Arc Button tokens adapt the shared compact UI roles. See ../docs/STYLE.md. */
   --foreground: var(--fg);
   --surface: var(--bg);
   --surface-muted: var(--bg3);

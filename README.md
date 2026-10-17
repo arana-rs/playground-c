@@ -8,6 +8,10 @@ pnpm dev --port 5173
 pnpm build
 ```
 
+## Diseño de interfaz
+
+La guía normativa de la UI condensada propia está en [STYLE.md](docs/STYLE.md).
+
 ## Créditos
 
 Los componentes Button y Theme Switch y los presets de movimiento se adaptaron de [Arc UI](https://uiarc.dev), de Elia Kuratli. [Licencia MIT](public/licenses/arc-ui.txt) (en el sitio publicado: `/licenses/arc-ui.txt`).

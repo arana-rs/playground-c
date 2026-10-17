@@ -25,8 +25,8 @@
 
 ## Editor y diseño
 
-- Sigue docs/px0-style-reference.md para cambios visuales.
-- Conserva el estilo compacto px0; admite temas GitHub Dark y GitHub Light, con la sintaxis correspondiente y la preferencia persistida.
+- Sigue docs/STYLE.md para cambios visuales y conserva la UI condensada propia.
+- Admite temas GitHub Dark y GitHub Light, con la sintaxis correspondiente y la preferencia persistida.
 - Reutiliza el Button de Arc para Run/Stop.
 - Stop debe permanecer habilitado durante la ejecución.
 - Conserva selección, historial, sangría, pares y composición IME.
