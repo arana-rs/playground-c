@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,6 +15,15 @@ export function fixtureSourceFor(phase, relativePath) {
 // Backward-compatible P4 shorthand; `directory` is relative to fixtures/p4.
 export function fixtureSource(directory = '.', name) {
   return fixtureSourceFor('p4', join(directory, name));
+}
+
+// Native compiler oracles need a final newline. Keep the engine input untouched
+// and preserve existing LF/CRLF endings in the temporary source copy.
+export function writeNativeSource(path, source) {
+  if (!source.endsWith('\n') && source.endsWith('\\')) {
+    throw new Error('A native oracle source cannot end with a backslash at EOF.');
+  }
+  writeFileSync(path, source.endsWith('\n') ? source : `${source}\n`);
 }
 
 export function fixtureProject(directory, entry, fileNames = [entry], translationUnits) {

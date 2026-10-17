@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { execute, prepare } from '../dist/core/index.js';
-import { decodeBytes, fixtureSource } from './p4-test-helpers.mjs';
+import { decodeBytes, fixtureSource, writeNativeSource } from './p4-test-helpers.mjs';
 
 // These static, finite programs have defined behavior. Host compilers receive
 // only repository fixtures, never source written in the editor.
@@ -192,7 +192,7 @@ for (const compiler of ['gcc', 'clang']) {
           for (const file of projectFiles) {
             const path = join(directory, file.name);
             mkdirSync(dirname(path), { recursive: true });
-            writeFileSync(path, file.source);
+            writeNativeSource(path, file.source);
           }
           for (const file of sample.hostFiles ?? []) writeFileSync(join(directory, file.name), file.data);
 
@@ -201,7 +201,7 @@ for (const compiler of ['gcc', 'clang']) {
             .filter(({ name }) => /\.[cC]$/.test(name))
             .map(({ name }) => name);
           const compilation = spawnSync(compiler, [
-            '-std=c11', '-pedantic-errors', ...(sample.flags ?? []), ...sourcePaths,
+            '-std=c11', '-pedantic-errors', ...(sample.flags ?? []), ...(compiler === 'clang' ? ['-Werror=newline-eof'] : []), ...sourcePaths,
             '-o', executable,
           ], { cwd: directory, encoding: 'utf8', timeout: 10_000 });
           assert.ifError(compilation.error);

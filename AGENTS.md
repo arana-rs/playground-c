@@ -57,7 +57,13 @@
 
 - Usa Conventional Commits con el formato `tipo(ámbito): descripción breve en español`. Los tipos son `feat`, `fix`, `docs`, `refactor`, `test`, `build`, `ci`, `perf` y `chore`, en minúsculas y en inglés.
 - El ámbito es opcional y debe corresponder al cambio; ejemplos habituales son `engine`, `editor`, `memory-viewer`, `license`, `release` y `deps`, sin limitarse a ellos si el contexto requiere otro.
-- Escribe la descripción con un verbo directo en imperativo, sin emoji ni punto final. Si hace falta, añade un cuerpo opcional separado por una línea en blanco para explicar motivos o impactos relevantes.
+- Escribe un título breve con un verbo directo en imperativo, sin emoji ni punto final.
+- Añade siempre, separado del título por una línea en blanco, un cuerpo en español con una descripción algo más detallada del cambio; puedes explicar su motivo o impacto.
 - Marca los cambios incompatibles con `!` después del tipo o ámbito, o usa el pie `BREAKING CHANGE:` para describirlos.
-- Ejemplos: `fix(memory-viewer): alinea las celdas de los structs` y `chore(release): unifica las versiones en 0.1.0`.
+- Ejemplo:
+  ```text
+  fix(memory-viewer): alinea las celdas de los structs
+
+  Ajusta la disposición de las celdas para que cada campo del struct se lea correctamente.
+  ```
 - Esta convención no autoriza a crear commits sin solicitud del usuario.

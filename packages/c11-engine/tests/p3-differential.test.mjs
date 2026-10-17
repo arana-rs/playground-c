@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { execute, prepare } from '../dist/core/index.js';
-import { fixtureSourceFor } from './p4-test-helpers.mjs';
+import { fixtureSourceFor, writeNativeSource } from './p4-test-helpers.mjs';
 
 // Fixed, finite P3 sources only. Every fixture has defined behavior; the host
 // compilers are semantic oracles and never receive editor-provided text.
@@ -40,8 +40,8 @@ for (const compiler of ['gcc', 'clang']) {
         await t.test(name, () => {
           const sourcePath = join(directory, `${index}.c`);
           const executablePath = join(directory, `${index}.out`);
-          writeFileSync(sourcePath, source);
-          const compilation = spawnSync(compiler, ['-std=c11', '-pedantic-errors', '-O0', sourcePath, '-lm', '-o', executablePath], { encoding: 'utf8', timeout: 10_000 });
+          writeNativeSource(sourcePath, source);
+          const compilation = spawnSync(compiler, ['-std=c11', '-pedantic-errors', '-O0', ...(compiler === 'clang' ? ['-Werror=newline-eof'] : []), sourcePath, '-lm', '-o', executablePath], { encoding: 'utf8', timeout: 10_000 });
           assert.ifError(compilation.error);
           assert.equal(compilation.status, 0, compilation.stderr);
           const native = spawnSync(executablePath, [], { encoding: 'utf8', timeout: 1000 });
