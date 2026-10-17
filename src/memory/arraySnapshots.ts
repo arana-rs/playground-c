@@ -25,7 +25,7 @@ export function sameMemoryViewerArraySnapshot(
     && left.elements.every((element, index) => sameArrayElement(element, right.elements[index]!));
 }
 
-function sameArrayElement(left: DebugArrayElementSnapshot, right: DebugArrayElementSnapshot): boolean {
+export function sameArrayElement(left: DebugArrayElementSnapshot, right: DebugArrayElementSnapshot): boolean {
   return left.key === right.key
     && left.index === right.index
     && left.address === right.address

@@ -18,7 +18,11 @@ import type {
 import { compile } from './bytecode.ts';
 import type { CompiledFunction, Scope } from './bytecode.ts';
 import { binary, callBuiltin, convert, isFloatingClassificationBuiltin, promote, truth, unary } from './numeric.ts';
-import { arrayOf, compatibleType, isAggregate, isArithmetic, isArray, isFunction, isInteger, isPointer, isScalar, pointerTo, sameType, sizeOfType, typeName } from './type-system.ts';
+import {
+  aggregateType, arrayOf, arrayType, compatibleType, functionType, isAggregate, isArithmetic, isArray, isFunction,
+  isInteger, isPointer, isScalar, pointerTo, pointerType, pointedToType, qualifiersOf, sameType, sizeOfType,
+  typeName, unqualifiedType,
+} from './type-system.ts';
 import { VirtualMemory } from './memory.ts';
 import { dispatchLibraryBuiltin } from './library.ts';
 import type { LibraryBuiltinResult, LibraryRuntimeContext, ResumableLibraryBuiltin } from './library.ts';
@@ -94,6 +98,8 @@ const integer = (value: bigint | number | boolean, type: CValue['type'] = 'int')
 });
 const isBuiltinContinuation = (value: LibraryBuiltinResult): value is ResumableLibraryBuiltin =>
   typeof value === 'object' && value !== null && typeof (value as ResumableLibraryBuiltin).next === 'function';
+const hasPersistentDuration = (binding: Binding): boolean =>
+  binding.storageDuration === 'static' || binding.storageDuration === 'thread-local';
 
 const DEFAULT_DEBUG_EVENT_BUDGET = 100_000;
 const MAX_HEAP_ADDRESS_SEED = 0xffff_ffff;
@@ -170,13 +176,22 @@ class DebugEventLimit extends Error {
 
 function debugTypeSummary(type: CValue['type'], aggregates: readonly AggregateDefinition[]): string {
   if (typeof type === 'string') return type;
-  if (type.kind === 'pointer') return `${debugTypeSummary(type.base, aggregates)} *`;
-  if (type.kind === 'array') return `${debugTypeSummary(type.element, aggregates)}[${type.length ?? ''}]`;
-  if (type.kind === 'aggregate') {
-    const aggregate = aggregates.find((candidate) => candidate.id === type.id);
-    return `${aggregate?.kind ?? 'aggregate'} ${aggregate?.tag ?? `<anonymous ${type.id}>`}`;
+  const unqualified = unqualifiedType(type);
+  const qualifiers = qualifiersOf(type);
+  const qualifierText = [qualifiers.const && 'const', qualifiers.volatile && 'volatile', qualifiers.restrict && 'restrict']
+    .filter(Boolean).join(' ');
+  if (typeof unqualified === 'string') return `${qualifierText ? `${qualifierText} ` : ''}${unqualified}`;
+  const pointer = pointerType(unqualified);
+  if (pointer) return `${debugTypeSummary(pointedToType(unqualified)!, aggregates)} *${qualifierText ? ` ${qualifierText}` : ''}`;
+  const array = arrayType(unqualified);
+  if (array) return `${debugTypeSummary(array.element, aggregates)}[${array.length ?? ''}]`;
+  const aggregateTypeValue = aggregateType(unqualified);
+  if (aggregateTypeValue) {
+    const aggregate = aggregates.find((candidate) => candidate.id === aggregateTypeValue.id);
+    return `${qualifierText ? `${qualifierText} ` : ''}${aggregate?.kind ?? 'aggregate'} ${aggregate?.tag ?? `<anonymous ${aggregateTypeValue.id}>`}`;
   }
-  return `function (${type.parameters.map((parameter) => debugTypeSummary(parameter, aggregates)).join(', ')})`;
+  const fn = functionType(unqualified);
+  return fn ? `function (${fn.parameters.map((parameter) => debugTypeSummary(parameter, aggregates)).join(', ')})` : 'unknown';
 }
 
 function debugEscapedByte(byte: number, context: 'character' | 'string'): string {
@@ -196,6 +211,7 @@ function debugEscapedByte(byte: number, context: 'character' | 'string'): string
 }
 
 function debugScalarValue(type: CValue['type'], value: ObjectScalarValue): string {
+  type = unqualifiedType(type);
   if (type === 'long double' && typeof value === 'object' && value !== null && value.kind === 'binary80') {
     return formatBinary80Hex(value);
   }
@@ -489,7 +505,7 @@ function createRuntimeSession(
       inspectDebugScalars = (): readonly DebugScalarSnapshot[] => Object.freeze(activeDebugFrames.flatMap((frame) =>
         frame.scopes.flatMap((scope) => scope.cells.flatMap((bindingId) => {
           const cell = frame.cells.get(bindingId);
-          if (!cell || cell.binding.storageDuration === 'static' || !isArithmetic(cell.binding.type) ||
+          if (!cell || hasPersistentDuration(cell.binding) || !isArithmetic(cell.binding.type) ||
               frame.frameId === null || scope.scopeId === 0) return [];
           const record = debugObjects.get(cell.reference.allocationId);
           if (!record) return [];
@@ -515,7 +531,7 @@ function createRuntimeSession(
         const inspected = memory.inspectPointer(reference, debugObjectLocations!.get(record.allocationId) ?? location);
         let target: DebugPointerSnapshot['target'];
         if (inspected.target) {
-          const targetType = debugTypeSummary(reference.type.base, ir.aggregates);
+          const targetType = debugTypeSummary(pointedToType(reference.type) ?? 'void', ir.aggregates);
           const targetRecord = debugObjects.get(inspected.target.allocationId);
           const name = inspected.target.byteOffset === 0 && targetRecord?.typeSummary === targetType
             ? targetRecord.name
@@ -534,7 +550,7 @@ function createRuntimeSession(
           name: record.name,
           origin: record.origin as DebugPointerSnapshot['origin'],
           duration: record.duration as DebugPointerSnapshot['duration'],
-          region: record.duration === 'automatic' ? 'stack' : 'static',
+          region: record.duration === 'automatic' || record.duration === 'compound-literal' ? 'stack' : 'static',
           type: typeName(reference.type, ir.aggregates),
           address: `0x${record.addressVirtual.toString(16)}`,
           size: record.size,
@@ -548,7 +564,7 @@ function createRuntimeSession(
         const automatic = activeDebugFrames.flatMap((frame) => frame.scopes.flatMap((scope) =>
           scope.cells.flatMap((bindingId) => {
             const cell = frame.cells.get(bindingId);
-            if (!cell || cell.binding.storageDuration === 'static' || !isPointer(cell.binding.type) ||
+            if (!cell || cell.binding.storageDuration === 'static' || cell.binding.storageDuration === 'thread-local' || !isPointer(cell.binding.type) ||
                 frame.frameId === null) return [];
             const record = debugObjects.get(cell.reference.allocationId);
             if (!record) return [];
@@ -557,7 +573,7 @@ function createRuntimeSession(
           }),
         ));
         const staticPointers = [...debugObjects.values()].flatMap((record) => {
-          if (record.duration !== 'static' || record.origin !== 'variable' || record.name === undefined) return [];
+          if ((record.duration !== 'static' && record.duration !== 'thread-local') || record.origin !== 'variable' || record.name === undefined) return [];
           const reference = memory.rootReference(record.allocationId);
           if (!reference || !isPointer(reference.type)) return [];
           const snapshot = snapshotPointer(record, reference);
@@ -579,7 +595,7 @@ function createRuntimeSession(
         }
         const includeStringLiterals = inspectionOptions?.includeStringLiterals ?? true;
         return Object.freeze([...debugObjects.values()].flatMap<DebugStaticObjectSnapshot>((record) => {
-          if (record.duration !== 'static' ||
+          if ((record.duration !== 'static' && record.duration !== 'thread-local') ||
               (record.origin !== 'variable' && record.origin !== 'string-literal')) return [];
           if (record.origin === 'string-literal' && !includeStringLiterals) return [];
           const reference = memory.rootReference(record.allocationId);
@@ -592,6 +608,7 @@ function createRuntimeSession(
               id: record.allocationId,
               ...(record.name === undefined ? {} : { name: record.name }),
               origin: record.origin,
+              duration: record.duration,
               type: typeName(reference.type, ir.aggregates),
               address,
               size: record.size,
@@ -607,6 +624,7 @@ function createRuntimeSession(
             return [Object.freeze({
               id: record.allocationId,
               origin: record.origin,
+              duration: record.duration,
               type: record.typeSummary,
               address,
               size: record.size,
@@ -619,21 +637,22 @@ function createRuntimeSession(
       };
       inspectDebugArrays = (): DebugArrayInspection => {
         const candidates = [...debugObjects.values()].flatMap((record) => {
-          if ((record.duration !== 'automatic' && record.duration !== 'static') ||
+          if ((record.duration !== 'automatic' && record.duration !== 'static' && record.duration !== 'thread-local') ||
               (record.origin !== 'variable' && record.origin !== 'string-literal')) return [];
           const reference = memory.rootReference(record.allocationId);
-          return reference && isArray(reference.type) && reference.type.length !== null
+          const array = reference ? arrayType(reference.type) : undefined;
+          return reference && array && array.length !== null
             ? [{ record, reference }]
             : [];
         });
         const visible = candidates.slice(0, maxArrayObjects);
         const arrays = visible.map(({ record, reference }): DebugArraySnapshot => {
-          const arrayType = reference.type;
-          if (!isArray(arrayType) || arrayType.length === null) {
+          const array = arrayType(reference.type);
+          if (!array || array.length === null) {
             failure('ENGINE_INTERNAL_ERROR', 'El descriptor de array perdió su tipo completo.', debugObjectLocations!.get(record.allocationId) ?? location);
           }
-          const length = arrayType.length;
-          const elementType = arrayType.element;
+          const length = array.length;
+          const elementType = array.element;
           const elementTypeName = typeName(elementType, ir.aggregates);
           const at = debugObjectLocations!.get(record.allocationId) ?? location;
           let status: DebugArraySnapshot['status'];
@@ -668,10 +687,10 @@ function createRuntimeSession(
             ...(record.name === undefined ? {} : { name: record.name }),
             origin: record.origin as DebugArraySnapshot['origin'],
             duration: record.duration as DebugArraySnapshot['duration'],
-            region: record.duration === 'automatic' ? 'stack' : 'static',
+            region: record.duration === 'automatic' || record.duration === 'compound-literal' ? 'stack' : 'static',
             frameId: record.frameId,
             scopeId: record.scopeId,
-            type: typeName(arrayType, ir.aggregates),
+            type: typeName(reference.type, ir.aggregates),
             elementType: elementTypeName,
             address: `0x${record.addressVirtual.toString(16)}`,
             size: record.size,
@@ -685,22 +704,33 @@ function createRuntimeSession(
       };
       inspectDebugAggregates = (): DebugAggregateInspection => {
         const candidates = [...debugObjects.values()].flatMap((record) => {
-          if ((record.duration !== 'automatic' && record.duration !== 'static') ||
+          if ((record.duration !== 'automatic' && record.duration !== 'static' && record.duration !== 'thread-local' && record.duration !== 'heap') ||
               (record.origin !== 'variable' && record.origin !== 'parameter')) return [];
           const reference = memory.rootReference(record.allocationId);
           return reference && isAggregate(reference.type) ? [{ record, reference }] : [];
         });
-        const visible = candidates.slice(0, maxArrayObjects);
+        const heapCandidates = memory.heapAggregateReferences().flatMap((reference) => {
+          const record = debugObjects.get(reference.allocationId);
+          return record && isAggregate(reference.type) && !candidates.some((candidate) => candidate.record.allocationId === record.allocationId)
+            ? [{ record, reference }]
+            : [];
+        });
+        const allCandidates = [...candidates, ...heapCandidates];
+        const visible = allCandidates.slice(0, maxArrayObjects);
         const aggregates = visible.map(({ record, reference }): DebugAggregateSnapshot => {
           if (!isAggregate(reference.type)) {
             failure('ENGINE_INTERNAL_ERROR', 'El descriptor de agregado perdió su tipo.', debugObjectLocations!.get(record.allocationId) ?? location);
           }
-          const aggregateType = reference.type;
-          const definition = ir.aggregates.find((candidate) => candidate.id === aggregateType.id);
+          const aggregateDescriptor = aggregateType(reference.type);
+          const definition = aggregateDescriptor && ir.aggregates.find((candidate) => candidate.id === aggregateDescriptor.id);
           if (!definition?.complete || definition.size === undefined) {
             failure('ENGINE_INTERNAL_ERROR', 'El descriptor de agregado no tiene layout completo.', debugObjectLocations!.get(record.allocationId) ?? location);
           }
           const at = debugObjectLocations!.get(record.allocationId) ?? location;
+          const view = memory.describeObjectView(reference, at);
+          const viewKeyPrefix = view.objectId === record.allocationId
+            ? `${record.allocationId}`
+            : `${record.allocationId}:${view.objectId}`;
           let status: DebugAggregateStatus = definition.kind === 'union'
             ? 'unsupported-union'
             : definition.members.length > DEFAULT_DEBUG_AGGREGATE_INSPECTION_LIMITS.maxMembers
@@ -709,19 +739,67 @@ function createRuntimeSession(
 
           let members: readonly DebugAggregateMemberSnapshot[] = Object.freeze([]);
           let padding: readonly DebugAggregatePaddingSnapshot[] = Object.freeze([]);
+          const visibleMembers = definition.members.filter((member) => !(member.bitField?.width === 0 && !member.name));
           if (status === 'available') {
-            members = Object.freeze(definition.members.map((member): DebugAggregateMemberSnapshot => {
-              const memberSize = sizeOfType(member.type, ir.aggregates, member.location);
-              const memberAddress = `0x${(record.addressVirtual + BigInt(member.offset)).toString(16)}`;
+            members = Object.freeze(visibleMembers.map((member): DebugAggregateMemberSnapshot => {
+              const flexibleExtent = member.flexibleArray ? memory.flexibleArrayExtent(reference, member.index, member.location) : undefined;
+              const flexibleType = member.flexibleArray ? arrayType(member.type) : undefined;
+              const flexibleArray = flexibleExtent && flexibleType ? (() => {
+                const elementType = flexibleType.element;
+                const supported = isArithmetic(elementType);
+                const visibleElementCount = supported ? Math.min(flexibleExtent.length, maxElementsPerArray) : 0;
+                const elements: DebugArrayElementSnapshot[] = [];
+                for (let index = 0; index < visibleElementCount; index += 1) {
+                  const inspected = memory.inspectFlexibleArrayElement(reference, member.index, index, member.location);
+                  const initialized = inspected?.initialized === true && inspected.value !== undefined;
+                  const fullValue = initialized ? debugScalarValue(elementType, inspected.value!) : '?';
+                  const valueTruncated = initialized && fullValue.length > maxValueChars;
+                  const addressOffset = BigInt(definition.flexibleOffset!) + BigInt(index) * BigInt(flexibleExtent.elementSize);
+                  elements.push(Object.freeze({
+                    key: `${viewKeyPrefix}:${member.index}:flex:${index}`,
+                    index,
+                    address: `0x${(view.addressVirtual + addressOffset).toString(16)}`,
+                    type: typeName(elementType, ir.aggregates),
+                    initialized,
+                    displayValue: valueTruncated ? fullValue.slice(0, maxValueChars) : fullValue,
+                    valueTruncated,
+                  }) satisfies DebugArrayElementSnapshot);
+                }
+                return Object.freeze({
+                  ...flexibleExtent,
+                  status: !supported ? 'unsupported-element-type' : flexibleExtent.length > maxElementsPerArray ? 'too-many-elements' : 'available',
+                  elements: Object.freeze(elements),
+                  omittedElements: supported ? flexibleExtent.length - elements.length : 0,
+                });
+              })() : undefined;
+              const memberSize = member.bitField
+                ? member.bitField.storageUnitSize
+                : member.flexibleArray
+                  ? 0
+                  : sizeOfType(member.type, ir.aggregates, member.location);
+              const memberAddress = `0x${(view.addressVirtual + BigInt(member.offset)).toString(16)}`;
               const common = {
-                key: `${record.allocationId}:${member.index}`,
+                key: `${viewKeyPrefix}:${member.index}`,
                 index: member.index,
                 name: member.name,
                 type: typeName(member.type, ir.aggregates),
                 offset: member.offset,
                 size: memberSize,
+                ...(member.bitField ? {
+                  bitWidth: member.bitField.width,
+                  bitOffset: member.bitField.bitOffset,
+                  storageUnitSize: member.bitField.storageUnitSize,
+                } : {}),
+                ...(flexibleArray ? { flexibleArray } : {}),
                 address: memberAddress,
               };
+              if (member.flexibleArray) return Object.freeze({
+                ...common,
+                kind: 'unsupported',
+                initialized: null,
+                displayValue: null,
+                unsupportedReason: 'flexible-array',
+              }) satisfies DebugAggregateMemberSnapshot;
               if (isArithmetic(member.type)) {
                 const inspected = memory.inspectAggregateScalar(reference, member.index, member.location);
                 return Object.freeze({
@@ -737,7 +815,7 @@ function createRuntimeSession(
                 const inspected = memory.inspectAggregatePointer(reference, member.index, member.location);
                 let target: DebugAggregateMemberSnapshot['target'];
                 if (inspected.target) {
-                  const targetType = debugTypeSummary(member.type.base, ir.aggregates);
+                  const targetType = debugTypeSummary(pointedToType(member.type) ?? 'void', ir.aggregates);
                   const targetRecord = debugObjects.get(inspected.target.allocationId);
                   const targetName = inspected.target.byteOffset === 0 && targetRecord?.typeSummary === targetType
                     ? targetRecord.name
@@ -772,16 +850,21 @@ function createRuntimeSession(
             for (const member of definition.members) {
               if (member.offset > endOfLastMember) {
                 paddingRanges.push(Object.freeze({
-                  key: `${record.allocationId}:padding:${endOfLastMember}`,
+                  key: `${viewKeyPrefix}:padding:${endOfLastMember}`,
                   offset: endOfLastMember,
                   size: member.offset - endOfLastMember,
                 }));
               }
-              endOfLastMember = Math.max(endOfLastMember, member.offset + sizeOfType(member.type, ir.aggregates, member.location));
+              const memberEnd = member.flexibleArray
+                ? member.offset
+                : member.bitField
+                  ? member.offset + member.bitField.storageUnitSize
+                  : member.offset + sizeOfType(member.type, ir.aggregates, member.location);
+              endOfLastMember = Math.max(endOfLastMember, memberEnd);
             }
             if (definition.size! > endOfLastMember) {
               paddingRanges.push(Object.freeze({
-                key: `${record.allocationId}:padding:${endOfLastMember}`,
+                key: `${viewKeyPrefix}:padding:${endOfLastMember}`,
                 offset: endOfLastMember,
                 size: definition.size! - endOfLastMember,
               }));
@@ -791,24 +874,25 @@ function createRuntimeSession(
 
           return Object.freeze({
             rootId: record.allocationId,
+            ...(view.objectId === record.allocationId ? {} : { viewId: view.objectId }),
             ...(record.name === undefined ? {} : { name: record.name }),
             origin: record.origin as DebugAggregateSnapshot['origin'],
             duration: record.duration as DebugAggregateSnapshot['duration'],
-            region: record.duration === 'automatic' ? 'stack' : 'static',
+            region: record.duration === 'heap' ? 'heap' : record.duration === 'automatic' || record.duration === 'compound-literal' ? 'stack' : 'static',
             frameId: record.frameId,
             scopeId: record.scopeId,
             type: typeName(reference.type, ir.aggregates),
             kind: definition.kind,
-            address: `0x${record.addressVirtual.toString(16)}`,
-            size: record.size,
+            address: `0x${view.addressVirtual.toString(16)}`,
+            size: view.size,
             readOnly: record.readOnly || memory.isReadOnly(reference, at),
-            memberCount: definition.members.length,
+            memberCount: visibleMembers.length,
             status,
             members,
             padding,
           }) satisfies DebugAggregateSnapshot;
         });
-        return Object.freeze({ aggregates: Object.freeze(aggregates), omittedObjects: candidates.length - visible.length });
+        return Object.freeze({ aggregates: Object.freeze(aggregates), omittedObjects: allCandidates.length - visible.length });
       };
       inspectDebugHeapObjects = (): readonly DebugHeapObjectSnapshot[] => Object.freeze(
         [...debugObjects.values()]
@@ -888,7 +972,7 @@ function createRuntimeSession(
       binding: Binding,
       reference: ObjectReference,
     ): void => {
-      if (binding.storageDuration === 'static') return;
+      if (hasPersistentDuration(binding)) return;
       publishDebugObject(reference, {
         duration: 'automatic', origin: binding.isParameter ? 'parameter' : 'variable',
         typeSummary: debugTypeSummary(binding.type, ir.aggregates),
@@ -1078,9 +1162,11 @@ function createRuntimeSession(
       const bytes = readBytes(source, count, at);
       const sourceAddress = asBytePointer(source, at).value as ObjectPointerValue;
       const pointerValues = memory.copyablePointerValues(sourceAddress, count, at);
+      const effectiveTypes = memory.copyableEffectiveTypes(sourceAddress, count, at);
       const destinationAddress = asBytePointer(destination, at).value as ObjectPointerValue;
       writeBytes(destination, bytes, at);
       memory.restoreCopiedPointerValues(destinationAddress, count, pointerValues, at);
+      memory.restoreCopiedEffectiveTypes(destinationAddress, count, effectiveTypes, at);
     };
     const writeScalar = (pointer: CValue, value: CValue, at: Location): void => {
       const reference = memory.dereference(pointer, at);
@@ -1196,36 +1282,43 @@ function createRuntimeSession(
       return result;
     };
     const valueForType = (value: CValue, type: CValue['type'], at: Location): CValue => {
-      if (type === '_Bool' && (isPointer(value.type) || value.value === null ||
+      const targetType = unqualifiedType(type);
+      if (targetType === '_Bool' && (isPointer(value.type) || value.value === null ||
           (typeof value.value === 'object' && value.value !== null &&
             ((value.value as { kind?: string }).kind === 'object-pointer' || (value.value as { kind?: string }).kind === 'function-pointer')))) {
         return integer(value.value !== null, '_Bool');
       }
-      if (isPointer(type)) {
-        if (value.value === null) return { type, value: null };
-        if (typeof value.value === 'bigint' && value.value === 0n) return { type, value: null };
+      if (isInteger(targetType) && isPointer(value.type)) {
+        return convert({ type: 'unsigned long', value: memory.pointerInteger(value, at) }, targetType, at, ir.aggregates);
+      }
+      if (pointerType(targetType)) {
+        if (value.value === null) return { type: targetType, value: null };
+        if (typeof value.value === 'bigint' && value.value === 0n) return { type: targetType, value: null };
+        if (typeof value.value === 'bigint') return memory.pointerFromInteger(value.value, targetType, at);
         if (typeof value.value === 'object' && value.value !== null) {
           const kind = (value.value as { kind?: string }).kind;
           if (kind === 'object-pointer') {
-            if (isFunction(type.base)) failure('INVALID_POINTER_CONVERSION', 'Un puntero a objeto no se puede convertir a puntero a función.', at);
-            return { type, value: value.value as ObjectPointerValue };
+            if (isFunction(pointedToType(targetType) ?? 'void')) failure('INVALID_POINTER_CONVERSION', 'Un puntero a objeto no se puede convertir a puntero a función.', at);
+            return { type: targetType, value: value.value as ObjectPointerValue };
           }
           if (kind === 'function-pointer') {
-            if (!isFunction(type.base)) failure('INVALID_POINTER_CONVERSION', 'Un puntero a función no se puede convertir a puntero a objeto.', at);
-            return { type, value: value.value };
+            if (!isFunction(pointedToType(targetType) ?? 'void')) failure('INVALID_POINTER_CONVERSION', 'Un puntero a función no se puede convertir a puntero a objeto.', at);
+            return { type: targetType, value: value.value };
           }
         }
         failure('INVALID_POINTER_CONVERSION', 'La conversión a puntero requiere un puntero compatible o una constante nula.', at);
       }
-      if (isAggregate(type)) {
-        if (isAggregate(value.type) && value.type.id === type.id &&
+      const targetAggregate = aggregateType(targetType);
+      const valueAggregate = aggregateType(value.type);
+      if (targetAggregate) {
+        if (valueAggregate && valueAggregate.id === targetAggregate.id &&
             typeof value.value === 'object' && value.value !== null &&
             (value.value as { kind?: string }).kind === 'aggregate-value') {
-          return { type, value: value.value };
+          return { type: targetType, value: value.value };
         }
         failure('INVALID_AGGREGATE_CONVERSION', 'La conversión por valor requiere el mismo tipo de struct o union.', at);
       }
-      return convert(value, type, at);
+      return convert(value, targetType, at, ir.aggregates);
     };
     const truthValue = (value: CValue): boolean => truth(value, runtimeLocation);
     const addAccess = (evaluation: Evaluation, objectId: number, access: Access): void => {
@@ -1285,16 +1378,20 @@ function createRuntimeSession(
     };
     const aggregateDefinition = (type: CValue['type'], at: Location): AggregateDefinition => {
       if (!isAggregate(type)) failure('INVALID_MEMBER', 'El acceso a miembros requiere un struct o union.', at);
-      const definition = ir.aggregates.find((candidate) => candidate.id === type.id);
+      const descriptor = aggregateType(type);
+      const definition = descriptor && ir.aggregates.find((candidate) => candidate.id === descriptor.id);
       if (!definition || !definition.complete) failure('INCOMPLETE_TYPE', 'El objeto agregado está incompleto.', at);
       return definition;
     };
+    const positionalAggregateMembers = (type: CValue['type'], at: Location): AggregateDefinition['members'][number][] =>
+      aggregateDefinition(type, at).members.filter((member) => !(member.bitField && !member.name));
     const immediateSubobject = (reference: ObjectReference, type: CValue['type'], index: number, at: Location): { reference: ObjectReference; type: CValue['type'] } => {
       if (!Number.isSafeInteger(index) || index < 0) failure('INVALID_INITIALIZER', 'El inicializador selecciona un subobjeto no válido.', at);
-      if (isArray(type)) {
-        if (type.length === null || index >= type.length) failure('INITIALIZER_BOUNDS', 'El inicializador excede la longitud del array.', at);
+      const array = arrayType(type);
+      if (array) {
+        if (array.length === null || index >= array.length) failure('INITIALIZER_BOUNDS', 'El inicializador excede la longitud del array.', at);
         const child = memory.element(reference, index, at);
-        return { reference: child, type: type.element };
+        return { reference: child, type: array.element };
       }
       if (isAggregate(type)) {
         const definition = aggregateDefinition(type, at);
@@ -1335,17 +1432,20 @@ function createRuntimeSession(
       const pending: { reference: ObjectReference; type: CValue['type']; next: number }[] = [{ reference: root, type: rootType, next: 0 }];
       while (pending.length) {
         const current = pending.at(-1)!;
-        if (isArray(current.type)) {
-          if (current.type.length === null) failure('INCOMPLETE_TYPE', 'El array del inicializador está incompleto.', at);
-          if (current.next >= current.type.length) { pending.pop(); continue; }
+        const array = arrayType(current.type);
+        if (array) {
+          if (array.length === null) failure('INCOMPLETE_TYPE', 'El array del inicializador está incompleto.', at);
+          if (current.next >= array.length) { pending.pop(); continue; }
           const index = current.next++;
-          pending.push({ reference: memory.element(current.reference, index, at), type: current.type.element, next: 0 });
+          pending.push({ reference: memory.element(current.reference, index, at), type: array.element, next: 0 });
         } else if (isAggregate(current.type)) {
           const definition = aggregateDefinition(current.type, at);
-          const count = definition.kind === 'union' ? Math.min(definition.members.length, 1) : definition.members.length;
+          const members = positionalAggregateMembers(current.type, at);
+          const count = definition.kind === 'union' ? Math.min(members.length, 1) : members.length;
           if (current.next >= count) { pending.pop(); continue; }
           const index = current.next++;
-          pending.push({ reference: memory.member(current.reference, index, at), type: definition.members[index].type, next: 0 });
+          const member = members[index];
+          pending.push({ reference: memory.member(current.reference, member.index, at), type: member.type, next: 0 });
         } else {
           yield { reference: current.reference, type: current.type };
           pending.pop();
@@ -1356,14 +1456,15 @@ function createRuntimeSession(
     const initializeObject = (reference: ObjectReference, type: CValue['type'], initializer: Initializer, frame: Frame, depth = 1): void => {
       if (initializer.kind === 'expression') {
         const expression = initializer.value;
-        if (isArray(type) && type.element === 'char' && expression.kind === 'string') {
-          if (type.length === null) failure('INCOMPLETE_TYPE', 'El array de caracteres no tiene una longitud completa.', initializer.location);
-          if (expression.bytes.length > type.length + 1) failure('INITIALIZER_BOUNDS', 'El literal de cadena es más largo que el array de destino.', initializer.location);
+        const array = arrayType(type);
+        if (array && unqualifiedType(array.element) === 'char' && expression.kind === 'string') {
+          if (array.length === null) failure('INCOMPLETE_TYPE', 'El array de caracteres no tiene una longitud completa.', initializer.location);
+          if (expression.bytes.length > array.length + 1) failure('INITIALIZER_BOUNDS', 'El literal de cadena es más largo que el array de destino.', initializer.location);
           memory.zeroInitialize(reference, initializer.location);
-          const count = Math.min(type.length, expression.bytes.length);
+          const count = Math.min(array.length, expression.bytes.length);
           for (let index = 0; index < count; index++) {
             const element = memory.element(reference, index, initializer.location);
-            memory.write(element, valueForType(integer(BigInt.asIntN(8, BigInt(expression.bytes[index]))), type.element, initializer.location), initializer.location);
+            memory.write(element, valueForType(integer(BigInt.asIntN(8, BigInt(expression.bytes[index]))), array.element, initializer.location), initializer.location, true);
           }
           return;
         }
@@ -1371,13 +1472,14 @@ function createRuntimeSession(
           const result = operands.pop();
           if (!result) failure('ENGINE_STACK_ERROR', 'Falta el valor del inicializador.', initializer.location);
           const value = materialize(result, initializer.location);
-          memory.write(reference, valueForType(value, type, initializer.location), initializer.location);
+          memory.write(reference, valueForType(value, type, initializer.location), initializer.location, true);
         }, depth + 1);
         return;
       }
 
       memory.zeroInitialize(reference, initializer.location);
-      if (isArray(type) && type.element === 'char' && initializer.items.length === 1 &&
+      const array = arrayType(type);
+      if (array && unqualifiedType(array.element) === 'char' && initializer.items.length === 1 &&
           initializer.items[0].designators.length === 0 && initializer.items[0].initializer.kind === 'expression' &&
           initializer.items[0].initializer.value.kind === 'string') {
         initializeObject(reference, type, initializer.items[0].initializer, frame, depth + 1);
@@ -1407,8 +1509,14 @@ function createRuntimeSession(
           const designated = designatedSubobject(reference, type, item.designators);
           selected = { reference: designated.reference, type: designated.type };
           nextIndex = designated.firstIndex + 1;
-        } else if (isArray(type) || isAggregate(type)) {
+        } else if (isArray(type)) {
           selected = immediateSubobject(reference, type, nextIndex++, item.location);
+        } else if (isAggregate(type)) {
+          const members = positionalAggregateMembers(type, item.location);
+          const member = members.find((candidate) => candidate.index >= nextIndex);
+          if (!member) failure('EXCESS_INITIALIZERS', 'El inicializador contiene más valores que subobjetos.', item.location);
+          selected = immediateSubobject(reference, type, member.index, item.location);
+          nextIndex = member.index + 1;
         } else {
           if (nextIndex++) failure('EXCESS_INITIALIZERS', 'Un objeto escalar sólo admite un inicializador.', item.location);
           selected = { reference, type };
@@ -1513,16 +1621,18 @@ function createRuntimeSession(
         } else if (node.kind === 'function') {
           const index = node.functionIndex ?? (node.symbolKey ? functionSymbolIndices.get(node.symbolKey) : undefined) ?? functionIndices.get(node.name);
           if (index === undefined || !functions[index]) failure('UNKNOWN_FUNCTION', 'No existe la función «' + node.name + '».', at);
-          const functionType = node.type && isFunction(node.type) ? node.type : {
+          const functionTypeValue = (node.type ? functionType(node.type) : undefined) ?? {
             kind: 'function' as const,
             returnType: functions[index].fn.returnType,
             parameters: functions[index].fn.parameters.map((parameter) => parameter.type),
           };
-          operands.push(plain({ type: node.type && isPointer(node.type) ? node.type : pointerTo(functionType), value: { kind: 'function-pointer', functionIndex: index } }));
+          operands.push(plain({ type: node.type && isPointer(node.type) ? node.type : pointerTo(functionTypeValue), value: { kind: 'function-pointer', functionIndex: index } }));
         } else if (node.kind === 'sizeof') {
           const type = node.valueType ?? node.operand?.type;
           if (!type) failure('INVALID_SIZEOF', 'No se pudo determinar el tipo del operando de sizeof.', at);
           operands.push(plain({ type: 'unsigned long', value: BigInt(sizeOfType(type, ir.aggregates, at)) }));
+        } else if (node.kind === 'generic') {
+          evaluate(node.selected, frame, depth + 1, used);
         } else if (node.kind === 'unary' && node.operator === '&') {
           if (node.operand.kind === 'index') {
             const subscript = node.operand;
@@ -1561,7 +1671,8 @@ function createRuntimeSession(
             const operand = operands.pop();
             if (!operand) failure('ENGINE_STACK_ERROR', 'Falta el operando de &.', at);
             if (operand.reference) {
-              operands.push(plain(memory.addressOf(operand.reference, node.type && isPointer(node.type) ? node.type : pointerTo(operand.reference.type))));
+              const requestedPointer = node.type ? pointerType(node.type) : undefined;
+              operands.push(plain(memory.addressOf(operand.reference, requestedPointer ?? pointerTo(operand.reference.type))));
             } else {
               const value = materialize(operand, at);
               if (typeof value.value === 'object' && value.value !== null &&
@@ -1576,7 +1687,7 @@ function createRuntimeSession(
             if (!operand) failure('ENGINE_STACK_ERROR', 'Falta el operando de *.', at);
             const pointer = materialize(operand, at);
             if (!isPointer(pointer.type)) failure('INVALID_OPERAND_TYPE', 'El operador * requiere un puntero.', at);
-            if (isFunction(pointer.type.base)) operands.push(plain(pointer));
+            if (isFunction(pointedToType(pointer.type) ?? 'void')) operands.push(plain(pointer));
             else operands.push(referenceEvaluation(memory.dereference(pointer, at), 'objeto apuntado', operand));
           });
           evaluate(node.operand, frame, depth + 1);
@@ -1627,7 +1738,7 @@ function createRuntimeSession(
             if (isPointer(old.type)) next = memory.pointerAdd(old, node.operator === '++' ? 1n : -1n, at);
             else next = binary(node.operator === '++' ? '+' : '-', old, integer(1), at);
             next = valueForType(next, reference.type, at);
-            memory.write(reference, next, at);
+            next = memory.write(reference, next, at);
             markWrite(combined, reference, target.label ?? 'objeto');
             combined.value = node.prefix ? next : old;
             operands.push(combined);
@@ -1657,7 +1768,7 @@ function createRuntimeSession(
                 failure('UNSEQUENCED_ACCESS', 'Escrituras no secuenciadas a «' + name + '».', at);
               }
               value = valueForType(value, reference.type, at);
-              memory.write(reference, value, at);
+              value = memory.write(reference, value, at);
               markWrite(effects, reference, name);
               effects.value = value;
               operands.push(effects);
@@ -1703,8 +1814,9 @@ function createRuntimeSession(
               if (!isAggregate(value.type)) failure('INVALID_MEMBER', 'El operador . requiere un valor agregado.', at);
               const temporary = memory.automaticObject(
                 node, value.type, frame.fullExpressionToken ?? frame.scopes.at(-1)?.token ?? frame, at,
+                { isConst: qualifiersOf(value.type).const },
               );
-              memory.write(temporary, value, at);
+              memory.write(temporary, value, at, true);
               baseReference = temporary;
               effects = plain(value);
             }
@@ -1761,22 +1873,23 @@ function createRuntimeSession(
           evaluate(node.left, frame, depth + 1, node.operator !== ',');
         } else if (node.kind === 'compoundLiteral') {
           const activeScope = frame.scopes.at(-1);
+          const compoundOptions = { isConst: qualifiersOf(node.objectType).const };
           const objectReference = node.duration === 'static'
             ? debugEvents
               ? memory.findStaticObject(node) ?? allocateDebugObject(
-                () => memory.staticObject(node, node.objectType, at),
+                () => memory.staticObject(node, node.objectType, at, 'static', compoundOptions),
                 {
                   duration: 'static', origin: 'compound-literal',
                   typeSummary: debugTypeSummary(node.objectType, ir.aggregates), location: at,
                   frameId: null, scopeId: null,
                 },
               )
-              : memory.staticObject(node, node.objectType, at)
+              : memory.staticObject(node, node.objectType, at, 'static', compoundOptions)
             : debugEvents
               ? (() => {
                 const scopeToken = activeScope?.token ?? frame;
                 return memory.findAutomaticObject(node, scopeToken) ?? allocateDebugObject(
-                  () => memory.automaticObject(node, node.objectType, scopeToken, at),
+                  () => memory.automaticObject(node, node.objectType, scopeToken, at, compoundOptions),
                   {
                     duration: 'compound-literal', origin: 'compound-literal',
                     typeSummary: debugTypeSummary(node.objectType, ir.aggregates), location: at,
@@ -1784,7 +1897,7 @@ function createRuntimeSession(
                   },
                 );
               })()
-              : memory.automaticObject(node, node.objectType, activeScope?.token ?? frame, at);
+              : memory.automaticObject(node, node.objectType, activeScope?.token ?? frame, at, compoundOptions);
           if (node.duration === 'static' && initializedStaticExpressions.has(node)) {
             operands.push(referenceEvaluation(objectReference, 'literal compuesto'));
           } else {
@@ -1834,7 +1947,7 @@ function createRuntimeSession(
             let functionIndex = node.functionIndex;
             if (callee) {
               const calleeValue = materialize(callee, at);
-              if (!isPointer(calleeValue.type) || !isFunction(calleeValue.type.base) ||
+              if (!isPointer(calleeValue.type) || !isFunction(pointedToType(calleeValue.type) ?? 'void') ||
                   typeof calleeValue.value !== 'object' || calleeValue.value === null ||
                   (calleeValue.value as { kind?: string }).kind !== 'function-pointer') {
                 failure('INVALID_CALL', 'La expresión llamada no es un puntero a función.', at);
@@ -1847,8 +1960,9 @@ function createRuntimeSession(
             const functionName = node.name ?? targetFunction?.name;
             const builtinTarget = !!node.builtin || functionIndex !== undefined && !!functions[functionIndex]?.fn.builtin;
             const calleeType = node.callee?.type;
-            const signature = calleeType && isPointer(calleeType) && isFunction(calleeType.base)
-              ? calleeType.base
+            const calleeFunction = calleeType ? functionType(pointedToType(calleeType) ?? 'void') : undefined;
+            const signature = calleeFunction
+              ? calleeFunction
               : targetFunction ? {
                 kind: 'function' as const, returnType: targetFunction.returnType,
                 parameters: targetFunction.parameters.map((parameter) => parameter.type),
@@ -1909,7 +2023,7 @@ function createRuntimeSession(
     function storeVaCursor(destination: CValue, owner: Frame, args: readonly CValue[], index: number, at: Location): void {
       if (!isPointer(destination.type) || destination.value === null) failure('INVALID_VA_LIST', 'La operación va_list requiere la dirección de una lista.', at);
       const target = memory.dereference(destination, at);
-      if (!isPointer(target.type) || target.type.base !== 'void') failure('INVALID_VA_LIST', 'El destino no tiene tipo va_list.', at);
+      if (!isPointer(target.type) || unqualifiedType(pointedToType(target.type) ?? 'void') !== 'void') failure('INVALID_VA_LIST', 'El destino no tiene tipo va_list.', at);
       const marker = memory.allocate('char', 'automatic', at);
       const value = memory.addressOf(marker, pointerTo('char'));
       const handle = valueForType(value, pointerTo('void'), at);
@@ -1941,7 +2055,7 @@ function createRuntimeSession(
         const expected = frame.cells.get(lastParameter.binding!)?.reference;
         if (!expected || expected.objectId !== last.objectId) failure('INVALID_VA_START', 'El segundo argumento de va_start debe designar el último parámetro nombrado.', at);
         const target = memory.dereference(args[0], at);
-        if (!isPointer(target.type) || target.type.base !== 'void') failure('INVALID_VA_LIST', 'El primer argumento de va_start no es una va_list.', at);
+        if (!isPointer(target.type) || unqualifiedType(pointedToType(target.type) ?? 'void') !== 'void') failure('INVALID_VA_LIST', 'El primer argumento de va_start no es una va_list.', at);
         storeVaCursor(args[0], frame, frame.variadicArgs, 0, at);
         return { type: 'void', value: 0n };
       }
@@ -2000,10 +2114,10 @@ function createRuntimeSession(
     }
 
     function defaultArgumentPromotion(value: CValue, at: Location): CValue {
-      if (value.type === 'float') return valueForType(value, 'double', at);
+      if (unqualifiedType(value.type) === 'float') return valueForType(value, 'double', at);
       if (isInteger(value.type)) {
         const promoted = promote(value.type);
-        return promoted === value.type ? value : valueForType(value, promoted, at);
+        return sameType(promoted, value.type) ? value : valueForType(value, promoted, at);
       }
       return value;
     }
@@ -2020,23 +2134,34 @@ function createRuntimeSession(
         frameId: frame.frameId, scopeId, functionName: frame.compiled.fn.name, scopeName: layout.name,
       });
       for (const binding of layout.bindings) {
+        if (binding.linkage === 'external' || binding.globalBinding !== undefined) continue;
         let reference: ObjectReference;
-        if (binding.storageDuration === 'static') {
+        if (hasPersistentDuration(binding)) {
+          const duration = binding.storageDuration === 'thread-local' ? 'thread-local' : 'static';
+          const options = {
+            isConst: binding.isConst === true || qualifiersOf(binding.type).const || binding.qualifiers?.const === true,
+            ...(binding.alignment === undefined ? {} : { alignment: binding.alignment }),
+          };
           if (debugEvents) {
             reference = memory.findStaticObject(binding) ?? allocateDebugObject(
-              () => memory.staticObject(binding, binding.type, binding.location),
+              () => memory.staticObject(binding, binding.type, binding.location, duration, options),
               {
-                duration: 'static', origin: 'variable', typeSummary: debugTypeSummary(binding.type, ir.aggregates),
+                duration, origin: 'variable', typeSummary: debugTypeSummary(binding.type, ir.aggregates),
                 location: binding.location, frameId: null, scopeId: null, name: binding.name,
-                readOnly: binding.isConst === true,
+                readOnly: options.isConst,
               },
             );
-          } else reference = memory.staticObject(binding, binding.type, binding.location);
+          } else reference = memory.staticObject(binding, binding.type, binding.location, duration, options);
           if (!preparedStaticBindings.has(binding)) {
             memory.zeroInitialize(reference, binding.location);
             preparedStaticBindings.add(binding);
           }
-        } else reference = memory.allocate(binding.type, 'automatic', binding.location);
+        } else {
+          reference = memory.allocate(binding.type, 'automatic', binding.location, {
+            isConst: binding.isConst === true || qualifiersOf(binding.type).const || binding.qualifiers?.const === true,
+            ...(binding.alignment === undefined ? {} : { alignment: binding.alignment }),
+          });
+        }
         frame.cells.set(binding.id, { binding, reference });
         runtimeScope.cells.push(binding.id);
       }
@@ -2046,7 +2171,7 @@ function createRuntimeSession(
           const argument = frame.args[index];
           if (!argument) failure('ARGUMENT_COUNT', 'Falta un argumento de función para «' + parameter.name + '».', parameter.location);
           if (debugEvents) publishAutomaticBinding(frame, runtimeScope, target.binding, target.reference);
-          memory.write(target.reference, valueForType(argument, parameter.type, parameter.location), parameter.location);
+          memory.write(target.reference, valueForType(argument, parameter.type, parameter.location), parameter.location, true);
         });
       }
     }
@@ -2059,7 +2184,7 @@ function createRuntimeSession(
         memory.releaseScope(scope.token, scope.layout.location);
         for (const bindingId of scope.cells) {
           const target = frame.cells.get(bindingId);
-          if (target && target.binding.storageDuration !== 'static') memory.release(target.reference, target.binding.location);
+          if (target && !hasPersistentDuration(target.binding)) memory.release(target.reference, target.binding.location);
           frame.cells.delete(bindingId);
         }
         return;
@@ -2068,7 +2193,7 @@ function createRuntimeSession(
       const compoundReferences = [...memory.scopeObjectReferences(scope.token)].reverse();
       const bindingReferences = scope.cells.flatMap((bindingId) => {
         const target = frame.cells.get(bindingId);
-        return target && target.binding.storageDuration !== 'static' ? [target.reference] : [];
+        return target && !hasPersistentDuration(target.binding) ? [target.reference] : [];
       });
       const trackedReferences = [...compoundReferences, ...bindingReferences]
         .filter((reference) => debugObjects.has(reference.allocationId));
@@ -2081,7 +2206,7 @@ function createRuntimeSession(
         memory.releaseScope(scope.token, releaseLocation);
         for (const bindingId of scope.cells) {
           const target = frame.cells.get(bindingId);
-          if (target && target.binding.storageDuration !== 'static') memory.release(target.reference, target.binding.location);
+          if (target && !hasPersistentDuration(target.binding)) memory.release(target.reference, target.binding.location);
           frame.cells.delete(bindingId);
         }
       } catch (error) {
@@ -2164,7 +2289,7 @@ function createRuntimeSession(
         else if (node.op === 'leave') leave(frame);
         else if (node.op === 'declaration') {
           const target = localCell(frame, node.binding, node.location);
-          if (debugEvents && target.binding.storageDuration !== 'static') {
+          if (debugEvents && !hasPersistentDuration(target.binding)) {
             let ownerScope: RuntimeScope | undefined;
             for (let index = frame.scopes.length - 1; index >= 0; index--) {
               if (frame.scopes[index].cells.includes(node.binding)) {
@@ -2175,8 +2300,8 @@ function createRuntimeSession(
             if (!ownerScope) failure('INACTIVE_OBJECT', 'La declaración no pertenece a un ámbito activo.', node.location);
             publishAutomaticBinding(frame, ownerScope, target.binding, target.reference);
           }
-          if (node.initializer && (target.binding.storageDuration !== 'static' || !initializedStaticBindings.has(target.binding))) {
-            if (target.binding.storageDuration === 'static') initializedStaticBindings.add(target.binding);
+          if (node.initializer && (!hasPersistentDuration(target.binding) || !initializedStaticBindings.has(target.binding))) {
+            if (hasPersistentDuration(target.binding)) initializedStaticBindings.add(target.binding);
             initializeObject(target.reference, target.binding.type, node.initializer, frame);
           }
         } else if (node.op === 'expression') {
@@ -2264,7 +2389,7 @@ function createRuntimeSession(
         let value = frame.result;
         if (!value) {
           if (compiled.fn.name === 'main') value = integer(0);
-          else if (compiled.fn.returnType === 'void') value = { type: 'void', value: 0n };
+          else if (unqualifiedType(compiled.fn.returnType) === 'void') value = { type: 'void', value: 0n };
           else if (!used) value = defaultReturn(compiled.fn.returnType, at);
           else failure('MISSING_RETURN', 'La función «' + compiled.fn.name + '» termina sin devolver un valor.', compiled.fn.location);
         }
@@ -2273,16 +2398,18 @@ function createRuntimeSession(
       step(frame);
     }
     function defaultReturn(type: CValue['type'], at: Location): CValue {
-      if (isAggregate(type)) return { type, value: { kind: 'aggregate-value', snapshot: { initialized: true, zeroInitialized: true } } };
-      if (isArray(type) || isFunction(type) || type === 'void') failure('MISSING_RETURN', 'La función termina sin un valor de retorno válido.', at);
+      if (isAggregate(type)) return { type: unqualifiedType(type), value: { kind: 'aggregate-value', snapshot: { initialized: true, zeroInitialized: true } } };
+      if (isArray(type) || isFunction(type) || unqualifiedType(type) === 'void') failure('MISSING_RETURN', 'La función termina sin un valor de retorno válido.', at);
       return valueForType(integer(0), type, at);
     }
 
     function mainArguments(compiled: CompiledFunction): CValue[] {
       const parameters = compiled.fn.parameters;
       if (parameters.length === 0) return [];
-      if (parameters.length !== 2 || parameters[0].type !== 'int' || !isPointer(parameters[1].type) ||
-          !isPointer(parameters[1].type.base) || parameters[1].type.base.base !== 'char') {
+      const argvPointer = parameters[1] ? pointedToType(parameters[1].type) : undefined;
+      const argvElementPointer = argvPointer ? pointerType(argvPointer) : undefined;
+      if (parameters.length !== 2 || unqualifiedType(parameters[0]?.type ?? 'void') !== 'int' || !argvElementPointer ||
+          unqualifiedType(pointedToType(argvPointer!) ?? 'void') !== 'char') {
         failure('INVALID_ENTRY_SIGNATURE', 'main debe tener la forma int main(void) o int main(int, char **).', compiled.fn.location);
       }
       if (io!.argv.length > 2147483647) failure('ARGUMENT_COUNT_RANGE', 'El vector argv excede el rango de int para argc.', compiled.fn.location);
@@ -2308,16 +2435,21 @@ function createRuntimeSession(
 
     for (const global of ir.globals) {
       if (global.declarationOnly) continue;
+      const duration = global.threadLocal ? 'thread-local' : 'static';
+      const allocationOptions = {
+        isConst: global.isConst === true || qualifiersOf(global.type).const || global.qualifiers?.const === true,
+        ...(global.alignment === undefined ? {} : { alignment: global.alignment }),
+      };
       const reference = debugEvents
         ? memory.findStaticObject(global) ?? allocateDebugObject(
-          () => memory.staticObject(global, global.type, global.location),
+          () => memory.staticObject(global, global.type, global.location, duration, allocationOptions),
           {
-            duration: 'static', origin: 'variable', typeSummary: debugTypeSummary(global.type, ir.aggregates),
+            duration, origin: 'variable', typeSummary: debugTypeSummary(global.type, ir.aggregates),
             location: global.location, frameId: null, scopeId: null, name: global.name,
-            readOnly: global.isConst === true,
+            readOnly: allocationOptions.isConst,
           },
         )
-        : memory.staticObject(global, global.type, global.location);
+        : memory.staticObject(global, global.type, global.location, duration, allocationOptions);
       memory.zeroInitialize(reference, global.location);
       globalReferences.set(global.id, reference);
     }

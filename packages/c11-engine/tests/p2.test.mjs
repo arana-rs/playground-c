@@ -32,9 +32,9 @@ const runtimeError = (source, code) => {
   return result.diagnostics[0];
 };
 
-test('P4 preserves P2 scalar/control coverage and publishes current capabilities', () => {
+test('P5 preserves P2 scalar/control coverage and publishes current capabilities', () => {
   assert.equal(ENGINE_VERSION, '0.1.0');
-  assert.equal(CAPABILITIES.phase, 'P4');
+  assert.equal(CAPABILITIES.phase, 'P5');
   assert.equal(CAPABILITIES.completeC11, false);
   assert.equal(CAPABILITIES.multipleFiles, true);
   assert.equal(CAPABILITIES.library, 'partial');
@@ -42,13 +42,17 @@ test('P4 preserves P2 scalar/control coverage and publishes current capabilities
   assert.equal(CAPABILITIES.preprocessor, 'c11-translation-phases-and-macros-with-virtual-project-includes');
   assert.deepEqual(CAPABILITIES.virtualHeaders, [
     'assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h',
-    'limits.h', 'math.h', 'stdarg.h', 'stdbool.h', 'stddef.h', 'stdint.h',
+    'limits.h', 'math.h', 'stdarg.h', 'stdalign.h', 'stdbool.h', 'stddef.h', 'stdint.h',
     'stdio.h', 'stdlib.h', 'string.h', 'wchar.h',
   ]);
   assert.equal(CAPABILITIES.enumerations, 'int-compatible-constants-with-integer-constant-expressions-in-int-range');
-  assert.deepEqual(CAPABILITIES.aggregateMembers, ['named', 'anonymous-struct', 'anonymous-union']);
-  assert.deepEqual(CAPABILITIES.stddefMacros, ['NULL']);
-  assert.deepEqual(CAPABILITIES.stddefTypes, ['size_t', 'ptrdiff_t', 'wchar_t']);
+  assert.deepEqual(CAPABILITIES.aggregateMembers, ['named', 'anonymous-struct', 'anonymous-union', 'bit-fields', 'flexible-array-members']);
+  assert.deepEqual(CAPABILITIES.qualifiers, ['const', 'volatile', 'restrict']);
+  assert.equal(CAPABILITIES.genericSelection, true);
+  assert.deepEqual(CAPABILITIES.storageDurations, ['automatic', 'static', 'allocated', 'thread-local']);
+  assert.deepEqual(CAPABILITIES.stdalignMacros, ['alignas', 'alignof', '__alignas_is_defined', '__alignof_is_defined']);
+  assert.deepEqual(CAPABILITIES.stddefMacros, ['NULL', 'offsetof']);
+  assert.deepEqual(CAPABILITIES.stddefTypes, ['size_t', 'ptrdiff_t', 'wchar_t', 'max_align_t']);
   assert.deepEqual(CAPABILITIES.wideCharacterTypes, ['wchar_t', 'wint_t']);
   assert.deepEqual(CAPABILITIES.floatingTypes, ['float', 'double', 'long double']);
   assert.ok(CAPABILITIES.integerTypes.includes('unsigned long long'));
@@ -61,7 +65,7 @@ test('P4 preserves P2 scalar/control coverage and publishes current capabilities
   assert.equal(TARGET_PROFILE.longDoubleSignificandBits, 64);
   assert.equal(TARGET_PROFILE.longDoubleExponentBits, 15);
   assert.equal(TARGET_PROFILE.floatEvaluationMethod, 0);
-  for (const value of [CAPABILITIES, TARGET_PROFILE, CAPABILITIES.virtualHeaders, CAPABILITIES.aggregateMembers, CAPABILITIES.stddefMacros, CAPABILITIES.stddefTypes, CAPABILITIES.wideCharacterTypes, CAPABILITIES.mathFunctions, CAPABILITIES.integerTypes, CAPABILITIES.floatingTypes, CAPABILITIES.interactiveStdinFunctions]) assert.ok(Object.isFrozen(value));
+  for (const value of [CAPABILITIES, TARGET_PROFILE, CAPABILITIES.virtualHeaders, CAPABILITIES.aggregateMembers, CAPABILITIES.qualifiers, CAPABILITIES.storageClasses, CAPABILITIES.storageDurations, CAPABILITIES.linkage, CAPABILITIES.stdalignMacros, CAPABILITIES.stddefMacros, CAPABILITIES.stddefTypes, CAPABILITIES.wideCharacterTypes, CAPABILITIES.mathFunctions, CAPABILITIES.integerTypes, CAPABILITIES.floatingTypes, CAPABILITIES.interactiveStdinFunctions]) assert.ok(Object.isFrozen(value));
 });
 
 test('all LP64 scalar sizes and scalar sizeof expressions use the declared type', () => {
@@ -232,10 +236,8 @@ test('P2 constraints reject invalid operands, lvalues, control placement and fun
   ]) rejects(source);
 });
 
-test('features scheduled after P4 remain explicit preparation rejections', () => {
+test('library and concurrency features still pending remain explicit preparation rejections', () => {
   for (const source of [
-    'int main(void) { return _Generic(1, int: 2); }',
-    'int main(void) { _Alignas(16) int value; return value; }',
     '#include <math.h>\nint main(void) { return fma(1.0, 2.0, 3.0); }',
     '#include <threads.h>\nint main(void) { return 0; }',
   ]) rejects(source);

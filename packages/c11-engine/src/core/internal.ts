@@ -8,13 +8,27 @@ export type ScalarCType = '_Bool' | 'char' | 'signed char' | 'unsigned char' | '
 export interface PointerCType {
   readonly kind: 'pointer';
   readonly base: CType;
+  /** Legacy pointer qualification fields. New parsed types use QualifiedCType layers. */
   readonly const?: boolean;
+  readonly volatile?: boolean;
   readonly restrict?: boolean;
   /** Qualification on the pointed-to object type. */
   readonly baseConst?: boolean;
+  readonly baseVolatile?: boolean;
 }
 export interface ArrayCType { readonly kind: 'array'; readonly element: CType; readonly length: number | null }
 export interface AggregateCType { readonly kind: 'aggregate'; readonly id: number }
+export interface TypeQualifiers {
+  readonly const?: boolean;
+  readonly volatile?: boolean;
+  readonly restrict?: boolean;
+}
+/** Qualifiers are attached to one exact declarator layer, including scalar layers. */
+export interface QualifiedCType {
+  readonly kind: 'qualified';
+  readonly base: CType;
+  readonly qualifiers: TypeQualifiers;
+}
 export interface FunctionCType {
   readonly kind: 'function';
   readonly returnType: CType;
@@ -23,7 +37,7 @@ export interface FunctionCType {
   /** false represents a C declaration written as f() without a prototype. */
   readonly prototype?: boolean;
 }
-export type CType = ScalarCType | PointerCType | ArrayCType | AggregateCType | FunctionCType;
+export type CType = ScalarCType | PointerCType | ArrayCType | AggregateCType | FunctionCType | QualifiedCType;
 
 export interface ObjectPointerValue {
   readonly kind: 'object-pointer';
@@ -66,7 +80,7 @@ export interface ObjectReference {
   readonly parentId?: number;
   readonly memberIndex?: number;
 }
-export type StorageDuration = 'automatic' | 'static' | 'heap' | 'string-literal' | 'compound-literal';
+export type StorageDuration = 'automatic' | 'static' | 'thread-local' | 'heap' | 'string-literal' | 'compound-literal';
 
 export interface Binding {
   id: number;
@@ -77,10 +91,18 @@ export interface Binding {
   readonly isParameter?: boolean;
   /** Block-scope static objects have a stable storage key and session lifetime. */
   storageKey?: string;
-  storageDuration?: 'automatic' | 'static';
+  storageDuration?: 'automatic' | 'static' | 'thread-local';
   isConst?: boolean;
+  qualifiers?: TypeQualifiers;
+  requestedAlignment?: number;
+  alignment?: number;
+  threadLocal?: boolean;
+  linkage?: Linkage;
+  symbolKey?: string;
+  globalBinding?: number;
+  register?: boolean;
 }
-type ExpressionInfo = { location: Location; type?: CType; isConst?: boolean };
+type ExpressionInfo = { location: Location; type?: CType; isConst?: boolean; register?: boolean; bitField?: boolean };
 export type Expression =
   | (ExpressionInfo & { kind: 'literal'; value: CValue })
   | (ExpressionInfo & { kind: 'string'; bytes: readonly number[] })
@@ -95,10 +117,13 @@ export type Expression =
   | (ExpressionInfo & { kind: 'conditional'; condition: Expression; then: Expression; else: Expression })
   | (ExpressionInfo & { kind: 'index'; base: Expression; index: Expression })
   | (ExpressionInfo & { kind: 'member'; base: Expression; name: string; arrow: boolean; memberIndex?: number })
+  | (ExpressionInfo & { kind: 'generic'; control: Expression; associations: GenericAssociation[]; selected: Expression })
   | (ExpressionInfo & { kind: 'decay'; operand: Expression })
   | (ExpressionInfo & { kind: 'compoundLiteral'; objectType: CType; initializer: Initializer; duration: 'automatic' | 'static' })
   | (ExpressionInfo & { kind: 'call'; name?: string; callee?: Expression; args: Expression[]; functionIndex?: number; symbolKey?: string; builtin?: boolean })
   | (ExpressionInfo & { kind: 'vaArg'; ap: Expression; valueType: CType });
+
+export interface GenericAssociation { type?: CType; expression: Expression; location: Location }
 
 export type InitializerDesignator =
   | { kind: 'member'; name: string; memberIndex?: number; location: Location }
@@ -108,7 +133,33 @@ export type Initializer =
   | { kind: 'expression'; value: Expression; location: Location }
   | { kind: 'list'; items: InitializerItem[]; location: Location };
 
-export interface AggregateMember { name: string; type: CType; index: number; offset: number; location: Location; isConst?: boolean }
+export interface BitFieldLayout {
+  /** Declared bit width. Zero marks an unnamed allocation barrier only. */
+  width: number;
+  /** Byte offset of the allocation unit from the aggregate start. */
+  storageUnitOffset: number;
+  /** Allocation unit size in bytes. */
+  storageUnitSize: number;
+  /** Bit offset from the least significant bit of the little-endian unit. */
+  bitOffset: number;
+  /** Signedness chosen by the target profile for the declared bit-field type. */
+  signed: boolean;
+}
+export interface AggregateMember {
+  name: string;
+  type: CType;
+  index: number;
+  /** Byte offset, or allocation-unit start for a bit-field. */
+  offset: number;
+  location: Location;
+  isConst?: boolean;
+  qualifiers?: TypeQualifiers;
+  requestedAlignment?: number;
+  alignment?: number;
+  bitField?: BitFieldLayout;
+  flexibleArray?: boolean;
+  unnamedBitField?: boolean;
+}
 export interface AggregateDefinition {
   id: number;
   kind: 'struct' | 'union';
@@ -117,6 +168,8 @@ export interface AggregateDefinition {
   members: AggregateMember[];
   size?: number;
   alignment?: number;
+  flexibleMemberIndex?: number;
+  flexibleOffset?: number;
   location: Location;
 }
 export type Linkage = 'internal' | 'external';
@@ -134,13 +187,19 @@ export interface GlobalObject {
   /** An extern-only declaration does not allocate storage by itself. */
   declarationOnly?: boolean;
   isConst?: boolean;
+  qualifiers?: TypeQualifiers;
+  requestedAlignment?: number;
+  alignment?: number;
+  threadLocal?: boolean;
 }
-export interface ParsedProgram { functions: FunctionIR[]; aggregates: AggregateDefinition[]; globals: GlobalObject[]; translationUnit?: string }
+export interface StaticAssertion { condition: Expression; message: string; location: Location }
+export interface ParsedProgram { functions: FunctionIR[]; aggregates: AggregateDefinition[]; globals: GlobalObject[]; staticAssertions?: StaticAssertion[]; translationUnit?: string }
 
 export type Statement =
   | { kind: 'block'; statements: Statement[]; bindings?: number[]; location: Location; endLocation: Location }
   | { kind: 'sequence'; statements: Statement[]; location: Location }
-  | { kind: 'declaration'; name: string; type: CType; binding?: number; initializer?: Initializer; static?: boolean; const?: boolean; location: Location }
+  | { kind: 'declaration'; name: string; type: CType; binding?: number; initializer?: Initializer; static?: boolean; const?: boolean; extern?: boolean; threadLocal?: boolean; register?: boolean; alignment?: number; requestedAlignment?: number; symbolKey?: string; location: Location }
+  | { kind: 'staticAssert'; condition: Expression; message: string; location: Location }
   | { kind: 'return'; value?: Expression; location: Location }
   | { kind: 'expression'; value: Expression; location: Location }
   | { kind: 'if'; condition: Expression; scopeName: string; then: Statement; else?: Statement; location: Location }
@@ -152,7 +211,17 @@ export type Statement =
   | { kind: 'goto'; target: string; location: Location }
   | { kind: 'break' | 'continue'; location: Location }
   | { kind: 'empty'; location: Location };
-export interface Parameter { name: string; type: CType; binding?: number; isConst?: boolean; location: Location }
+export interface Parameter {
+  name: string;
+  type: CType;
+  binding?: number;
+  isConst?: boolean;
+  qualifiers?: TypeQualifiers;
+  register?: boolean;
+  /** Minimum element count promised by an array parameter declared with static. */
+  minimumArrayBound?: number;
+  location: Location;
+}
 export interface FunctionIR {
   name: string;
   returnType: CType;
@@ -168,6 +237,7 @@ export interface FunctionIR {
   prototype?: boolean;
   oldStyle?: boolean;
   inline?: boolean;
+  extern?: boolean;
   noreturn?: boolean;
 }
 export interface ProgramIR extends ParsedProgram { entry: string; mainIndex: number; sourceChars: number; tokenCount: number }

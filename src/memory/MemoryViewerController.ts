@@ -221,7 +221,7 @@ export class MemoryViewerController {
     cloneSnapshot: cloneMemoryViewerArraySnapshot,
   });
   private readonly aggregateSnapshotHistory = new PersistentSnapshotHistory<DebugAggregateSnapshot>(128, {
-    getId: aggregate => aggregate.rootId,
+    getId: aggregate => aggregate.viewId ?? aggregate.rootId,
     sameSnapshot: sameMemoryViewerAggregateSnapshot,
     cloneSnapshot: cloneMemoryViewerAggregateSnapshot,
   });

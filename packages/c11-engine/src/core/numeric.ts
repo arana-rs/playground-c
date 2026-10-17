@@ -7,7 +7,10 @@ import {
 } from './binary80.ts';
 import type { Binary80Value } from './binary80.ts';
 import { HEAP_ALLOCATOR_BUILTINS, HEAP_ALLOCATOR_SIGNATURES } from './allocator-builtins.ts';
-import { canConvertPointerType, compatibleType, isAggregate, isArithmetic, isInteger, isPointer, pointerTo, scalarSize } from './type-system.ts';
+import {
+  aggregateType, canConvertPointerType, compatibleType, functionType, isArithmetic, isInteger, isPointer,
+  pointedToType, pointerTo, pointerType, scalarSize, unqualifiedType,
+} from './type-system.ts';
 import type { AggregateContext } from './type-system.ts';
 
 // Fixed P2 target: x86-64 LP64, signed plain char, two's-complement integers.
@@ -31,13 +34,16 @@ const integers: Record<string, IntegerInfo | undefined> = {
 
 export { isInteger };
 export function sizeOf(type: CType): number {
-  if (typeof type !== 'string') return type.kind === 'pointer' ? 8 : 0;
-  return scalarSize(type);
+  const unqualified = unqualifiedType(type);
+  return pointerType(unqualified) ? 8 : scalarSize(unqualified);
 }
 export function promote(type: CType): CType {
-  return integers[String(type)] && integers[String(type)]!.rank < 3 ? 'int' : type;
+  const unqualified = unqualifiedType(type);
+  return integers[String(unqualified)] && integers[String(unqualified)]!.rank < 3 ? 'int' : unqualified;
 }
 export function commonType(left: CType, right: CType): CType {
+  left = unqualifiedType(left);
+  right = unqualifiedType(right);
   if (!isArithmetic(left) || !isArithmetic(right)) return 'void';
   if (left === 'long double' || right === 'long double') return 'long double';
   if (left === 'double' || right === 'double') return 'double';
@@ -54,6 +60,7 @@ export function commonType(left: CType, right: CType): CType {
   return `unsigned ${signed}` as CType;
 }
 function bounds(type: CType): { min: bigint; max: bigint } {
+  type = unqualifiedType(type);
   const info = integers[String(type)]!;
   if (type === '_Bool') return { min: 0n, max: 1n };
   return info.unsigned
@@ -61,10 +68,12 @@ function bounds(type: CType): { min: bigint; max: bigint } {
     : { min: -(1n << BigInt(info.bits - 1)), max: (1n << BigInt(info.bits - 1)) - 1n };
 }
 function normalize(value: bigint, type: CType): bigint {
+  type = unqualifiedType(type);
   const info = integers[String(type)]!;
   return info.unsigned ? BigInt.asUintN(info.bits, value) : BigInt.asIntN(info.bits, value);
 }
 function checked(value: bigint, type: CType, location: Location): CValue {
+  type = unqualifiedType(type);
   const info = integers[String(type)]!;
   if (info.unsigned) return { type, value: normalize(value, type) };
   const range = bounds(type);
@@ -122,16 +131,17 @@ export function truth(value: CValue, location: Location = defaultLocation): bool
 }
 export function convert(value: CValue, type: CType, location: Location, aggregates: AggregateContext = []): CValue {
   void aggregates;
+  type = unqualifiedType(type);
   if (type === 'void') return { type, value: 0n };
   if (type === '_Bool') return { type, value: truth(value, location) ? 1n : 0n };
-  if (typeof type !== 'string' && type.kind === 'pointer') {
-    if (typeof value.type !== 'string' && value.type.kind === 'pointer') {
+  if (pointerType(type)) {
+    if (pointerType(value.type)) {
       if (!canConvertPointerType(value.type, type)) failure('INVALID_CONVERSION', 'Los tipos de puntero no son compatibles para esta conversión.', location);
       const pointerValue = value.value;
       if (pointerValue !== null && (typeof pointerValue !== 'object' || !['object-pointer', 'function-pointer'].includes(pointerValue.kind))) {
         failure('INVALID_CONVERSION', 'El valor no representa un puntero.', location);
       }
-      if ((type.base && typeof type.base !== 'string' && type.base.kind === 'function') !== (pointerValue !== null && typeof pointerValue === 'object' && pointerValue.kind === 'function-pointer')) {
+      if (!!functionType(pointedToType(type) ?? 'void') !== (pointerValue !== null && typeof pointerValue === 'object' && pointerValue.kind === 'function-pointer')) {
         failure('INVALID_CONVERSION', 'No se puede convertir un puntero a función en uno a objeto ni a void*.', location);
       }
       return { type, value: pointerValue as CValue['value'] };
@@ -140,7 +150,7 @@ export function convert(value: CValue, type: CType, location: Location, aggregat
     failure('INVALID_CONVERSION', 'Un puntero solo acepta otro puntero compatible o una constante de puntero nulo.', location);
   }
   if (typeof type !== 'string' || !isArithmetic(type)) {
-    if (isAggregate(type) && compatibleType(value.type, type) && typeof value.value === 'object' && value.value !== null && value.value.kind === 'aggregate-value') {
+    if (aggregateType(type) && compatibleType(value.type, type) && typeof value.value === 'object' && value.value !== null && value.value.kind === 'aggregate-value') {
       return { type, value: value.value };
     }
     failure('INVALID_CONVERSION', `La conversión a ${typeof type === 'string' ? type : 'un tipo agregado'} no pertenece a las conversiones escalares P3.`, location);

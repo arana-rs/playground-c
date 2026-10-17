@@ -4,11 +4,29 @@ import type {
   AggregateDefinition, AggregateValue, CType, CValue, FunctionPointerValue, Location, ObjectPointerValue,
   ObjectReference, ObjectScalarValue, ObjectSnapshot, StorageDuration,
 } from './internal.ts';
-import { alignOfType, arrayOf, compatibleType, isAggregate, isArithmetic, isArray, isFunction, isInteger, isPointer, isScalar, pointerTo, sameType, sizeOfType } from './type-system.ts';
+import {
+  aggregateType, alignOfType, arrayOf, arrayType, compatibleType, functionType, integerInfo, isAggregate, isArithmetic,
+  isArray, isFunction, isInteger, isPointer, isScalar, pointerTo, pointedToType, qualifiersOf,
+  pointerType, sameType, sizeOfType, unqualifiedType,
+} from './type-system.ts';
 import { VIRTUAL_HEAP_LAYOUT, VIRTUAL_MEMORY_LAYOUT } from './types.ts';
 import type { DebugPointerStatus, EngineMetrics } from './types.ts';
 
 const ALLOCATION_ALIGNMENT = BigInt(VIRTUAL_MEMORY_LAYOUT.alignmentBytes);
+const CORRESPONDING_UNSIGNED: Readonly<Record<string, string>> = Object.freeze({
+  'signed char': 'unsigned char',
+  short: 'unsigned short',
+  int: 'unsigned int',
+  long: 'unsigned long',
+  'long long': 'unsigned long long',
+});
+const CORRESPONDING_SIGNED: Readonly<Record<string, string>> = Object.freeze({
+  'unsigned char': 'signed char',
+  'unsigned short': 'short',
+  'unsigned int': 'int',
+  'unsigned long': 'long',
+  'unsigned long long': 'long long',
+});
 
 interface AddressReservation {
   readonly virtualBase: bigint;
@@ -30,6 +48,10 @@ interface RuntimeObject {
   readonly rawAllocation: boolean;
   readonly rawView?: boolean;
   readonly byteView?: boolean;
+  /** Initialization shadow imported by memcpy for a typed heap view. */
+  initializationShadow?: ObjectSnapshot;
+  initializationShadowApplied?: boolean;
+  readonly alignment?: number;
   initialized: boolean;
   value?: ObjectScalarValue;
   zeroInitialized: boolean;
@@ -45,12 +67,50 @@ interface AllocationRoot extends RuntimeObject {
   readonly representation: Map<number, number>;
   /** Shadow provenance for complete LP64 object-pointer representations in this allocation. */
   readonly pointerValues: Map<number, ObjectPointerValue>;
+  /** C types established for ranges of malloc storage by typed stores or byte copies. */
+  readonly effectiveTypes: EffectiveTypeRange[];
+  /** Original const subobjects remain protected even after a cast removes qualification. */
+  readonly constRanges: ConstRange[];
   /** Pointer-typed subobjects whose cached C values can be invalidated by byte writes. */
   readonly pointerObjects: Set<RuntimeObject>;
   readonly heapSlotCount?: bigint;
 }
 
+interface EffectiveTypeRange {
+  readonly start: number;
+  readonly end: number;
+  readonly type: CType;
+  readonly initialization?: ObjectSnapshot;
+}
+
+interface ConstRange {
+  readonly start: number;
+  readonly end: number;
+  /** A bit-field const subobject protects only its declared bits in the shared unit. */
+  readonly bitMask?: bigint;
+}
+
+export interface MemoryAllocationOptions {
+  readonly isConst?: boolean;
+  readonly alignment?: number;
+}
+
+export interface EffectiveTypeCopy {
+  readonly relativeOffset: number;
+  readonly size: number;
+  readonly type: CType;
+  readonly initialization?: ObjectSnapshot;
+}
+
 interface RuntimeObjectDescription {
+  readonly objectId: number;
+  readonly allocationId: number;
+  readonly duration: StorageDuration;
+  readonly addressVirtual: bigint;
+  readonly size: number;
+}
+
+interface RuntimeObjectViewDescription {
   readonly objectId: number;
   readonly allocationId: number;
   readonly duration: StorageDuration;
@@ -72,6 +132,8 @@ export class VirtualMemory {
   private liveBytes = 0;
   private readonly functionRepresentations = new Map<bigint, FunctionPointerValue>();
   private readonly formattedObjectPointers = new Map<bigint, ObjectPointerValue>();
+  /** Provenance shadow for pointer -> uintptr_t -> pointer round trips. */
+  private readonly integerPointerValues = new Map<bigint, ObjectPointerValue | FunctionPointerValue>();
   /** Occupied extents are indexed once per live allocation, not once per 16-byte slot. */
   private readonly heapExtents = new Map<bigint, bigint>();
   /** Static objects persist until the session ends. */
@@ -104,9 +166,101 @@ export class VirtualMemory {
     };
   }
 
+  /** Describe the exact typed view represented by a reference, not its allocation root. */
+  describeObjectView(ref: ObjectReference, at: Location): RuntimeObjectViewDescription {
+    const node = this.nodeFor(ref, at);
+    const root = this.roots.get(node.allocationId);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'La referencia no identifica una asignación activa.', at);
+    let size = node.size;
+    const aggregate = aggregateType(node.type);
+    if (aggregate) {
+      const definition = this.aggregate(aggregate, at);
+      // A flexible array member occupies the remaining storage supplied for its
+      // containing object, even though sizeof(type) stops at the fixed prefix.
+      if (definition.flexibleOffset !== undefined) {
+        size = Math.max(size, root.byteOffset + root.size - node.byteOffset);
+      }
+    }
+    return {
+      objectId: node.id,
+      allocationId: node.allocationId,
+      duration: root.duration,
+      addressVirtual: root.virtualBase + BigInt(node.byteOffset - root.byteOffset),
+      size,
+    };
+  }
+
   rootReference(allocationId: number): ObjectReference | undefined {
     const root = this.roots.get(allocationId);
     return root?.alive ? this.reference(root) : undefined;
+  }
+
+  heapAggregateReferences(): readonly ObjectReference[] {
+    const references: ObjectReference[] = [];
+    for (const [allocationId, views] of this.rawViews) {
+      const root = this.roots.get(allocationId);
+      if (!root?.alive || root.duration !== 'heap') continue;
+      for (const view of views.values()) {
+        if (!view.alive || !aggregateType(view.type)) continue;
+        references.push(this.reference(view));
+      }
+    }
+    return Object.freeze(references);
+  }
+
+  flexibleArrayExtent(ref: ObjectReference, memberIndex: number, at: Location): {
+    readonly elementSize: number;
+    readonly capacityBytes: number;
+    readonly length: number;
+  } | undefined {
+    const node = this.nodeFor(ref, at);
+    const aggregate = aggregateType(node.type);
+    if (!aggregate) return undefined;
+    const definition = this.aggregate(aggregate, at);
+    const member = definition.members[memberIndex];
+    if (!member?.flexibleArray || definition.flexibleOffset === undefined) return undefined;
+    const array = arrayType(member.type);
+    if (!array) return undefined;
+    const elementSize = sizeOfType(array.element, this.aggregates, member.location);
+    const offset = node.byteOffset + definition.flexibleOffset;
+    const capacityBytes = Math.max(0, this.rootFor(node, at).size - offset);
+    return Object.freeze({ elementSize, capacityBytes, length: Math.floor(capacityBytes / elementSize) });
+  }
+
+  /** Inspect one arithmetic FAM cell from representation/shadow state without creating a subobject or C read. */
+  inspectFlexibleArrayElement(
+    ref: ObjectReference,
+    memberIndex: number,
+    index: number,
+    at: Location,
+  ): { readonly initialized: boolean; readonly value?: ObjectScalarValue } | undefined {
+    const parent = this.nodeFor(ref, at);
+    const aggregate = aggregateType(parent.type);
+    if (!aggregate) return undefined;
+    const definition = this.aggregate(aggregate, at);
+    const member = definition.members[memberIndex];
+    const array = member?.flexibleArray ? arrayType(member.type) : undefined;
+    if (!member?.flexibleArray || !array || !isArithmetic(array.element) || definition.flexibleOffset === undefined) return undefined;
+    const extent = this.flexibleArrayExtent(ref, memberIndex, at);
+    if (!extent || !Number.isSafeInteger(index) || index < 0 || index >= extent.length) return undefined;
+
+    const arrayNode = parent.children.get(memberIndex);
+    const child = arrayNode?.children.get(index);
+    const zeroInitialized = child
+      ? this.hasZeroInitializedAncestor(child)
+      : arrayNode
+        ? this.hasZeroInitializedAncestor(arrayNode)
+        : this.hasZeroInitializedAncestor(parent);
+    const byteOffset = parent.byteOffset + definition.flexibleOffset + index * extent.elementSize;
+    return this.inspectArithmeticRepresentation(
+      this.rootFor(parent, at),
+      array.element,
+      byteOffset,
+      extent.elementSize,
+      child?.initialized ?? false,
+      zeroInitialized,
+      at,
+    );
   }
 
   isAlive(ref: ObjectReference): boolean {
@@ -131,9 +285,12 @@ export class VirtualMemory {
       pointer.byteOffset === root.byteOffset && pointer.arrayId === root.id;
   }
 
-  allocate(type: CType, duration: StorageDuration, at: Location): ObjectReference {
+  allocate(type: CType, duration: StorageDuration, at: Location, options: MemoryAllocationOptions = {}): ObjectReference {
     const size = sizeOfType(type, this.aggregates, at);
-    return this.allocateRoot(type, size, duration, at, false);
+    const naturalAlignment = alignOfType(type, this.aggregates, at);
+    const alignment = Math.max(naturalAlignment, options.alignment ?? 1);
+    this.validateAlignment(alignment, at);
+    return this.allocateRoot(type, size, duration, at, false, undefined, undefined, undefined, { ...options, alignment });
   }
 
   allocateRaw(bytes: number, at: Location): ObjectPointerValue | null {
@@ -183,6 +340,9 @@ export class VirtualMemory {
         .filter(([offset]) => offset >= 0 && offset + 8 <= copiedBytes)
         .map(([offset, value]) => [offset, { ...value }] as const),
     );
+    const effectiveTypes = oldRoot.effectiveTypes
+      .filter((range) => range.start >= 0 && range.end <= copiedBytes)
+      .map((range) => ({ ...range }));
 
     const newReference = this.allocateRoot(
       arrayOf('unsigned char', bytes), bytes, 'heap', at, true,
@@ -192,6 +352,7 @@ export class VirtualMemory {
     if (!newRoot) failure('ENGINE_INTERNAL_ERROR', 'Falta la raíz de una reasignación heap recién creada.', at);
     for (const [offset, byte] of representation) newRoot.representation.set(offset, byte);
     for (const [offset, value] of pointerValues) newRoot.pointerValues.set(offset, value);
+    newRoot.effectiveTypes.push(...effectiveTypes);
 
     // A successful realloc creates a fresh C object identity even when its address stays put.
     this.invalidateRoot(oldRoot.allocationId, at);
@@ -221,10 +382,16 @@ export class VirtualMemory {
     this.invalidateRoot(root.allocationId, at);
   }
 
-  staticObject(key: object, type: CType, at: Location, duration: StorageDuration = 'static'): ObjectReference {
+  staticObject(
+    key: object,
+    type: CType,
+    at: Location,
+    duration: StorageDuration = 'static',
+    options: MemoryAllocationOptions = {},
+  ): ObjectReference {
     const prior = this.staticObjects.get(key);
     if (prior) return prior;
-    const ref = this.allocate(type, duration, at);
+    const ref = this.allocate(type, duration, at, options);
     this.staticObjects.set(key, ref);
     if (duration === 'string-literal') this.nodeFor(ref, at).readOnly = true;
     return ref;
@@ -249,12 +416,18 @@ export class VirtualMemory {
     return ref;
   }
 
-  automaticObject(key: object, type: CType, scopeToken: object, at: Location): ObjectReference {
+  automaticObject(
+    key: object,
+    type: CType,
+    scopeToken: object,
+    at: Location,
+    options: MemoryAllocationOptions = {},
+  ): ObjectReference {
     let byScope = this.automaticObjects.get(key);
     if (!byScope) { byScope = new WeakMap(); this.automaticObjects.set(key, byScope); }
     const prior = byScope.get(scopeToken);
     if (prior) return prior;
-    const ref = this.allocate(type, 'compound-literal', at);
+    const ref = this.allocate(type, 'compound-literal', at, options);
     byScope.set(scopeToken, ref);
     let objects = this.scopeObjects.get(scopeToken);
     if (!objects) { objects = []; this.scopeObjects.set(scopeToken, objects); }
@@ -275,9 +448,10 @@ export class VirtualMemory {
 
   element(ref: ObjectReference, index: number | bigint, at: Location): ObjectReference {
     const parent = this.nodeFor(ref, at);
-    if (!isArray(parent.type)) failure('INVALID_SUBSCRIPT', 'El subíndice requiere un objeto array.', at);
+    const array = arrayType(parent.type);
+    if (!array) failure('INVALID_SUBSCRIPT', 'El subíndice requiere un objeto array.', at);
     const numericIndex = typeof index === 'bigint' ? Number(index) : index;
-    if (!Number.isSafeInteger(numericIndex) || numericIndex < 0 || parent.type.length === null || numericIndex >= parent.type.length) {
+    if (!Number.isSafeInteger(numericIndex) || numericIndex < 0 || array.length === null || numericIndex >= array.length) {
       failure('ARRAY_BOUNDS', 'El índice está fuera de los límites del array.', at);
     }
     return this.child(parent, numericIndex, at);
@@ -285,29 +459,33 @@ export class VirtualMemory {
 
   member(ref: ObjectReference, index: number, at: Location): ObjectReference {
     const parent = this.nodeFor(ref, at);
-    if (!isAggregate(parent.type)) failure('INVALID_MEMBER_ACCESS', 'El acceso a miembro requiere un struct o union.', at);
-    const definition = this.aggregate(parent.type, at);
+    const aggregate = aggregateType(parent.type);
+    if (!aggregate) failure('INVALID_MEMBER_ACCESS', 'El acceso a miembro requiere un struct o union.', at);
+    const definition = this.aggregate(aggregate, at);
     const member = definition.members[index];
     if (!member) failure('UNKNOWN_MEMBER', `No existe el miembro con índice ${index}.`, at);
+    if (member.bitField?.width === 0) failure('INVALID_MEMBER_ACCESS', 'Un bit-field sin nombre o de ancho cero no es accesible.', at);
     return this.child(parent, index, at, member);
   }
 
   dereference(pointer: CValue, at: Location): ObjectReference {
-    if (!isPointer(pointer.type)) failure('INVALID_POINTER_ACCESS', 'La desreferencia requiere un puntero.', at);
-    if (pointer.type.base === 'void' || isFunction(pointer.type.base)) failure('INVALID_POINTER_ACCESS', 'El puntero no designa un objeto completo.', at);
+    const targetType = pointedToType(pointer.type);
+    if (!targetType) failure('INVALID_POINTER_ACCESS', 'La desreferencia requiere un puntero.', at);
+    const targetBase = unqualifiedType(targetType);
+    if (targetBase === 'void' || isFunction(targetBase)) failure('INVALID_POINTER_ACCESS', 'El puntero no designa un objeto completo.', at);
     if (pointer.value === null) failure('NULL_DEREFERENCE', 'No se puede desreferenciar un puntero nulo.', at);
     const address = pointer.value as ObjectPointerValue;
     if (!address || address.kind !== 'object-pointer') failure('INVALID_POINTER_ACCESS', 'El valor no es una dirección de objeto.', at);
     const root = this.roots.get(address.allocationId);
     if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
-    const size = sizeOfType(pointer.type.base, this.aggregates, at);
+    const size = sizeOfType(targetType, this.aggregates, at);
     const end = address.byteOffset + size;
     if (address.byteOffset < address.boundsStart || address.byteOffset >= address.boundsEnd || end > address.boundsEnd) {
       failure('POINTER_BOUNDS', 'El acceso cae fuera del objeto apuntado o usa un puntero one-past.', at);
     }
-    const alignment = this.alignment(pointer.type.base, at);
-    if ((address.byteOffset - root.byteOffset) % alignment !== 0) failure('MISALIGNED_POINTER', 'El puntero no cumple la alineación del tipo apuntado.', at);
-    const target = this.locate(root, address.byteOffset, pointer.type.base, at);
+    const alignment = this.alignment(targetType, at);
+    if ((root.virtualBase + BigInt(address.byteOffset)) % BigInt(alignment) !== 0n) failure('MISALIGNED_POINTER', 'El puntero no cumple la alineación del tipo apuntado.', at);
+    const target = this.locate(root, address.byteOffset, targetType, at);
     return this.reference(target, {
       arrayId: address.arrayId,
       boundsStart: address.boundsStart,
@@ -316,10 +494,12 @@ export class VirtualMemory {
     });
   }
 
-  addressOf(ref: ObjectReference, pointerType?: Extract<CType, { kind: 'pointer' }>): CValue {
+  addressOf(ref: ObjectReference, pointerCType?: Extract<CType, { kind: 'pointer' }>): CValue {
     const node = this.nodeFor(ref, { file: 'main.c', line: 1, column: 1 });
-    const targetType = pointerType ?? { kind: 'pointer', base: node.type };
-    if (targetType.base !== node.type && !compatibleType(targetType.base, node.type)) {
+    const targetType: CType = pointerCType ?? { kind: 'pointer', base: node.type };
+    const pointer = pointerType(targetType);
+    const pointedType = pointer ? pointedToType(targetType) : undefined;
+    if (!pointer || !pointedType || !compatibleType(unqualifiedType(pointedType), unqualifiedType(node.type))) {
       failure('TYPE_ERROR', 'El tipo del puntero no coincide con el objeto direccionado.', { file: 'main.c', line: 1, column: 1 });
     }
     const size = node.size;
@@ -335,9 +515,10 @@ export class VirtualMemory {
 
   decay(ref: ObjectReference): CValue {
     const node = this.nodeFor(ref, { file: 'main.c', line: 1, column: 1 });
-    if (!isArray(node.type)) failure('INVALID_ARRAY_DECAY', 'La conversión array-a-puntero requiere un array.', { file: 'main.c', line: 1, column: 1 });
+    const array = arrayType(node.type);
+    if (!array) failure('INVALID_ARRAY_DECAY', 'La conversión array-a-puntero requiere un array.', { file: 'main.c', line: 1, column: 1 });
     return {
-      type: { kind: 'pointer', base: node.type.element },
+      type: { kind: 'pointer', base: array.element },
       value: {
         kind: 'object-pointer', allocationId: node.allocationId, arrayId: node.id,
         byteOffset: node.byteOffset, boundsStart: node.byteOffset, boundsEnd: node.byteOffset + node.size,
@@ -346,13 +527,14 @@ export class VirtualMemory {
   }
 
   pointerAdd(pointer: CValue, count: bigint, at: Location): CValue {
-    if (!isPointer(pointer.type) || pointer.type.base === 'void' || isFunction(pointer.type.base) || !pointer.value) {
+    const targetType = pointedToType(pointer.type);
+    if (!targetType || unqualifiedType(targetType) === 'void' || isFunction(targetType) || !pointer.value) {
       failure('INVALID_POINTER_ARITHMETIC', 'La aritmética requiere un puntero no nulo a tipo de objeto completo.', at);
     }
     if (typeof pointer.value !== 'object' || pointer.value.kind !== 'object-pointer') failure('INVALID_POINTER_ARITHMETIC', 'La aritmética requiere un puntero a objeto.', at);
     this.assertAlive(pointer, at);
     const address = pointer.value;
-    const stride = sizeOfType(pointer.type.base, this.aggregates, at);
+    const stride = sizeOfType(targetType, this.aggregates, at);
     const offset = BigInt(address.byteOffset) + count * BigInt(stride);
     if (offset < BigInt(address.boundsStart) || offset > BigInt(address.boundsEnd) || (offset - BigInt(address.boundsStart)) % BigInt(stride) !== 0n) {
       failure('POINTER_BOUNDS', 'La aritmética produjo una dirección fuera del array o más allá de one-past.', at);
@@ -363,15 +545,19 @@ export class VirtualMemory {
   }
 
   pointerDifference(left: CValue, right: CValue, at: Location): CValue {
-    if (!isPointer(left.type) || !isPointer(right.type) || !sameType(left.type.base, right.type.base) || !left.value || !right.value ||
+    const leftBase = pointedToType(left.type), rightBase = pointedToType(right.type);
+    const characterRepresentation = !!leftBase && !!rightBase && isCharacterType(leftBase) && isCharacterType(rightBase);
+    if (!leftBase || !rightBase || !sameType(leftBase, rightBase) || !left.value || !right.value ||
       typeof left.value !== 'object' || typeof right.value !== 'object' || left.value.kind !== 'object-pointer' || right.value.kind !== 'object-pointer') {
       failure('INVALID_POINTER_DIFFERENCE', 'La resta requiere punteros compatibles dentro del mismo array.', at);
     }
     this.assertAlive(left, at);
     this.assertAlive(right, at);
     const a = left.value, b = right.value;
-    if (a.allocationId !== b.allocationId || a.arrayId !== b.arrayId) failure('INVALID_POINTER_DIFFERENCE', 'La resta de punteros de objetos distintos no está definida.', at);
-    const stride = sizeOfType(left.type.base, this.aggregates, at);
+    if (a.allocationId !== b.allocationId || (!characterRepresentation && a.arrayId !== b.arrayId)) {
+      failure('INVALID_POINTER_DIFFERENCE', 'La resta de punteros de objetos distintos no está definida.', at);
+    }
+    const stride = sizeOfType(leftBase, this.aggregates, at);
     const difference = BigInt(a.byteOffset - b.byteOffset);
     if (difference % BigInt(stride) !== 0n) failure('INVALID_POINTER_DIFFERENCE', 'La diferencia no es un número entero de elementos.', at);
     const result = difference / BigInt(stride);
@@ -380,7 +566,8 @@ export class VirtualMemory {
   }
 
   pointerRelationalCompare(left: CValue, right: CValue, operator: string, at: Location): boolean {
-    if (!isPointer(left.type) || !isPointer(right.type) || !compatibleType(left.type.base, right.type.base) ||
+    const leftBase = pointedToType(left.type), rightBase = pointedToType(right.type);
+    if (!leftBase || !rightBase || !compatibleType(unqualifiedType(leftBase), unqualifiedType(rightBase)) ||
         !left.value || !right.value || typeof left.value !== 'object' || typeof right.value !== 'object' ||
         left.value.kind !== 'object-pointer' || right.value.kind !== 'object-pointer') {
       failure('INVALID_POINTER_COMPARISON', 'La comparación relacional requiere punteros a objetos compatibles.', at);
@@ -401,8 +588,8 @@ export class VirtualMemory {
       const parentId = leftObject?.parentId;
       const parent = parentId === undefined ? undefined : this.records.get(parentId);
       if (!leftObject || !rightObject || leftObject.byteOffset !== a.byteOffset || rightObject.byteOffset !== b.byteOffset ||
-          !sameType(leftObject.type, left.type.base) || !sameType(rightObject.type, right.type.base) ||
-          parentId === undefined || parentId !== rightObject.parentId || !parent || !isAggregate(parent.type)) {
+          !sameType(leftObject.type, leftBase) || !sameType(rightObject.type, rightBase) ||
+          parentId === undefined || parentId !== rightObject.parentId || !parent || !aggregateType(parent.type)) {
         failure('INVALID_POINTER_COMPARISON', 'La comparación relacional requiere elementos del mismo array o miembros del mismo agregado.', at);
       }
       const definition = this.aggregate(parent.type, at);
@@ -456,6 +643,56 @@ export class VirtualMemory {
     failure('INVALID_POINTER_FORMAT', 'El valor de %p no es un puntero.', at);
   }
 
+  /** Return the session's LP64 representation for an object or function pointer cast. */
+  pointerInteger(pointer: CValue, at: Location): bigint {
+    if (!isPointer(pointer.type)) failure('INVALID_CONVERSION', 'La conversión requiere un puntero.', at);
+    if (pointer.value === null) return 0n;
+    if (typeof pointer.value !== 'object') failure('INVALID_POINTER_REPRESENTATION', 'El valor no representa un puntero.', at);
+    if (pointer.value.kind === 'function-pointer') {
+      if (pointer.value.functionIndex === null) return 0n;
+      const address = (1n << 63n) | BigInt(pointer.value.functionIndex + 1);
+      this.integerPointerValues.set(address, { ...pointer.value });
+      return address;
+    }
+    if (pointer.value.kind !== 'object-pointer') failure('INVALID_POINTER_REPRESENTATION', 'El valor no representa un puntero.', at);
+    this.assertAlive(pointer, at);
+    const root = this.roots.get(pointer.value.allocationId);
+    if (!root) failure('INVALID_POINTER_REPRESENTATION', 'El puntero no identifica un objeto virtual.', at);
+    const address = root.virtualBase + BigInt(pointer.value.byteOffset);
+    this.integerPointerValues.set(address, { ...pointer.value });
+    return address;
+  }
+
+  /** Reconstruct only known or currently mapped virtual addresses; provenance is retained when available. */
+  pointerFromInteger(value: bigint, type: CType, at: Location): CValue {
+    const pointer = pointerType(type);
+    if (!pointer) failure('INVALID_CONVERSION', 'La conversión de entero requiere un tipo puntero.', at);
+    const address = BigInt.asUintN(64, value);
+    if (address === 0n) return { type, value: null };
+    const expectsFunction = isFunction(pointedToType(type) ?? 'void');
+    const remembered = this.integerPointerValues.get(address) ?? this.formattedObjectPointers.get(address) ?? this.functionRepresentations.get(address);
+    if (remembered) {
+      if (expectsFunction !== (remembered.kind === 'function-pointer')) {
+        failure('INVALID_POINTER_CONVERSION', 'La representación entera pertenece a una categoría de puntero distinta.', at);
+      }
+      return { type, value: { ...remembered } };
+    }
+    if (expectsFunction) failure('INVALID_POINTER_REPRESENTATION', 'El entero no corresponde a una dirección de función conocida.', at);
+    for (const root of this.roots.values()) {
+      const delta = address - root.virtualBase;
+      if (delta < 0n || delta > BigInt(root.size)) continue;
+      const byteOffset = Number(delta);
+      return {
+        type,
+        value: {
+          kind: 'object-pointer', allocationId: root.allocationId, arrayId: root.id,
+          byteOffset, boundsStart: 0, boundsEnd: root.size,
+        },
+      };
+    }
+    failure('INVALID_POINTER_REPRESENTATION', 'El entero no corresponde a una dirección virtual conocida.', at);
+  }
+
   /** Parse only null or an object-pointer representation previously emitted by formatPointer. */
   parsePointer(text: string, at: Location): CValue {
     const match = /^0[xX]([0-9a-fA-F]+)$/.exec(text);
@@ -485,10 +722,18 @@ export class VirtualMemory {
     const node = this.nodeFor(ref, at);
     if (isArray(node.type)) failure('ARRAY_VALUE', 'Un array debe convertirse a puntero antes de evaluarse como expresión.', at);
     if (isAggregate(node.type)) {
+      this.ensureEffectiveType(node, at);
       const aggregate: AggregateValue = { kind: 'aggregate-value', snapshot: this.snapshot(node, at) };
-      return { type: node.type, value: aggregate };
+      return { type: unqualifiedType(node.type), value: aggregate };
     }
-    return { type: node.type, value: this.readScalar(node, at) };
+    const bitField = this.bitFieldFor(node, at);
+    if (bitField) {
+      this.ensureEffectiveType(node, at);
+      const type = this.bitFieldPromotionType(node.type, bitField.member.bitField!);
+      return { type, value: this.readBitField(node, bitField.member.bitField!, at) };
+    }
+    this.ensureEffectiveType(node, at);
+    return { type: unqualifiedType(node.type), value: this.readScalar(node, at) };
   }
 
   /** Inspect an arithmetic scalar without turning an indeterminate read into a VM diagnostic. */
@@ -567,7 +812,7 @@ export class VirtualMemory {
       address |= BigInt(byte) << BigInt(index * 8);
     }
     if (address === 0n) return { initialized: true, status: 'null', address };
-    if (isFunction(node.type.base) &&
+    if (isFunction(pointedToType(node.type) ?? 'void') &&
         (this.functionRepresentations.has(address) || (address & (1n << 63n)) !== 0n)) {
       return { initialized: true, status: 'function', address };
     }
@@ -583,11 +828,12 @@ export class VirtualMemory {
     at: Location,
   ): { readonly initialized: boolean; readonly value?: ObjectScalarValue } | undefined {
     const parent = this.nodeFor(ref, at);
-    if (!isArray(parent.type) || parent.type.length === null ||
-        !Number.isSafeInteger(index) || index < 0 || index >= parent.type.length ||
-        !isArithmetic(parent.type.element)) return undefined;
+    const array = arrayType(parent.type);
+    if (!array || array.length === null ||
+        !Number.isSafeInteger(index) || index < 0 || index >= array.length ||
+        !isArithmetic(array.element)) return undefined;
 
-    const type = parent.type.element;
+    const type = array.element;
     const size = sizeOfType(type, this.aggregates, at);
     const byteOffset = parent.byteOffset + index * size;
     const root = this.rootFor(parent, at);
@@ -611,6 +857,14 @@ export class VirtualMemory {
     const member = this.directStructMember(ref, memberIndex, at);
     if (!isArithmetic(member.type)) failure('TYPE_ERROR', 'La inspección requiere un miembro aritmético de struct.', at);
     const child = member.parent.children.get(memberIndex);
+    const definition = this.aggregate(member.parent.type, at);
+    const bitField = definition.members[memberIndex]?.bitField;
+    if (bitField) {
+      const initialized = !!child?.initialized || member.zeroInitialized;
+      return initialized
+        ? { initialized: true, value: this.readBitField(child ?? this.nodeFor(this.member(ref, memberIndex, at), at), bitField, at) }
+        : { initialized: false };
+    }
     return this.inspectArithmeticRepresentation(
       member.root,
       member.type,
@@ -675,7 +929,7 @@ export class VirtualMemory {
       address |= BigInt(byte) << BigInt(index * 8);
     }
     if (address === 0n) return { initialized: true, status: 'null', address };
-    if (isFunction(member.type.base) &&
+    if (isFunction(pointedToType(member.type) ?? 'void') &&
         (this.functionRepresentations.has(address) || (address & (1n << 63n)) !== 0n)) {
       return { initialized: true, status: 'function', address };
     }
@@ -718,9 +972,10 @@ export class VirtualMemory {
     const node = this.records.get(ref.objectId);
     if (!node || node.allocationId !== ref.allocationId || !node.alive) return undefined;
     const root = this.roots.get(node.allocationId);
+    const array = root ? arrayType(root.type) : undefined;
     if (!root?.alive || node.id !== root.id || root.duration !== 'string-literal' ||
-        !isArray(root.type) || root.type.element !== 'char' || root.type.length === null ||
-        root.type.length !== root.size) return undefined;
+        !array || unqualifiedType(array.element) !== 'char' || array.length === null ||
+        array.length !== root.size) return undefined;
 
     const bytes: number[] = [];
     for (let offset = 0; offset < root.size; offset++) {
@@ -732,11 +987,11 @@ export class VirtualMemory {
     return Object.freeze(bytes);
   }
 
-  write(ref: ObjectReference, value: CValue, at: Location): void {
+  write(ref: ObjectReference, value: CValue, at: Location, initializing = false): CValue {
     const node = this.nodeFor(ref, at);
-    this.ensureWritable(node, at);
+    this.ensureWritable(node, at, initializing);
     if (node.byteView) {
-      if (!compatibleType(node.type, value.type)) failure('TYPE_ERROR', 'El valor no coincide con el tipo char de la vista de byte.', at);
+      if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type))) failure('TYPE_ERROR', 'El valor no coincide con el tipo char de la vista de byte.', at);
       if (!isCharacterType(node.type) || typeof value.value !== 'bigint') failure('TYPE_ERROR', 'La vista de byte requiere un valor entero char.', at);
       const root = this.rootFor(node, at);
       const byte = Number(BigInt.asUintN(8, value.value));
@@ -745,29 +1000,40 @@ export class VirtualMemory {
       root.representation.set(node.byteOffset, byte);
       node.value = BigInt.asIntN(8, BigInt(byte));
       node.initialized = true;
-      return;
+      return { type: unqualifiedType(node.type), value: node.value! };
     }
     this.activateContainingUnions(node, at);
+    const bitField = this.bitFieldFor(node, at);
+    if (bitField) {
+      if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type)) || typeof value.value !== 'bigint') {
+        failure('TYPE_ERROR', 'La asignación al bit-field necesita un valor entero compatible.', at);
+      }
+      const assigned = this.writeBitField(node, bitField.member.bitField!, value.value, at);
+      return { type: unqualifiedType(node.type), value: assigned };
+    }
     if (isArray(node.type)) failure('INVALID_LVALUE', 'Un array no se puede asignar como objeto completo.', at);
     if (isAggregate(node.type)) {
-      if (!compatibleType(node.type, value.type) || typeof value.value !== 'object' || value.value === null || value.value.kind !== 'aggregate-value') {
+      if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type)) || typeof value.value !== 'object' || value.value === null || value.value.kind !== 'aggregate-value') {
         failure('TYPE_ERROR', 'La asignación de agregado necesita un valor del mismo tipo.', at);
       }
       this.restore(node, value.value.snapshot, at);
-      return;
+      this.recordEffectiveType(node, node.type, at);
+      return { type: unqualifiedType(node.type), value: value.value };
     }
-    if (!compatibleType(node.type, value.type)) failure('TYPE_ERROR', 'El valor no es compatible con el tipo del objeto.', at);
+    if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type))) failure('TYPE_ERROR', 'El valor no es compatible con el tipo del objeto.', at);
     if (typeof value.value === 'object' && value.value !== null && value.value.kind === 'aggregate-value') {
       failure('TYPE_ERROR', 'Un valor agregado no puede almacenarse en un objeto escalar.', at);
     }
     node.value = value.value as ObjectScalarValue;
     node.initialized = true;
     this.writeRepresentation(node, node.value, at);
+    this.recordEffectiveType(node, node.type, at);
+    return { type: unqualifiedType(node.type), value: node.value };
   }
 
   zeroInitialize(ref: ObjectReference, at: Location): void {
     const node = this.nodeFor(ref, at);
-    this.ensureWritable(node, at);
+    this.ensureWritable(node, at, true);
     if (isArray(node.type) || isAggregate(node.type)) {
       this.clearRepresentation(node, at);
       node.initialized = true;
@@ -792,16 +1058,19 @@ export class VirtualMemory {
     reservedNextBytes?: number,
     heapReservation?: AddressReservation,
     ignoredHeapFirstSlot?: bigint,
+    options: MemoryAllocationOptions = {},
   ): ObjectReference {
     const nextBytes = reservedNextBytes ?? this.nextAllocationByteCount(size, at);
+    const alignment = options.alignment ?? Number(ALLOCATION_ALIGNMENT);
+    this.validateAlignment(alignment, at);
     const reservation = duration === 'heap'
       ? heapReservation ?? failure('ENGINE_INTERNAL_ERROR', 'Falta la dirección seleccionada para una asignación heap.', at)
-      : this.chooseSessionAddress(size, duration) ?? this.failRegionExhaustion(size, duration, at);
+      : this.chooseSessionAddress(size, duration, alignment) ?? this.failRegionExhaustion(size, duration, at);
     const virtualBase = reservation.virtualBase;
     const region = this.regionForDuration(duration);
     if (virtualBase < region.start || reservation.endExclusive > region.endExclusive ||
         virtualBase + BigInt(size) + BigInt(VIRTUAL_MEMORY_LAYOUT.guardBytes) > reservation.endExclusive ||
-        virtualBase % ALLOCATION_ALIGNMENT !== 0n) {
+        virtualBase % BigInt(alignment) !== 0n) {
       failure('ENGINE_INTERNAL_ERROR', 'La reserva virtual queda fuera de su región o no respeta alineación y guard.', at);
     }
     if (duration === 'heap') {
@@ -825,13 +1094,17 @@ export class VirtualMemory {
       }
     }
     const id = this.nextObjectId++;
+    const objectType = unqualifiedType(type);
     const root: AllocationRoot = {
-      id, allocationId: id, type, byteOffset: 0, size, duration, rawAllocation: raw,
+      id, allocationId: id, type: objectType, byteOffset: 0, size, duration, rawAllocation: raw, alignment,
       virtualBase,
-      representation: new Map(), pointerValues: new Map(), pointerObjects: new Set(),
+      representation: new Map(), pointerValues: new Map(), pointerObjects: new Set(), effectiveTypes: [], constRanges: [],
       ...(duration === 'heap' ? { heapSlotCount: reservation.heapSlotCount! } : {}),
       initialized: false, zeroInitialized: false, alive: true, children: new Map(),
+      ...(options.isConst || qualifiersOf(type).const ? { readOnly: true } : {}),
     };
+    if (root.readOnly && size > 0) root.constRanges.push({ start: 0, end: size });
+    else this.collectConstRanges(root, objectType, 0, at);
     if (this.retainPointerAllocationAddresses) this.pointerAllocationAddresses.set(id, virtualBase);
     if (isPointer(type)) root.pointerObjects.add(root);
     this.records.set(id, root);
@@ -851,6 +1124,57 @@ export class VirtualMemory {
     return nextBytes;
   }
 
+  private validateAlignment(alignment: number, at: Location): void {
+    if (!Number.isSafeInteger(alignment) || alignment < 1 || alignment > 65536 || (alignment & (alignment - 1)) !== 0) {
+      failure('INVALID_ALIGNMENT', 'La alineación debe ser una potencia de dos entre 1 y 65536.', at);
+    }
+  }
+
+  private collectConstRanges(root: AllocationRoot, type: CType, offset: number, at: Location): void {
+    const size = sizeOfType(type, this.aggregates, at);
+    if (qualifiersOf(type).const) {
+      root.constRanges.push({ start: offset, end: offset + size });
+      return;
+    }
+    const unqualified = unqualifiedType(type);
+    const array = arrayType(unqualified);
+    if (array) {
+      if (array.length === null) return;
+      const stride = sizeOfType(array.element, this.aggregates, at);
+      for (let index = 0; index < array.length; index++) {
+        this.collectConstRanges(root, array.element, offset + index * stride, at);
+      }
+      return;
+    }
+    const aggregate = aggregateType(unqualified);
+    if (!aggregate) return;
+    const definition = this.aggregate(aggregate, at);
+    for (const member of definition.members) {
+      if (member.bitField) {
+        if (!qualifiersOf(member.type).const || member.bitField.width <= 0) continue;
+        const bits = member.bitField;
+        const mask = ((1n << BigInt(bits.width)) - 1n) << BigInt(bits.bitOffset);
+        root.constRanges.push({
+          start: offset + bits.storageUnitOffset,
+          end: offset + bits.storageUnitOffset + bits.storageUnitSize,
+          bitMask: mask,
+        });
+      } else if (member.flexibleArray) {
+        const flexible = arrayType(member.type);
+        if (!flexible || flexible.length !== null) continue;
+        const elementSize = sizeOfType(flexible.element, this.aggregates, member.location);
+        const start = offset + member.offset;
+        const capacity = Math.max(0, root.size - start);
+        const count = Math.floor(capacity / elementSize);
+        for (let index = 0; index < count; index++) {
+          this.collectConstRanges(root, flexible.element, start + index * elementSize, member.location);
+        }
+      } else {
+        this.collectConstRanges(root, member.type, offset + member.offset, member.location);
+      }
+    }
+  }
+
   private reservationSlotCount(size: number): bigint {
     const bytesWithGuard = BigInt(size) + BigInt(VIRTUAL_MEMORY_LAYOUT.guardBytes);
     return (bytesWithGuard + ALLOCATION_ALIGNMENT - 1n) / ALLOCATION_ALIGNMENT;
@@ -867,17 +1191,21 @@ export class VirtualMemory {
   }
 
   /** Find the lowest fitting aligned extent by inspecting live allocations, not reserved bytes. */
-  private chooseSessionAddress(size: number, duration: Exclude<StorageDuration, 'heap'>): AddressReservation | undefined {
+  private chooseSessionAddress(size: number, duration: Exclude<StorageDuration, 'heap'>, alignment: number): AddressReservation | undefined {
     const region = this.regionForDuration(duration);
     const slotCount = this.reservationSlotCount(size);
     const reservedBytes = slotCount * ALLOCATION_ALIGNMENT;
+    const alignmentBytes = BigInt(alignment);
+    const alignUp = (address: bigint): bigint => ((address + alignmentBytes - 1n) / alignmentBytes) * alignmentBytes;
     const occupied = [...this.extentsForDuration(duration).entries()]
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-    let candidate = region.start;
+    let candidate = alignUp(region.start);
     for (const [start, end] of occupied) {
+      candidate = alignUp(candidate);
       if (candidate + reservedBytes <= start) return { virtualBase: candidate, endExclusive: candidate + reservedBytes };
-      if (end > candidate) candidate = end;
+      if (end > candidate) candidate = alignUp(end);
     }
+    candidate = alignUp(candidate);
     if (candidate + reservedBytes <= region.endExclusive) {
       return { virtualBase: candidate, endExclusive: candidate + reservedBytes };
     }
@@ -1012,8 +1340,9 @@ export class VirtualMemory {
     readonly zeroInitialized: boolean;
   } {
     const parent = this.nodeFor(ref, at);
-    if (!isAggregate(parent.type)) failure('INVALID_MEMBER_ACCESS', 'La inspección de miembro requiere un struct.', at);
-    const definition = this.aggregate(parent.type, at);
+    const parentAggregate = aggregateType(parent.type);
+    if (!parentAggregate) failure('INVALID_MEMBER_ACCESS', 'La inspección de miembro requiere un struct.', at);
+    const definition = this.aggregate(parentAggregate, at);
     if (definition.kind !== 'struct') failure('TYPE_ERROR', 'La inspección de miembros visibles solo admite structs.', at);
     const member = definition.members[memberIndex];
     if (!member) failure('UNKNOWN_MEMBER', `No existe el miembro con índice ${memberIndex}.`, at);
@@ -1031,18 +1360,27 @@ export class VirtualMemory {
     let type: CType;
     let byteOffset: number;
     let memberIndex: number | undefined;
-    if (isArray(parent.type)) {
-      if (parent.type.length === null || index < 0 || index >= parent.type.length) failure('ARRAY_BOUNDS', 'El índice está fuera de los límites del array.', at);
-      type = parent.type.element;
+    const parentArray = arrayType(parent.type);
+    const parentAggregate = aggregateType(parent.type);
+    if (parentArray) {
+      if (parentArray.length === null || index < 0 || index >= parentArray.length) failure('ARRAY_BOUNDS', 'El índice está fuera de los límites del array.', at);
+      type = parentArray.element;
       byteOffset = parent.byteOffset + index * sizeOfType(type, this.aggregates, at);
-    } else if (isAggregate(parent.type)) {
-      const definition = this.aggregate(parent.type, at);
+    } else if (parentAggregate) {
+      const definition = this.aggregate(parentAggregate, at);
       const selected = member ?? definition.members[index];
       if (!selected) failure('UNKNOWN_MEMBER', `No existe el miembro con índice ${index}.`, at);
       type = selected.type;
       byteOffset = parent.byteOffset + selected.offset;
       memberIndex = selected.index;
       index = selected.index;
+      if (selected.flexibleArray) {
+        const flexible = arrayType(selected.type);
+        if (!flexible || flexible.length !== null) failure('ENGINE_INTERNAL_ERROR', 'El miembro flexible perdió su tipo de array incompleto.', at);
+        const elementSize = sizeOfType(flexible.element, this.aggregates, at);
+        const capacity = Math.max(0, this.rootFor(parent, at).size - byteOffset);
+        type = arrayOf(flexible.element, Math.floor(capacity / elementSize));
+      }
     } else failure('INVALID_SUBOBJECT', 'El objeto no contiene subobjetos indexables.', at);
 
     let node = parent.children.get(index);
@@ -1054,6 +1392,9 @@ export class VirtualMemory {
         id, allocationId: parent.allocationId, type, byteOffset,
         size: sizeOfType(type, this.aggregates, at), duration: parent.duration,
         parentId: parent.id, childIndex: index, memberIndex, rawAllocation: false,
+        ...(parent.initializationShadow?.children?.[index] === undefined
+          ? {}
+          : { initializationShadow: parent.initializationShadow.children[index] }),
         initialized: false, zeroInitialized: false, alive: true, children: new Map(),
       };
       if (inheritedZero) {
@@ -1069,15 +1410,15 @@ export class VirtualMemory {
       parent.children.set(index, node);
       this.records.set(id, node);
       if (isPointer(type)) this.roots.get(node.allocationId)?.pointerObjects.add(node);
+      if (node.initializationShadow) this.applyInitializationSnapshot(node, node.initializationShadow, at);
     }
-    if (memberIndex !== undefined && isAggregate(parent.type) && this.aggregate(parent.type, at).kind === 'union' && parent.activeMember === undefined) {
+    if (memberIndex !== undefined && parentAggregate && this.aggregate(parentAggregate, at).kind === 'union' && parent.activeMember === undefined) {
       // A union without an initializer has no active member; creating its lvalue does not select one.
     }
-    const parentArray = isArray(parent.type);
     return this.reference(node, parentArray ? {
       arrayId: parent.id,
       arrayIndex: index,
-      arrayLength: parent.type.length!,
+      arrayLength: parentArray.length!,
       boundsStart: parent.byteOffset,
       boundsEnd: parent.byteOffset + parent.size,
     } : { parentId: parent.id, memberIndex });
@@ -1123,26 +1464,38 @@ export class VirtualMemory {
       views.set(key, view);
       this.records.set(view.id, view);
       if (isPointer(type)) root.pointerObjects.add(view);
+      const effective = root.effectiveTypes
+        .filter((range) => range.start === byteOffset && range.end === byteOffset + size && sameType(range.type, type))
+        .at(-1);
+      if (effective?.initialization) this.applyInitializationSnapshot(view, effective.initialization, at);
       return view;
     }
     const pending: RuntimeObject[] = [root];
     while (pending.length) {
       const current = pending.pop()!;
-      if (current.byteOffset === byteOffset && sameType(current.type, type)) return current;
-      if (isArray(current.type)) {
-        const stride = sizeOfType(current.type.element, this.aggregates, at);
+      if (current.byteOffset === byteOffset &&
+          sameType(unqualifiedType(current.type), unqualifiedType(type))) return current;
+      const currentArray = arrayType(current.type);
+      const currentAggregate = aggregateType(current.type);
+      if (currentArray) {
+        const stride = sizeOfType(currentArray.element, this.aggregates, at);
         const delta = byteOffset - current.byteOffset;
-        if (delta < 0 || delta >= current.size || current.type.length === null) continue;
+        if (delta < 0 || delta >= current.size || currentArray.length === null) continue;
         // A nested element may start at an offset inside this array element
         // (for example matrix[0][1]); descend through the containing row.
         const index = Math.floor(delta / stride);
         const child = this.child(current, index, at);
         pending.push(this.records.get(child.objectId)!);
-      } else if (isAggregate(current.type)) {
-        const definition = this.aggregate(current.type, at);
+      } else if (currentAggregate) {
+        const definition = this.aggregate(currentAggregate, at);
         const candidates = definition.members.filter((member) => {
           const start = current.byteOffset + member.offset;
-          const end = start + sizeOfType(member.type, this.aggregates, at);
+          const memberSize = member.bitField
+            ? member.bitField.storageUnitSize
+            : member.flexibleArray
+              ? Math.max(0, root.byteOffset + root.size - start)
+              : sizeOfType(member.type, this.aggregates, at);
+          const end = start + memberSize;
           return byteOffset >= start && byteOffset < end;
         });
         candidates.sort((a, b) => Number(a.index !== current.activeMember) - Number(b.index !== current.activeMember));
@@ -1160,14 +1513,20 @@ export class VirtualMemory {
       initialized: boolean; value?: ObjectScalarValue; zeroInitialized?: boolean;
       children?: Record<number, ObjectSnapshot>; activeMember?: number;
     } = { initialized: node.initialized };
-    if (node.initialized && isScalar(node.type)) snapshot.value = this.readScalar(node, at);
+    if (node.initialized && isScalar(node.type)) {
+      const bitField = this.bitFieldFor(node, at);
+      snapshot.value = bitField ? this.readBitField(node, bitField.member.bitField!, at) : this.readScalar(node, at);
+    }
     if (node.zeroInitialized) snapshot.zeroInitialized = true;
     if (node.activeMember !== undefined) snapshot.activeMember = node.activeMember;
     if (node.children.size) {
       const children: Record<number, ObjectSnapshot> = {};
-      const activeUnion = isAggregate(node.type) && this.aggregate(node.type, at).kind === 'union' ? node.activeMember : undefined;
+      const aggregate = aggregateType(node.type);
+      const definition = aggregate ? this.aggregate(aggregate, at) : undefined;
+      const activeUnion = definition?.kind === 'union' ? node.activeMember : undefined;
       for (const [index, child] of node.children) {
         if (activeUnion !== undefined && index !== activeUnion) continue;
+        if (definition?.flexibleMemberIndex === index) continue;
         children[index] = this.readSnapshot(child, at);
       }
       snapshot.children = children;
@@ -1176,6 +1535,54 @@ export class VirtualMemory {
   }
 
   private snapshot(node: RuntimeObject, at: Location): ObjectSnapshot { return this.readSnapshot(node, at); }
+
+  private copyInitializationSnapshot(node: RuntimeObject, at: Location): ObjectSnapshot {
+    const snapshot: {
+      initialized: boolean; zeroInitialized?: boolean; children?: Record<number, ObjectSnapshot>; activeMember?: number;
+    } = { initialized: node.initialized };
+    if (node.zeroInitialized) snapshot.zeroInitialized = true;
+    if (node.activeMember !== undefined) snapshot.activeMember = node.activeMember;
+    if (node.children.size) {
+      const children: Record<number, ObjectSnapshot> = {};
+      const aggregate = aggregateType(node.type);
+      const definition = aggregate ? this.aggregate(aggregate, at) : undefined;
+      for (const [index, child] of node.children) {
+        if (definition?.kind === 'union' && node.activeMember !== undefined && index !== node.activeMember) continue;
+        if (definition?.flexibleMemberIndex === index) continue;
+        children[index] = this.copyInitializationSnapshot(child, at);
+      }
+      snapshot.children = children;
+    }
+    return snapshot;
+  }
+
+  private applyInitializationSnapshot(node: RuntimeObject, snapshot: ObjectSnapshot, at: Location): void {
+    if (node.initializationShadowApplied) return;
+    node.initializationShadow = snapshot;
+    node.initializationShadowApplied = true;
+    node.initialized = snapshot.initialized;
+    node.value = undefined;
+    node.zeroInitialized = !!snapshot.zeroInitialized;
+    node.activeMember = snapshot.activeMember;
+    for (const [indexText, childSnapshot] of Object.entries(snapshot.children ?? {})) {
+      const index = Number(indexText);
+      const aggregate = aggregateType(node.type);
+      if (aggregate && this.aggregate(aggregate, at).flexibleMemberIndex === index) continue;
+      const child = this.nodeFor(this.child(node, index, at), at);
+      this.applyInitializationSnapshot(child, childSnapshot, at);
+    }
+  }
+
+  private applyInitializationShadows(root: AllocationRoot, at: Location): void {
+    const views = this.rawViews.get(root.allocationId);
+    if (!views) return;
+    for (const range of root.effectiveTypes) {
+      if (!range.initialization) continue;
+      const view = [...views.values()].find((candidate) => candidate.alive && candidate.byteOffset === range.start &&
+        candidate.size === range.end - range.start && sameType(candidate.type, range.type));
+      if (view) this.applyInitializationSnapshot(view, range.initialization, at);
+    }
+  }
 
   private restore(node: RuntimeObject, snapshot: ObjectSnapshot, at: Location): void {
     this.clearRepresentation(node, at);
@@ -1186,11 +1593,17 @@ export class VirtualMemory {
     node.activeMember = snapshot.activeMember;
     for (const [indexText, childSnapshot] of Object.entries(snapshot.children ?? {})) {
       const index = Number(indexText);
+      const aggregate = aggregateType(node.type);
+      if (aggregate && this.aggregate(aggregate, at).flexibleMemberIndex === index) continue;
       const childRef = this.child(node, index, at);
       const child = this.nodeFor(childRef, at);
       this.restore(child, childSnapshot, at);
     }
-    if (isScalar(node.type) && node.initialized && node.value !== undefined) this.writeRepresentation(node, node.value, at);
+    if (isScalar(node.type) && node.initialized && node.value !== undefined) {
+      const bitField = this.bitFieldFor(node, at);
+      if (bitField) this.writeBitField(node, bitField.member.bitField!, node.value, at);
+      else this.writeRepresentation(node, node.value, at);
+    }
   }
 
   private activateContainingUnions(node: RuntimeObject, at: Location): void {
@@ -1198,7 +1611,7 @@ export class VirtualMemory {
     while (current.parentId !== undefined) {
       const parent = this.records.get(current.parentId);
       if (!parent) break;
-      if (isAggregate(parent.type) && this.aggregate(parent.type, at).kind === 'union' && current.memberIndex !== undefined) {
+      if (aggregateType(parent.type) && this.aggregate(parent.type, at).kind === 'union' && current.memberIndex !== undefined) {
         if (parent.activeMember !== current.memberIndex) {
           parent.zeroInitialized = false;
           parent.activeMember = current.memberIndex;
@@ -1214,21 +1627,201 @@ export class VirtualMemory {
     node.value = undefined;
     node.zeroInitialized = zeroInitialized;
     node.activeMember = undefined;
-    if (zeroInitialized && isAggregate(node.type)) {
-      const aggregateType = node.type as Extract<CType, { kind: 'aggregate' }>;
-      const definition = this.aggregates.find((item) => item.id === aggregateType.id);
+    node.initializationShadow = undefined;
+    node.initializationShadowApplied = false;
+    const aggregate = aggregateType(node.type);
+    if (zeroInitialized && aggregate) {
+      const definition = this.aggregates.find((item) => item.id === aggregate.id);
       if (definition?.kind === 'union') node.activeMember = 0;
     }
     for (const child of node.children.values()) this.resetTree(child, zeroInitialized);
   }
 
-  private ensureWritable(node: RuntimeObject, at: Location): void {
+  private ensureWritable(node: RuntimeObject, at: Location, initializing = false): void {
     if (node.duration === 'string-literal') failure('STRING_LITERAL_MODIFICATION', 'Modificar un literal de cadena tiene comportamiento indefinido en C11.', at);
+    if (initializing) return;
+    const root = this.rootFor(node, at);
+    const field = this.bitFieldFor(node, at)?.member.bitField;
+    const start = node.byteOffset;
+    const end = start + node.size;
+    const writeMask = field
+      ? ((1n << BigInt(field.width)) - 1n) << BigInt(field.bitOffset)
+      : undefined;
+    if (root.constRanges.some((range) => range.start < end && start < range.end &&
+      (range.bitMask === undefined || writeMask === undefined || (range.bitMask & writeMask) !== 0n))) {
+      failure('CONST_OBJECT_MODIFICATION', 'Modificar un objeto definido const tiene comportamiento indefinido en C11.', at);
+    }
   }
 
-  private aggregate(type: Extract<CType, { kind: 'aggregate' }>, at: Location): AggregateDefinition {
-    const definition = this.aggregates.find((item) => item.id === type.id);
-    if (!definition?.complete) failure('INCOMPLETE_TYPE', `El tipo agregado ${type.id} está incompleto.`, at);
+  private ensureEffectiveType(node: RuntimeObject, at: Location): void {
+    const root = this.rootFor(node, at);
+    if (!root.rawAllocation || node.byteView || isCharacterType(node.type)) return;
+    const start = node.byteOffset;
+    const end = start + node.size;
+    const candidates = root.effectiveTypes
+      .map((range, index) => ({ range, index }))
+      .filter(({ range }) => range.start <= start && range.end >= end)
+      .sort((left, right) => {
+        const leftSize = left.range.end - left.range.start;
+        const rightSize = right.range.end - right.range.start;
+        return leftSize - rightSize || right.index - left.index;
+      });
+    if (candidates.some(({ range }) => this.effectiveTypeCovers(range.type, range.start, range.end, start, end, node.type, at))) return;
+    if (root.effectiveTypes.some((range) => range.start < end && start < range.end)) {
+      failure('EFFECTIVE_TYPE_VIOLATION', 'El acceso no es compatible con el tipo efectivo establecido en el almacenamiento heap.', at);
+    }
+  }
+
+  private effectiveTypeCovers(
+    effectiveType: CType,
+    effectiveStart: number,
+    effectiveEnd: number,
+    accessStart: number,
+    accessEnd: number,
+    accessType: CType,
+    at: Location,
+  ): boolean {
+    if (accessStart === effectiveStart && accessEnd === effectiveEnd) {
+      return this.typesMayAlias(effectiveType, accessType, at);
+    }
+    const array = arrayType(effectiveType);
+    if (array) {
+      const elementSize = sizeOfType(array.element, this.aggregates, at);
+      const length = array.length ?? Math.floor((effectiveEnd - effectiveStart) / elementSize);
+      const first = Math.max(0, Math.floor((accessStart - effectiveStart) / elementSize));
+      const last = Math.min(length - 1, Math.floor((accessEnd - 1 - effectiveStart) / elementSize));
+      for (let index = first; index <= last; index++) {
+        const elementStart = effectiveStart + index * elementSize;
+        if (accessStart >= elementStart && accessEnd <= elementStart + elementSize &&
+            this.effectiveTypeCovers(array.element, elementStart, elementStart + elementSize, accessStart, accessEnd, accessType, at)) return true;
+      }
+      return false;
+    }
+    const aggregate = aggregateType(effectiveType);
+    if (!aggregate) return false;
+    const definition = this.aggregate(aggregate, at);
+    for (const member of definition.members) {
+      const memberStart = effectiveStart + member.offset;
+      const memberArray = member.flexibleArray ? arrayType(member.type) : undefined;
+      const memberSize = member.bitField
+        ? member.bitField.storageUnitSize
+        : memberArray
+          ? Math.max(0, effectiveEnd - memberStart)
+          : sizeOfType(member.type, this.aggregates, member.location);
+      if (accessStart < memberStart || accessEnd > memberStart + memberSize) continue;
+      const memberType = memberArray
+        ? arrayOf(memberArray.element, Math.floor(memberSize / sizeOfType(memberArray.element, this.aggregates, member.location)))
+        : member.type;
+      if (this.effectiveTypeCovers(memberType, memberStart, memberStart + memberSize, accessStart, accessEnd, accessType, at)) return true;
+    }
+    return false;
+  }
+
+  private typesMayAlias(left: CType, right: CType, at: Location, visited = new Set<string>()): boolean {
+    left = unqualifiedType(left);
+    right = unqualifiedType(right);
+    if (sameType(left, right)) return true;
+    if (isCharacterType(right)) return true;
+    const leftName = typeof left === 'string' ? left : undefined;
+    const rightName = typeof right === 'string' ? right : undefined;
+    if (leftName && rightName &&
+        (CORRESPONDING_UNSIGNED[leftName] === rightName || CORRESPONDING_SIGNED[leftName] === rightName)) return true;
+    const key = `${this.typeKey(left)}:${this.typeKey(right)}`;
+    if (visited.has(key)) return false;
+    visited.add(key);
+    return this.aggregateContainsType(left, right, at, visited) || this.aggregateContainsType(right, left, at, visited);
+  }
+
+  private aggregateContainsType(container: CType, target: CType, at: Location, visited: Set<string>): boolean {
+    const array = arrayType(container);
+    if (array) return this.typesMayAlias(array.element, target, at, visited);
+    const aggregate = aggregateType(container);
+    if (!aggregate) return false;
+    const definition = this.aggregate(aggregate, at);
+    return definition.members.some((member) => this.typesMayAlias(member.type, target, at, visited));
+  }
+
+  private recordEffectiveType(node: RuntimeObject, type: CType, at: Location): void {
+    const root = this.rootFor(node, at);
+    if (!root.rawAllocation || node.byteView) return;
+    const start = node.byteOffset;
+    const end = start + node.size;
+    const storedType = unqualifiedType(type);
+    if (isCharacterType(storedType)) return;
+    root.effectiveTypes.splice(0, root.effectiveTypes.length,
+      ...root.effectiveTypes.filter((range) => range.start !== start || range.end !== end));
+    root.effectiveTypes.push({ start, end, type: storedType, initialization: this.copyInitializationSnapshot(node, at) });
+  }
+
+  private bitFieldFor(node: RuntimeObject, at: Location): {
+    readonly parent: RuntimeObject;
+    readonly member: AggregateDefinition['members'][number];
+  } | undefined {
+    if (node.memberIndex === undefined || node.parentId === undefined) return undefined;
+    const parent = this.records.get(node.parentId);
+    const aggregate = parent ? aggregateType(parent.type) : undefined;
+    if (!parent || !aggregate) return undefined;
+    const member = this.aggregate(aggregate, at).members[node.memberIndex];
+    return member?.bitField && member.bitField.width > 0 ? { parent, member } : undefined;
+  }
+
+  private bitFieldPromotionType(type: CType, bitField: NonNullable<AggregateDefinition['members'][number]['bitField']>): CType {
+    const declared = unqualifiedType(type);
+    const info = integerInfo(declared);
+    if (!info) return declared;
+    if (info.rank < 3 || info.rank === 3 && bitField.width < info.bits) return 'int';
+    return declared;
+  }
+
+  private readBitField(
+    node: RuntimeObject,
+    bitField: NonNullable<AggregateDefinition['members'][number]['bitField']>,
+    at: Location,
+  ): ObjectScalarValue {
+    const root = this.rootFor(node, at);
+    const size = bitField.storageUnitSize;
+    if (!node.initialized && !this.hasZeroInitializedAncestor(node)) {
+      failure('UNINITIALIZED_READ', 'Lectura de un bit-field sin inicializar: comportamiento indefinido en C11.', at);
+    }
+    const bytes = Array.from({ length: size }, (_, index) =>
+      root.representation.get(node.byteOffset + index) ?? (this.hasZeroInitializedAncestor(node) ? 0 : undefined));
+    if (bytes.some((byte) => byte === undefined)) failure('UNINITIALIZED_READ', 'La unidad del bit-field contiene bits indeterminados.', at);
+    const raw = this.fromBytes(bytes as number[]);
+    const value = (raw >> BigInt(bitField.bitOffset)) & ((1n << BigInt(bitField.width)) - 1n);
+    return bitField.signed ? BigInt.asIntN(bitField.width, value) : value;
+  }
+
+  private writeBitField(
+    node: RuntimeObject,
+    bitField: NonNullable<AggregateDefinition['members'][number]['bitField']>,
+    value: ObjectScalarValue,
+    at: Location,
+  ): bigint {
+    if (typeof value !== 'bigint') failure('TYPE_ERROR', 'El valor del bit-field debe ser entero.', at);
+    const root = this.rootFor(node, at);
+    const widthMask = (1n << BigInt(bitField.width)) - 1n;
+    const shiftedMask = widthMask << BigInt(bitField.bitOffset);
+    const oldBytes = Array.from({ length: bitField.storageUnitSize }, (_, index) =>
+      root.representation.get(node.byteOffset + index) ?? 0);
+    const oldValue = this.fromBytes(oldBytes);
+    const nextValue = (oldValue & ~shiftedMask) | ((BigInt.asUintN(bitField.width, value) & widthMask) << BigInt(bitField.bitOffset));
+    const bytes = this.toBytes(nextValue, bitField.storageUnitSize);
+    const end = node.byteOffset + bitField.storageUnitSize;
+    this.clearPointerProvenance(root, node.byteOffset, end);
+    this.invalidatePointerObjectCaches(root, node.byteOffset, end);
+    bytes.forEach((byte, index) => root.representation.set(node.byteOffset + index, byte));
+    const assigned = bitField.signed ? BigInt.asIntN(bitField.width, value) : BigInt.asUintN(bitField.width, value);
+    node.value = assigned;
+    node.initialized = true;
+    node.zeroInitialized = false;
+    this.recordEffectiveType(node, node.type, at);
+    return assigned;
+  }
+
+  private aggregate(type: CType, at: Location): AggregateDefinition {
+    const aggregate = aggregateType(type);
+    const definition = aggregate && this.aggregates.find((item) => item.id === aggregate.id);
+    if (!definition?.complete) failure('INCOMPLETE_TYPE', `El tipo agregado ${aggregate?.id ?? '?'} está incompleto.`, at);
     return definition;
   }
 
@@ -1339,6 +1932,84 @@ export class VirtualMemory {
     }
   }
 
+  /** Capture effective-type shadow for the exact bytes copied by memcpy/memmove. */
+  copyableEffectiveTypes(pointer: ObjectPointerValue, count: number, at: Location): readonly EffectiveTypeCopy[] {
+    const root = this.roots.get(pointer.allocationId);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
+    const end = pointer.byteOffset + count;
+    if (!Number.isSafeInteger(count) || count < 0 || pointer.byteOffset < pointer.boundsStart || end > pointer.boundsEnd) {
+      failure('POINTER_BOUNDS', 'La copia excede el objeto apuntado.', at);
+    }
+    if (root.rawAllocation) {
+      return Object.freeze(root.effectiveTypes
+        .filter((range) => range.start >= pointer.byteOffset && range.end <= end)
+        .map((range) => Object.freeze({
+          relativeOffset: range.start - pointer.byteOffset, size: range.end - range.start, type: range.type,
+          ...(range.initialization === undefined ? {} : { initialization: range.initialization }),
+        })));
+    }
+    const candidates = [...this.records.values()]
+      .filter((node) => node.alive && node.allocationId === root.allocationId &&
+        node.byteOffset === pointer.byteOffset && node.size === count)
+      .sort((left, right) => Number(right.id === pointer.arrayId) - Number(left.id === pointer.arrayId));
+    const source = candidates[0];
+    return source
+      ? Object.freeze([Object.freeze({
+        relativeOffset: 0, size: count, type: unqualifiedType(source.type),
+        initialization: this.copyInitializationSnapshot(source, at),
+      })])
+      : Object.freeze([]);
+  }
+
+  /** Replace destination shadow after byte-wise writes so copies retain source effective type. */
+  restoreCopiedEffectiveTypes(
+    pointer: ObjectPointerValue,
+    count: number,
+    types: readonly EffectiveTypeCopy[],
+    at: Location,
+  ): void {
+    const root = this.roots.get(pointer.allocationId);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
+    const end = pointer.byteOffset + count;
+    if (!Number.isSafeInteger(count) || count < 0 || pointer.byteOffset < pointer.boundsStart || end > pointer.boundsEnd) {
+      failure('POINTER_BOUNDS', 'La copia excede el objeto apuntado.', at);
+    }
+    if (count === 0) return;
+    if (root.rawAllocation) {
+      root.effectiveTypes.splice(0, root.effectiveTypes.length,
+        ...root.effectiveTypes.filter((range) => range.end <= pointer.byteOffset || range.start >= end));
+      for (const view of this.rawViews.get(root.allocationId)?.values() ?? []) {
+        if (view.byteOffset < end && view.byteOffset + view.size > pointer.byteOffset) {
+          this.resetTree(view, false);
+          view.initializationShadow = undefined;
+          view.initializationShadowApplied = false;
+        }
+      }
+    }
+    for (const item of types) {
+      if (item.relativeOffset < 0 || item.size < 0 || item.relativeOffset + item.size > count) continue;
+      const start = pointer.byteOffset + item.relativeOffset;
+      const copiedType = unqualifiedType(item.type);
+      if (root.rawAllocation) root.effectiveTypes.push({
+        start,
+        end: start + item.size,
+        type: copiedType,
+        ...(item.initialization === undefined ? {} : { initialization: item.initialization }),
+      });
+      else if (item.initialization !== undefined) {
+        const target = [...this.records.values()].find((node) => node.alive && node.allocationId === root.allocationId &&
+          node.byteOffset === start && node.size === item.size && sameType(node.type, copiedType));
+        if (target) {
+          this.resetTree(target, false);
+          target.initializationShadow = undefined;
+          target.initializationShadowApplied = false;
+          this.applyInitializationSnapshot(target, item.initialization, at);
+        }
+      }
+    }
+    if (root.rawAllocation) this.applyInitializationShadows(root, at);
+  }
+
   private clearPointerProvenance(root: AllocationRoot, start: number, end: number): void {
     for (const offset of root.pointerValues.keys()) {
       if (offset < end && offset + 8 > start) root.pointerValues.delete(offset);
@@ -1374,19 +2045,27 @@ export class VirtualMemory {
 
   private leafAt(parent: RuntimeObject, offset: number, at: Location): RuntimeObject | undefined {
     if (isScalar(parent.type)) return offset >= parent.byteOffset && offset < parent.byteOffset + parent.size ? parent : undefined;
-    if (isArray(parent.type)) {
-      const stride = sizeOfType(parent.type.element, this.aggregates, at);
+    const array = arrayType(parent.type);
+    const aggregate = aggregateType(parent.type);
+    if (array) {
+      const stride = sizeOfType(array.element, this.aggregates, at);
       const delta = offset - parent.byteOffset;
-      if (delta < 0 || delta >= parent.size || parent.type.length === null) return undefined;
+      if (delta < 0 || delta >= parent.size || array.length === null) return undefined;
       const index = Math.floor(delta / stride);
       const ref = this.child(parent, index, at);
       return this.leafAt(this.records.get(ref.objectId)!, offset, at);
     }
-    if (isAggregate(parent.type)) {
-      const definition = this.aggregate(parent.type, at);
+    if (aggregate) {
+      const definition = this.aggregate(aggregate, at);
+      const root = this.rootFor(parent, at);
       const candidates = definition.members.filter((member) => {
         const start = parent.byteOffset + member.offset;
-        return offset >= start && offset < start + sizeOfType(member.type, this.aggregates, at);
+        const memberSize = member.bitField
+          ? member.bitField.storageUnitSize
+          : member.flexibleArray
+            ? Math.max(0, root.byteOffset + root.size - start)
+            : sizeOfType(member.type, this.aggregates, at);
+        return offset >= start && offset < start + memberSize;
       });
       if (definition.kind === 'union' && parent.activeMember !== undefined) {
         const active = candidates.find((member) => member.index === parent.activeMember);
@@ -1417,6 +2096,7 @@ export class VirtualMemory {
   }
 
   private encodeScalar(type: CType, value: ObjectScalarValue, at: Location): number[] {
+    type = unqualifiedType(type);
     const size = sizeOfType(type, this.aggregates, at);
     if (type === 'long double') {
       if (typeof value !== 'object' || value === null || value.kind !== 'binary80') {
@@ -1455,11 +2135,12 @@ export class VirtualMemory {
   }
 
   private decodeScalar(type: CType, bytes: number[], at: Location): ObjectScalarValue {
+    type = unqualifiedType(type);
     if (type === 'long double') return binary80Decode80(bytes.slice(0, 10));
     if (isPointer(type)) {
       const address = this.fromBytes(bytes);
       if (address === 0n) return null;
-      if (isFunction(type.base)) {
+      if (isFunction(pointedToType(type) ?? 'void')) {
         const known = this.functionRepresentations.get(address);
         if (known) return known;
         if ((address & (1n << 63n)) !== 0n) return { kind: 'function-pointer', functionIndex: Number(address & ((1n << 63n) - 1n)) - 1 };
@@ -1496,17 +2177,23 @@ export class VirtualMemory {
 
   private arrayIndex(pointer: ObjectPointerValue): number | undefined {
     const root = this.records.get(pointer.arrayId);
-    if (!root || !isArray(root.type)) return undefined;
-    const stride = scalarOrAggregateSize(root.type.element, this.aggregates);
+    const array = root ? arrayType(root.type) : undefined;
+    if (!array) return undefined;
+    const stride = scalarOrAggregateSize(array.element, this.aggregates);
     return stride && (pointer.byteOffset - pointer.boundsStart) % stride === 0 ? (pointer.byteOffset - pointer.boundsStart) / stride : undefined;
   }
 
   private typeKey(type: CType): string {
+    type = unqualifiedType(type);
     if (typeof type === 'string') return type;
-    if (type.kind === 'pointer') return `p(${this.typeKey(type.base)})`;
-    if (type.kind === 'array') return `a${type.length ?? '?'}(${this.typeKey(type.element)})`;
-    if (type.kind === 'aggregate') return `g${type.id}`;
-    return `f(${this.typeKey(type.returnType)}:${type.parameters.map((item) => this.typeKey(item)).join(',')})`;
+    const pointer = pointerType(type);
+    if (pointer) return `p(${this.typeKey(pointer.base)})`;
+    const array = arrayType(type);
+    if (array) return `a${array.length ?? '?'}(${this.typeKey(array.element)})`;
+    const aggregate = aggregateType(type);
+    if (aggregate) return `g${aggregate.id}`;
+    const fn = functionType(type);
+    return fn ? `f(${this.typeKey(fn.returnType)}:${fn.parameters.map((item) => this.typeKey(item)).join(',')})` : 'unknown';
   }
 
   private get rawViews(): Map<number, Map<string, RuntimeObject>> {
@@ -1521,5 +2208,6 @@ function scalarOrAggregateSize(type: CType, aggregates: readonly AggregateDefini
 }
 
 function isCharacterType(type: CType): boolean {
-  return type === 'char' || type === 'signed char' || type === 'unsigned char';
+  const unqualified = unqualifiedType(type);
+  return unqualified === 'char' || unqualified === 'signed char' || unqualified === 'unsigned char';
 }

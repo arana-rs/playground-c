@@ -38,7 +38,7 @@ test('P1 executes its 42 acceptance example and publishes a truthful versioned t
   assert.equal(TARGET_PROFILE.intBits, 32);
   assert.equal(CAPABILITIES.completeC11, false);
   assert.equal(CAPABILITIES.library, 'partial');
-  assert.equal(CAPABILITIES.phase, 'P4');
+  assert.equal(CAPABILITIES.phase, 'P5');
   assert.ok(Object.isFrozen(CAPABILITIES.operators));
   assert.ok(Object.isFrozen(DEFAULT_PREPARE_LIMITS));
   assert.ok(Object.isFrozen(DEFAULT_EXECUTE_LIMITS));
@@ -84,10 +84,8 @@ test('comments and CRLF preserve original file, line and column', () => {
   assert.equal(unclosed.column, 18);
 });
 
-test('C11 syntax scheduled after P4 is rejected explicitly rather than approximated', () => {
-  for (const source of [
-    'int main(void){return _Generic(1, int: 2);}',
-  ]) preparationError(source);
+test('P5 generic selection chooses the compatible association', () => {
+  terminated('return _Generic(1L, int: 0, long: 2, default: 3);', 2);
 });
 
 test('translation phases splice logical lines and keep comment contents inert', () => {
@@ -125,7 +123,7 @@ test('return stops runtime work, but preparation validates unreachable source', 
   terminated('return 7; int x; x / 0;', 7);
   terminated('{return 5;} return 8;', 5);
   preparationError('int main(void){return 1; return missing;}', 'UNKNOWN_IDENTIFIER');
-  preparationError('int main(void){return 1; _Generic(1, int: 2);}');
+  terminated('return 1; int value = _Generic(1, int: 2);', 1);
 });
 
 test('prepared programs are immutable, validated and each execution uses fresh state', () => {

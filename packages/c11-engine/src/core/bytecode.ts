@@ -54,7 +54,11 @@ export function compile(fn: FunctionIR): CompiledFunction {
     } else if (node.kind === 'sequence') {
       for (let index = node.statements.length - 1; index >= 0; index--) work.push(() => schedule(node.statements[index]));
     } else if (node.kind === 'declaration') {
-      emit('declaration', node.location, { binding: node.binding!, initializer: node.initializer });
+      const binding = node.binding === undefined ? undefined : fn.bindings[node.binding];
+      if (node.extern || binding?.linkage === 'external') emit('tick', node.location, {});
+      else emit('declaration', node.location, { binding: node.binding!, initializer: node.initializer });
+    } else if (node.kind === 'staticAssert') {
+      // The analyzer evaluates and validates static assertions; they have no runtime effect.
     } else if (node.kind === 'expression' || node.kind === 'return') {
       if (node.kind === 'expression') emit('expression', node.location, { value: node.value });
       else emit('return', node.location, { value: node.value });

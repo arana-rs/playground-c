@@ -76,7 +76,7 @@ export interface ExecutionSession {
 }
 
 export interface DebugSourceLocation { readonly file: string; readonly line: number; readonly column: number }
-export type DebugObjectDuration = 'automatic' | 'static' | 'heap' | 'compound-literal';
+export type DebugObjectDuration = 'automatic' | 'static' | 'thread-local' | 'heap' | 'compound-literal';
 export type DebugObjectOrigin = 'variable' | 'parameter' | 'compound-literal' | 'heap' | 'string-literal';
 interface DebugEventBase {
   readonly sequence: number;
@@ -107,7 +107,7 @@ export interface DebugScalarSnapshot {
   readonly name: string;
   /** Storage origin shared with the corresponding object lifecycle event. */
   readonly origin: DebugObjectOrigin;
-  /** C arithmetic type name; enum objects use their existing int-compatible representation. */
+  /** C arithmetic type name, retaining qualifiers; enum objects use their int-compatible representation. */
   readonly type: string;
   /** Exact virtual address in hexadecimal, without conversion through Number. */
   readonly address: string;
@@ -137,7 +137,7 @@ export interface DebugPointerSnapshot {
   readonly frameId: number | null;
   readonly name: string;
   readonly origin: Extract<DebugObjectOrigin, 'variable' | 'parameter'>;
-  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static'>;
+  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static' | 'thread-local'>;
   readonly region: 'stack' | 'static';
   readonly type: string;
   /** Address of the pointer variable's own storage. */
@@ -158,6 +158,8 @@ export interface DebugStaticObjectSnapshot {
   readonly name?: string;
   /** Existing lifecycle origin; this inspection publishes only variables and string literals. */
   readonly origin: Extract<DebugObjectOrigin, 'variable' | 'string-literal'>;
+  /** Thread-local objects are represented in the session's static region without simulating other threads. */
+  readonly duration: Extract<DebugObjectDuration, 'static' | 'thread-local'>;
   /** Arithmetic C type, or `char[N]` for the contents of a string literal. */
   readonly type: string;
   /** Exact virtual address in hexadecimal, without conversion through Number. */
@@ -194,7 +196,7 @@ export interface DebugArraySnapshot {
   /** C identifier for declared arrays; string literals have no identifier. */
   readonly name?: string;
   readonly origin: Extract<DebugObjectOrigin, 'variable' | 'string-literal'>;
-  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static'>;
+  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static' | 'thread-local'>;
   readonly region: 'stack' | 'static';
   readonly frameId: number | null;
   readonly scopeId: number | null;
@@ -214,7 +216,7 @@ export interface DebugArrayInspection {
   readonly omittedObjects: number;
 }
 /** Why a direct struct member is represented as a bounded placeholder. */
-export type DebugAggregateMemberUnsupportedReason = 'array' | 'aggregate';
+export type DebugAggregateMemberUnsupportedReason = 'array' | 'aggregate' | 'flexible-array';
 /** The value form published for one supported direct struct member. */
 export type DebugAggregateMemberKind = 'arithmetic' | 'pointer' | 'unsupported';
 /** Direct-member inspection state for a live observed struct/union root. */
@@ -233,11 +235,21 @@ export interface DebugAggregateMemberSnapshot {
   readonly index: number;
   /** Empty for an anonymous direct aggregate member. */
   readonly name: string;
+  /** C type name, retaining qualifiers without exposing the internal compiler type. */
   readonly type: string;
   readonly kind: DebugAggregateMemberKind;
-  /** Member offset from the root, in bytes. */
+  /** Member offset from the root, in bytes; for bit-fields this is the storage-unit offset. */
   readonly offset: number;
+  /** Storage extent in bytes; for bit-fields this is the shared allocation unit. */
   readonly size: number;
+  /** Present for a named bit-field; unnamed padding fields are not exposed. */
+  readonly bitWidth?: number;
+  /** Least-significant bit position within the storage unit. */
+  readonly bitOffset?: number;
+  /** Byte width of the storage unit shared by this bit-field. */
+  readonly storageUnitSize?: number;
+  /** Runtime extent of a flexible array member when the containing object provides one. */
+  readonly flexibleArray?: DebugFlexibleArraySnapshot;
   /** Exact virtual address of this member. */
   readonly address: string;
   /** Null for a placeholder; false for an indeterminate arithmetic/pointer member. */
@@ -249,14 +261,27 @@ export interface DebugAggregateMemberSnapshot {
   readonly target?: DebugPointerTargetSnapshot;
   readonly unsupportedReason?: DebugAggregateMemberUnsupportedReason;
 }
+/** Runtime extent for one flexible array member in an observed aggregate object. */
+export interface DebugFlexibleArraySnapshot {
+  readonly elementSize: number;
+  readonly capacityBytes: number;
+  readonly length: number;
+  /** Same bounded-cell result used by ordinary one-dimensional array inspection. */
+  readonly status: DebugArrayStatus;
+  readonly elements: readonly DebugArrayElementSnapshot[];
+  /** Number of elements beyond the published prefix. */
+  readonly omittedElements: number;
+}
 /** Read-only, bounded direct-member view of one observed aggregate allocation. */
 export interface DebugAggregateSnapshot {
   /** Real root allocation identity emitted by `object-create`. */
   readonly rootId: number;
+  /** Distinguishes typed subobject views that share one heap allocation; omitted when identical to `rootId`. */
+  readonly viewId?: number;
   readonly name?: string;
-  readonly origin: Extract<DebugObjectOrigin, 'variable' | 'parameter'>;
-  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static'>;
-  readonly region: 'stack' | 'static';
+  readonly origin: Extract<DebugObjectOrigin, 'variable' | 'parameter' | 'heap'>;
+  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static' | 'thread-local' | 'heap'>;
+  readonly region: 'stack' | 'static' | 'heap';
   readonly frameId: number | null;
   readonly scopeId: number | null;
   readonly type: string;
@@ -353,22 +378,31 @@ export const TARGET_PROFILE = Object.freeze({
   signedRightShift: 'arithmetic', floatEvaluationMethod: 0,
 });
 export const CAPABILITIES = Object.freeze({
-  phase: 'P4', cStandard: 'C11', completeC11: false, entry: 'int main(void), int main(), or int main(int, char **)',
+  phase: 'P5', cStandard: 'C11', completeC11: false, entry: 'int main(void), int main(), or int main(int, char **)',
   integerTypes: Object.freeze(['_Bool', 'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'long', 'unsigned long', 'long long', 'unsigned long long']),
   floatingTypes: Object.freeze(['float', 'double', 'long double']),
   pointerTypes: Object.freeze(['object-pointers', 'function-pointers', 'void-pointer-conversions', 'null-pointer-constants']),
   objectTypes: Object.freeze(['arrays', 'structs', 'unions', 'compound-literals', 'file-scope-objects']),
   enumerations: 'int-compatible-constants-with-integer-constant-expressions-in-int-range',
-  aggregateMembers: Object.freeze(['named', 'anonymous-struct', 'anonymous-union']),
-  operators: Object.freeze(['+', '-', '*', '/', '%', '<<', '>>', '&', '^', '|', '~', '!', '<', '<=', '>', '>=', '==', '!=', '&&', '||', '?:', ',', '=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '^=', '|=', '++', '--', 'cast', 'sizeof', '[]', '.', '->', '&address', 'pointer-difference']),
-  statements: Object.freeze(['block', 'declaration', 'expression', 'return', 'empty', 'if', 'switch', 'while', 'do', 'for', 'break', 'continue', 'goto', 'label']),
+  aggregateMembers: Object.freeze(['named', 'anonymous-struct', 'anonymous-union', 'bit-fields', 'flexible-array-members']),
+  qualifiers: Object.freeze(['const', 'volatile', 'restrict']),
+  operators: Object.freeze(['+', '-', '*', '/', '%', '<<', '>>', '&', '^', '|', '~', '!', '<', '<=', '>', '>=', '==', '!=', '&&', '||', '?:', ',', '=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '^=', '|=', '++', '--', 'cast', 'sizeof', '[]', '.', '->', '&address', 'pointer-difference', '_Generic', '_Alignas', '_Alignof', '_Static_assert', 'offsetof']),
+  statements: Object.freeze(['block', 'declaration', 'expression', 'return', 'empty', 'if', 'switch', 'while', 'do', 'for', 'break', 'continue', 'goto', 'label', 'static-assert']),
+  genericSelection: true,
+  staticAssertions: true,
+  storageClasses: Object.freeze(['auto', 'extern', 'register', 'static', '_Thread_local', 'typedef']),
+  storageDurations: Object.freeze(['automatic', 'static', 'allocated', 'thread-local']),
+  linkage: Object.freeze(['external', 'internal', 'no-linkage']),
+  blockExternDeclarations: true,
+  externalInlineSemantics: 'c11',
   functions: 'typed-prototypes-variadic-functions-recursion-and-function-pointers', library: 'partial', preprocessor: 'c11-translation-phases-and-macros-with-virtual-project-includes',
-  virtualHeaders: Object.freeze(['assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h', 'limits.h', 'math.h', 'stdarg.h', 'stdbool.h', 'stddef.h', 'stdint.h', 'stdio.h', 'stdlib.h', 'string.h', 'wchar.h']),
+  virtualHeaders: Object.freeze(['assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h', 'limits.h', 'math.h', 'stdarg.h', 'stdalign.h', 'stdbool.h', 'stddef.h', 'stdint.h', 'stdio.h', 'stdlib.h', 'string.h', 'wchar.h']),
   multipleFiles: true,
   translationUnits: true,
   standardMacros: Object.freeze(['__FILE__', '__LINE__', '__STDC__', '__STDC_VERSION__', '__STDC_HOSTED__']),
-  stddefMacros: Object.freeze(['NULL']),
-  stddefTypes: Object.freeze(['size_t', 'ptrdiff_t', 'wchar_t']),
+  stdalignMacros: Object.freeze(['alignas', 'alignof', '__alignas_is_defined', '__alignof_is_defined']),
+  stddefMacros: Object.freeze(['NULL', 'offsetof']),
+  stddefTypes: Object.freeze(['size_t', 'ptrdiff_t', 'wchar_t', 'max_align_t']),
   wideCharacterTypes: Object.freeze(['wchar_t', 'wint_t']),
   stdlibFunctions: Object.freeze([...HEAP_ALLOCATOR_BUILTINS, 'free']),
   preparedProgram: Object.freeze({ heapAllocationHint: 'hasHeapAllocationCalls: resolved built-in calls across all function bodies' }),

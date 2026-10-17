@@ -2,9 +2,11 @@ import { createDebugSession, createExecutionSession, DEFAULT_DEBUG_AGGREGATE_INS
 import type {
   DebugAggregateInspection, DebugAggregateMemberSnapshot, DebugAggregateSnapshot,
   DebugArrayElementSnapshot, DebugArrayInspection, DebugArraySnapshot, DebugExecutionSession,
-  DebugHeapObjectSnapshot, DebugPointerSnapshot, DebugProgress, DebugScalarSnapshot, DebugSessionOptions, DebugStaticObjectSnapshot,
+  DebugFlexibleArraySnapshot, DebugHeapObjectSnapshot, DebugObjectDuration, DebugPointerSnapshot, DebugProgress, DebugScalarSnapshot, DebugSessionOptions, DebugStaticObjectSnapshot,
   DebugStaticObjectInspectionOptions, ExecuteProgress, ExecutionSession, PrepareResult, SourceProject,
 } from '@playground/c11-engine/core';
+// @ts-expect-error QualifiedCType is an internal compiler representation, not a public DTO.
+type QualifiedTypeMustStayInternal = import('@playground/c11-engine/core').QualifiedCType;
 
 const project: SourceProject = {
     entry: 'main.c',
@@ -56,6 +58,13 @@ if (prepared.kind === 'prepared') {
   const firstAggregate: DebugAggregateSnapshot | undefined = aggregates.aggregates[0];
   const firstMember: DebugAggregateMemberSnapshot | undefined = firstAggregate?.members[0];
   void firstMember;
+const bitWidth: number | undefined = firstMember?.bitWidth;
+const flexibleArray: DebugFlexibleArraySnapshot | undefined = firstMember?.flexibleArray;
+const tlsDuration: DebugObjectDuration = 'thread-local';
+void bitWidth;
+void flexibleArray;
+void tlsDuration;
+void (null as unknown as QualifiedTypeMustStayInternal);
   const firstArray: DebugArraySnapshot | undefined = arrays.arrays[0];
   const firstElement: DebugArrayElementSnapshot | undefined = firstArray?.elements[0];
   const heapObjects: readonly DebugHeapObjectSnapshot[] = debug.inspectHeapObjects();

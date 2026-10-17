@@ -1,4 +1,4 @@
-import type { DebugHeapObjectSnapshot } from '@playground/c11-engine/core';
+import type { DebugAggregateSnapshot, DebugHeapObjectSnapshot } from '@playground/c11-engine/core';
 import { mergeExitedItemsInPreviousOrder } from './stackTransition.ts';
 
 export interface MemoryViewerHeapTransition {
@@ -38,5 +38,40 @@ export function mergeMemoryViewerHeapObjects(
     if (leftAddress < rightAddress) return -1;
     if (leftAddress > rightAddress) return 1;
     return left.id - right.id;
+  });
+}
+
+export type MemoryViewerHeapDisplayItem =
+  | { readonly kind: 'block'; readonly id: number; readonly snapshot: DebugHeapObjectSnapshot }
+  | { readonly kind: 'aggregate'; readonly id: number; readonly snapshot: DebugAggregateSnapshot };
+
+/**
+ * Replace a raw heap card only when its typed aggregate snapshot covers that
+ * allocation exactly. Partial or stale typed views are omitted from the heap
+ * presentation so the complete raw allocation remains visible.
+ */
+export function mergeMemoryViewerHeapViews(
+  blocks: readonly DebugHeapObjectSnapshot[],
+  aggregates: readonly DebugAggregateSnapshot[],
+  liveBlocks: readonly DebugHeapObjectSnapshot[] = blocks,
+): MemoryViewerHeapDisplayItem[] {
+  const blocksById = new Map(liveBlocks.map(block => [block.id, block]));
+  const completeViews = aggregates.filter(aggregate => {
+    if (aggregate.region !== 'heap') return false;
+    const block = blocksById.get(aggregate.rootId);
+    return block !== undefined
+      && aggregate.address === block.address
+      && aggregate.size === block.size;
+  });
+  const coveredIds = new Set(completeViews.map(aggregate => aggregate.rootId));
+  return [
+    ...blocks
+      .filter(block => !coveredIds.has(block.id))
+      .map(snapshot => ({ kind: 'block' as const, id: snapshot.id, snapshot })),
+    ...completeViews.map(snapshot => ({ kind: 'aggregate' as const, id: snapshot.viewId ?? snapshot.rootId, snapshot })),
+  ].sort((left, right) => {
+    const leftAddress = BigInt(left.snapshot.address);
+    const rightAddress = BigInt(right.snapshot.address);
+    return leftAddress < rightAddress ? -1 : leftAddress > rightAddress ? 1 : left.id - right.id;
   });
 }

@@ -1,6 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, SyntheticEvent } from 'react';
 import { Button } from '../components/arc/button/button.tsx';
+import type { DebugArrayElementSnapshot } from '@playground/c11-engine/core';
 import { ConsolePanel } from '../components/ConsolePanel.tsx';
 import { SelectedFileTab } from '../components/SelectedFileTab.tsx';
 import { CodeEditor } from '../editor/CodeEditor.tsx';
@@ -46,6 +47,7 @@ import { MemoryViewerExitCleanupTimer, readMemoryViewerExitDuration } from './ex
 import {
   chooseMemoryViewerHeapFocusId,
   compareMemoryViewerHeapObjects,
+  mergeMemoryViewerHeapViews,
   mergeMemoryViewerHeapObjects,
 } from './heapSnapshots.ts';
 import { useStackHorizontalScroll } from './useStackHorizontalScroll.ts';
@@ -125,6 +127,7 @@ interface MemoryViewerCardRecord {
   readonly address: string;
   readonly size: number;
   readonly origin: string;
+  readonly duration: DebugPointerSnapshot['duration'] | DebugAggregateSnapshot['duration'] | 'heap';
   readonly label: string;
   readonly typeLabel: string | null;
   readonly valueTitle: string;
@@ -164,7 +167,7 @@ function stackMemoryObjects(
     ...scalars.map(snapshot => ({ id: snapshot.id, kind: 'scalar' as const, snapshot })),
     ...pointers.filter(snapshot => snapshot.region === 'stack').map(snapshot => ({ id: snapshot.id, kind: 'pointer' as const, snapshot })),
     ...arrays.map(snapshot => ({ id: snapshot.rootId, kind: 'array' as const, snapshot })),
-    ...aggregates.filter(snapshot => snapshot.region === 'stack').map(snapshot => ({ id: snapshot.rootId, kind: 'aggregate' as const, snapshot })),
+    ...aggregates.filter(snapshot => snapshot.region === 'stack').map(snapshot => ({ id: snapshot.viewId ?? snapshot.rootId, kind: 'aggregate' as const, snapshot })),
   ].sort((left, right) => left.id - right.id);
 }
 
@@ -178,7 +181,7 @@ function staticMemoryObjects(
     ...scalars.map(snapshot => ({ id: snapshot.id, kind: 'scalar' as const, snapshot })),
     ...pointers.filter(snapshot => snapshot.region === 'static').map(snapshot => ({ id: snapshot.id, kind: 'pointer' as const, snapshot })),
     ...arrays.map(snapshot => ({ id: snapshot.rootId, kind: 'array' as const, snapshot })),
-    ...aggregates.filter(snapshot => snapshot.region === 'static').map(snapshot => ({ id: snapshot.rootId, kind: 'aggregate' as const, snapshot })),
+    ...aggregates.filter(snapshot => snapshot.region === 'static').map(snapshot => ({ id: snapshot.viewId ?? snapshot.rootId, kind: 'aggregate' as const, snapshot })),
   ].sort((left, right) => left.id - right.id);
 }
 
@@ -284,6 +287,7 @@ function scalarCardRecord(
     address: scalar.address,
     size: scalar.size,
     origin: scalar.origin,
+    duration: 'duration' in scalar ? scalar.duration : 'automatic',
     label: scalar.name ?? 'Literal de cadena',
     typeLabel: scalar.type,
     valueTitle: valueLabel,
@@ -349,6 +353,7 @@ function pointerCardRecord(
     address: pointer.address,
     size: pointer.size,
     origin: pointer.origin,
+    duration: pointer.duration,
     label: pointer.name,
     typeLabel: pointer.type,
     valueTitle,
@@ -369,26 +374,32 @@ function pointerCardRecord(
   };
 }
 
-function arrayElementContent(array: DebugArraySnapshot, displayValue: string): string {
-  if (!/^(?:signed |unsigned )?char$/.test(array.elementType)) return displayValue;
+function arrayElementContent(elementType: string, displayValue: string): string {
+  if (!/^(?:signed |unsigned )?char$/.test(elementType)) return displayValue;
   if (displayValue.length >= 2 && displayValue.startsWith("'") && displayValue.endsWith("'")) {
     return displayValue.slice(1, -1);
   }
   return displayValue;
 }
 
+interface MemoryViewerArrayElementCardContext {
+  readonly name: string;
+  readonly origin: string;
+  readonly duration: MemoryViewerCardRecord['duration'];
+  readonly elementSize: number;
+}
+
 function arrayElementCardRecord(
-  array: DebugArraySnapshot,
-  element: DebugArraySnapshot['elements'][number],
+  array: MemoryViewerArrayElementCardContext,
+  element: DebugArrayElementSnapshot,
   valueChanged: boolean,
   isPointerTarget = false,
 ): MemoryViewerCardRecord {
-  const arrayName = array.name ?? 'Literal de cadena';
   const valueTitle = element.initialized
     ? element.valueTruncated ? `${element.displayValue} (valor truncado por presupuesto de inspección)` : element.displayValue
     : 'Sin inicializar';
   const valueContent = element.initialized
-    ? truncateMemoryViewerScalarValue(arrayElementContent(array, element.displayValue))
+    ? truncateMemoryViewerScalarValue(arrayElementContent(element.type, element.displayValue))
     : '—';
   return {
     id: null,
@@ -397,9 +408,10 @@ function arrayElementCardRecord(
     aggregateMemberKey: null,
     aggregateMemberName: null,
     address: element.address,
-    size: Math.max(1, Math.floor(array.size / Math.max(1, array.length))),
+    size: array.elementSize,
     origin: array.origin,
-    label: `${arrayName}[${element.index}]`,
+    duration: array.duration,
+    label: `${array.name}[${element.index}]`,
     typeLabel: element.type,
     valueTitle,
     valueContent,
@@ -426,6 +438,7 @@ function heapCardRecord(block: DebugHeapObjectSnapshot): MemoryViewerCardRecord 
     address: block.address,
     size: block.size,
     origin: block.origin,
+    duration: 'heap',
     label: 'Bloque',
     typeLabel: 'bloque de heap',
     valueTitle: 'Contenido desconocido (?)',
@@ -467,7 +480,7 @@ function MemoryViewerScalarCard({
   onPointerFocusChange,
 }: MemoryViewerScalarCardProps) {
   const accessibleType = record.typeLabel ? ` (${record.typeLabel})` : '';
-  const accessibleLabel = `${record.label}${accessibleType}${record.isParameter ? ', parámetro' : ''}, dirección ${record.address}, ${record.valueTitle}${record.isPointerTarget ? ', destino resaltado de un puntero' : ''}${record.valueChanged ? ', valor distinto entre snapshots seleccionados' : ''}${record.isHeapBlock ? `, tamaño ${record.size} bytes` : ''}${exiting ? ', nodo saliendo' : ''}`;
+  const accessibleLabel = `${record.label}${accessibleType}${record.isParameter ? ', parámetro' : ''}${record.duration === 'thread-local' ? ', duración thread-local' : ''}, dirección ${record.address}, ${record.valueTitle}${record.isPointerTarget ? ', destino resaltado de un puntero' : ''}${record.valueChanged ? ', valor distinto entre snapshots seleccionados' : ''}${record.isHeapBlock ? `, tamaño ${record.size} bytes` : ''}${exiting ? ', nodo saliendo' : ''}`;
   const pointerIdentity = record.isPointer ? record.pointerIdentity : null;
   const isAggregateMember = record.aggregateMemberKey !== null;
 
@@ -479,6 +492,7 @@ function MemoryViewerScalarCard({
       data-memory-viewer-aggregate-field-key={record.aggregateMemberKey ?? undefined}
       data-memory-viewer-aggregate-field-name={record.aggregateMemberName ?? undefined}
       data-origin={record.origin}
+      data-duration={record.duration}
       data-initialized={record.initialized === null ? undefined : String(record.initialized)}
       data-pointer-status={record.pointerStatus ?? undefined}
       data-value-changed={record.valueChanged ? 'true' : undefined}
@@ -511,7 +525,9 @@ function MemoryViewerScalarCard({
           </span>
         ) : record.aggregateUnsupportedReason ? (
           <span className="memory-viewer-aggregate-member-placeholder" title={record.valueTitle}>
-            {record.aggregateUnsupportedReason === 'array' ? 'array' : 'agregado'}
+            {record.aggregateUnsupportedReason === 'array'
+              ? 'array'
+              : record.aggregateUnsupportedReason === 'flexible-array' ? 'FAM' : 'agregado'}
           </span>
         ) : record.valueContent}
         {record.valueChanged && <span className="memory-viewer-scalar-change-marker" aria-hidden="true">Δ</span>}
@@ -561,7 +577,7 @@ function MemoryViewerArrayBlock({
   fading = false,
 }: MemoryViewerArrayBlockProps) {
   const name = array.name ?? 'Literal de cadena';
-  const accessibleLabel = `${name}, tipo ${array.type}, longitud ${array.length}, dirección ${array.address}, tamaño ${array.size} bytes${array.readOnly ? ', solo lectura' : ''}`;
+  const accessibleLabel = `${name}, tipo ${array.type}, longitud ${array.length}${array.duration === 'thread-local' ? ', duración thread-local' : ''}, dirección ${array.address}, tamaño ${array.size} bytes${array.readOnly ? ', solo lectura' : ''}`;
   const placeholder = arrayStatusMessage(array);
   return (
     <div
@@ -569,6 +585,7 @@ function MemoryViewerArrayBlock({
       data-memory-viewer-array-id={array.rootId}
       data-memory-viewer-scalar-id={array.region === 'stack' ? array.rootId : undefined}
       data-origin={array.origin}
+      data-duration={array.duration}
       data-read-only={array.readOnly ? 'true' : undefined}
       role="group"
       aria-label={accessibleLabel}
@@ -581,7 +598,12 @@ function MemoryViewerArrayBlock({
               <li key={element.key}>
                 <MemoryViewerScalarCard
                   record={arrayElementCardRecord(
-                    array,
+                    {
+                      name: array.name ?? 'Literal de cadena',
+                      origin: array.origin,
+                      duration: array.duration,
+                      elementSize: array.length > 0 ? Math.max(1, Math.floor(array.size / array.length)) : 1,
+                    },
                     element,
                     changedElementKeys.has(element.key),
                     element.key === pointerTargetElementKey,
@@ -628,7 +650,12 @@ function aggregateMemberCardRecord(
 ): MemoryViewerCardRecord {
   const isPointer = member.kind === 'pointer';
   const isUninitialized = member.initialized === false || member.pointerStatus === 'uninitialized';
-  const reasonLabel = member.unsupportedReason === 'array' ? 'Array de campo pendiente' : 'Agregado de campo pendiente';
+  const reasonLabel = member.unsupportedReason === 'array'
+    ? 'Array de campo pendiente'
+    : member.unsupportedReason === 'flexible-array' ? 'Miembro flexible de array' : 'Agregado de campo pendiente';
+  const bitRange = member.bitWidth === undefined || member.bitOffset === undefined
+    ? null
+    : `${member.bitOffset}–${member.bitOffset + member.bitWidth - 1}`;
   const valueTitle = member.kind === 'pointer'
     ? pointerValueTitle({
       initialized: member.initialized,
@@ -637,7 +664,11 @@ function aggregateMemberCardRecord(
       target: member.target,
     })
     : member.kind === 'unsupported'
-      ? `${reasonLabel}; offset ${member.offset}, tamaño ${member.size} bytes.`
+      ? member.flexibleArray
+        ? `${reasonLabel}: ${member.flexibleArray.length} elementos, ${member.flexibleArray.capacityBytes} bytes de capacidad, ${member.flexibleArray.elementSize} bytes por elemento; offset ${member.offset}.`
+        : `${reasonLabel}; offset ${member.offset}, tamaño ${member.size} bytes.`
+      : member.bitWidth !== undefined
+        ? `${member.initialized === true ? member.displayValue : 'Sin inicializar'}; campo de bits de ${member.bitWidth} bits${bitRange === null ? '' : ` en posiciones ${bitRange}`} de una unidad compartida de ${member.storageUnitSize ?? member.size} bytes en offset ${member.offset}.`
       : member.initialized === true
         ? member.displayValue ?? '?'
         : 'Sin inicializar';
@@ -658,6 +689,7 @@ function aggregateMemberCardRecord(
     address: member.address,
     size: member.size,
     origin: aggregate.origin,
+    duration: aggregate.duration,
     label: member.name || '(anónimo)',
     typeLabel: member.type,
     valueTitle,
@@ -676,20 +708,48 @@ function aggregateMemberCardRecord(
   };
 }
 
+function aggregateFlexibleArrayElementCardRecord(
+  aggregate: DebugAggregateSnapshot,
+  member: DebugAggregateSnapshot['members'][number],
+  element: DebugArrayElementSnapshot,
+): MemoryViewerCardRecord {
+  const flexibleArray = member.flexibleArray;
+  if (!flexibleArray) throw new Error('Se esperaba el snapshot de un miembro FAM.');
+  return arrayElementCardRecord({
+    name: `${aggregate.name ?? aggregate.type}.${member.name}`,
+    origin: aggregate.origin,
+    duration: aggregate.duration,
+    elementSize: flexibleArray.elementSize,
+  }, element, false);
+}
+
+function flexibleArrayStatusMessage(status: NonNullable<DebugAggregateSnapshot['members'][number]['flexibleArray']>['status']): string | null {
+  switch (status) {
+    case 'available':
+    case 'too-many-elements': return null;
+    case 'multidimensional': return 'Matriz pendiente';
+    case 'unsupported-element-type': return 'Tipo de elemento pendiente';
+  }
+}
+
+function aggregateMemberMetadata(member: DebugAggregateSnapshot['members'][number]): string {
+  if (member.flexibleArray) {
+    return `FAM · ${member.flexibleArray.length} × ${member.flexibleArray.elementSize} B · ${member.flexibleArray.capacityBytes} B · +${member.offset}`;
+  }
+  if (member.bitWidth !== undefined) {
+    const positions = member.bitOffset === undefined
+      ? ''
+      : ` · bits ${member.bitOffset}–${member.bitOffset + member.bitWidth - 1}`;
+    return `${member.type} · ${member.bitWidth} bit${member.bitWidth === 1 ? '' : 's'}${positions} · unidad compartida ${member.storageUnitSize ?? member.size} B · +${member.offset}`;
+  }
+  return `${member.type} · ${member.size} B · +${member.offset}`;
+}
+
 type MemoryViewerAggregateLayoutItem =
   | { readonly kind: 'member'; readonly offset: number; readonly member: DebugAggregateSnapshot['members'][number] }
   | { readonly kind: 'padding'; readonly offset: number; readonly size: number; readonly key: string };
 
-function MemoryViewerAggregateBlock({
-  aggregate,
-  changedMemberKeys,
-  pointerTargetFieldKey = null,
-  pointerTargetRoot = false,
-  exiting = false,
-  fading = false,
-  onPointerHoverChange,
-  onPointerFocusChange,
-}: {
+export interface MemoryViewerAggregateBlockProps {
   aggregate: DebugAggregateSnapshot;
   changedMemberKeys: ReadonlySet<string>;
   pointerTargetFieldKey?: string | null;
@@ -698,9 +758,23 @@ function MemoryViewerAggregateBlock({
   fading?: boolean;
   onPointerHoverChange?: (pointerIdentity: MemoryViewerPointerIdentity, isHovered: boolean) => void;
   onPointerFocusChange?: (pointerIdentity: MemoryViewerPointerIdentity, isFocused: boolean) => void;
-}) {
-  const name = aggregate.name ?? 'Agregado temporal';
+}
+
+export function MemoryViewerAggregateBlock({
+  aggregate,
+  changedMemberKeys,
+  pointerTargetFieldKey = null,
+  pointerTargetRoot = false,
+  exiting = false,
+  fading = false,
+  onPointerHoverChange,
+  onPointerFocusChange,
+}: MemoryViewerAggregateBlockProps) {
+  const name = aggregate.name ?? (aggregate.region === 'heap' ? 'Agregado en heap' : 'Agregado temporal');
   const placeholder = aggregateStatusMessage(aggregate);
+  const flexibleArrayMember = aggregate.members.find(member => member.flexibleArray !== undefined);
+  const flexibleArray = flexibleArrayMember?.flexibleArray;
+  const hasFlexibleArrayValues = flexibleArray !== undefined && flexibleArray.length > 0;
   const aggregateTypeName = aggregate.type.startsWith(`${aggregate.kind} `)
     ? aggregate.type.slice(aggregate.kind.length + 1)
     : aggregate.type.startsWith(`${aggregate.kind}#`)
@@ -710,14 +784,16 @@ function MemoryViewerAggregateBlock({
     ...aggregate.members.map(member => ({ kind: 'member' as const, offset: member.offset, member })),
     ...aggregate.padding.map(span => ({ kind: 'padding' as const, offset: span.offset, size: span.size, key: span.key })),
   ].sort((left, right) => left.offset - right.offset || (left.kind === 'padding' ? -1 : 1));
-  const accessibleLabel = `${name}, ${aggregate.kind} ${aggregate.type}, dirección ${aggregate.address}, tamaño ${aggregate.size} bytes${aggregate.readOnly ? ', solo lectura' : ''}`;
+  const accessibleLabel = `${name}, ${aggregate.kind} ${aggregate.type}${aggregate.duration === 'thread-local' ? ', duración thread-local' : ''}, dirección ${aggregate.address}, tamaño ${aggregate.size} bytes${aggregate.readOnly ? ', solo lectura' : ''}`;
 
   return (
     <div
-      className={`memory-viewer-aggregate${aggregate.readOnly ? ' memory-viewer-aggregate--readonly' : ''}${pointerTargetRoot ? ' memory-viewer-aggregate--pointer-target' : ''}${exiting ? ' memory-viewer-aggregate--exiting' : ''}${fading ? ' memory-viewer-aggregate--fading' : ''}`}
+      className={`memory-viewer-aggregate${aggregate.readOnly ? ' memory-viewer-aggregate--readonly' : ''}${hasFlexibleArrayValues ? ' memory-viewer-aggregate--has-fam' : ''}${pointerTargetRoot ? ' memory-viewer-aggregate--pointer-target' : ''}${exiting ? ' memory-viewer-aggregate--exiting' : ''}${fading ? ' memory-viewer-aggregate--fading' : ''}`}
       data-memory-viewer-aggregate-id={aggregate.rootId}
-      data-memory-viewer-scalar-id={aggregate.region === 'stack' ? aggregate.rootId : undefined}
+      data-memory-viewer-aggregate-view-id={aggregate.viewId ?? aggregate.rootId}
+      data-memory-viewer-scalar-id={aggregate.region === 'stack' || aggregate.region === 'heap' ? aggregate.rootId : undefined}
       data-origin={aggregate.origin}
+      data-duration={aggregate.duration}
       data-read-only={aggregate.readOnly ? 'true' : undefined}
       data-pointer-target={pointerTargetRoot ? 'true' : undefined}
       role="group"
@@ -749,8 +825,8 @@ function MemoryViewerAggregateBlock({
                   >
                     <span className="memory-viewer-scalar-address-value">{item.member.address}</span>
                   </span>
-                  <span className="memory-viewer-aggregate-member-metadata" title={`${item.member.type} · ${item.member.size} B · offset ${item.member.offset}`}>
-                    {item.member.type} · {item.member.size} B · +{item.member.offset}
+                  <span className="memory-viewer-aggregate-member-metadata" title={aggregateMemberMetadata(item.member)}>
+                    {aggregateMemberMetadata(item.member)}
                   </span>
                 </li>
               ) : (
@@ -768,6 +844,45 @@ function MemoryViewerAggregateBlock({
           )
         ) : (
           <div className="memory-viewer-array-placeholder" role="status">{placeholder}</div>
+        )}
+        {hasFlexibleArrayValues && flexibleArray && flexibleArrayMember && (
+          <div
+            className="memory-viewer-aggregate-fam-view"
+            data-memory-viewer-fam-member={flexibleArrayMember.name}
+            data-memory-viewer-fam-offset={flexibleArrayMember.offset}
+            data-memory-viewer-fam-length={flexibleArray.length}
+            data-memory-viewer-fam-capacity={flexibleArray.capacityBytes}
+            role="group"
+            aria-label={`Elementos de ${flexibleArrayMember.name}`}
+          >
+            {flexibleArrayStatusMessage(flexibleArray.status) === null ? (
+              <ol className="memory-viewer-array-cells memory-viewer-aggregate-fam-cells" aria-label={`Elementos de ${flexibleArrayMember.name}`}>
+                {flexibleArray.elements.map(element => (
+                  <li key={element.key}>
+                    <MemoryViewerScalarCard
+                      record={aggregateFlexibleArrayElementCardRecord(aggregate, flexibleArrayMember, element)}
+                    />
+                    <span
+                      className="memory-viewer-scalar-address memory-viewer-array-cell-address"
+                      title={element.address}
+                      aria-hidden="true"
+                    >
+                      <span className="memory-viewer-scalar-address-value">{element.address}</span>
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <div className="memory-viewer-array-placeholder" role="status">
+                {flexibleArrayStatusMessage(flexibleArray.status)}
+              </div>
+            )}
+            {flexibleArray.omittedElements > 0 && (
+              <span className="memory-viewer-aggregate-fam-omitted" role="status">
+                +{flexibleArray.omittedElements} elementos omitidos
+              </span>
+            )}
+          </div>
         )}
         <span
           className="memory-viewer-aggregate-root-address"
@@ -790,29 +905,32 @@ function MemoryViewerAggregateBlock({
   );
 }
 
-function isMemoryViewerPointerTargetStatic(
+function memoryViewerPointerTargetRegion(
   target: MemoryViewerPointerTarget,
   staticScalars: readonly DebugStaticObjectSnapshot[],
+  heapObjects: readonly DebugHeapObjectSnapshot[],
   pointers: readonly DebugPointerSnapshot[],
   aggregates: readonly DebugAggregateSnapshot[],
-): boolean {
-  if (target.kind === 'array-cell') return target.region === 'static';
-  if (target.kind === 'aggregate-root' || target.kind === 'aggregate-field') return target.region === 'static';
+): MemoryRegion {
+  if (target.kind === 'array-cell' || target.kind === 'aggregate-root' || target.kind === 'aggregate-field') return target.region;
+  if (heapObjects.some(snapshot => snapshot.id === target.allocationId)
+    || aggregates.some(snapshot => snapshot.rootId === target.allocationId && snapshot.region === 'heap')) return 'heap';
   return staticScalars.some(snapshot => snapshot.id === target.allocationId)
     || aggregates.some(snapshot => snapshot.rootId === target.allocationId && snapshot.region === 'static')
-    || pointers.some(snapshot => snapshot.id === target.allocationId && snapshot.region === 'static');
+    || pointers.some(snapshot => snapshot.id === target.allocationId && snapshot.region === 'static')
+    ? 'static'
+    : 'stack';
 }
 
 function expandMemoryViewerPointerTargetRegion(
   current: Record<MemoryRegion, boolean>,
   target: MemoryViewerPointerTarget,
   staticScalars: readonly DebugStaticObjectSnapshot[],
+  heapObjects: readonly DebugHeapObjectSnapshot[],
   pointers: readonly DebugPointerSnapshot[],
   aggregates: readonly DebugAggregateSnapshot[],
 ): Record<MemoryRegion, boolean> {
-  const region: MemoryRegion = isMemoryViewerPointerTargetStatic(target, staticScalars, pointers, aggregates)
-    ? 'static'
-    : 'stack';
+  const region = memoryViewerPointerTargetRegion(target, staticScalars, heapObjects, pointers, aggregates);
   return current[region] ? current : { ...current, [region]: true };
 }
 
@@ -906,8 +1024,9 @@ function MemoryViewerRegions({
   const highlightedAggregateTargetFieldKey = highlightedPointerTarget?.kind === 'aggregate-field'
     ? highlightedPointerTarget.fieldKey
     : null;
-  const highlightedPointerTargetIsStatic = highlightedPointerTarget !== null
-    && isMemoryViewerPointerTargetStatic(highlightedPointerTarget, staticScalars, pointers, aggregates);
+  const highlightedPointerTargetRegion = highlightedPointerTarget === null
+    ? null
+    : memoryViewerPointerTargetRegion(highlightedPointerTarget, staticScalars, heapObjects, pointers, aggregates);
   const exitTimerRef = useRef<MemoryViewerExitCleanupTimer | null>(null);
   if (!exitTimerRef.current) exitTimerRef.current = new MemoryViewerExitCleanupTimer();
   const heapExitTimerRef = useRef<MemoryViewerExitCleanupTimer | null>(null);
@@ -955,8 +1074,8 @@ function MemoryViewerRegions({
     const targetKey = memoryViewerPointerInteractionTargetKey(activePointerIdentity, highlightedPointerTarget);
     if (expandedPointerTargetKeyRef.current === targetKey) return;
     expandedPointerTargetKeyRef.current = targetKey;
-    setExpanded(current => expandMemoryViewerPointerTargetRegion(current, highlightedPointerTarget, staticScalars, pointers, aggregates));
-  }, [activePointerIdentity, aggregates, highlightedPointerTarget, pointers, staticScalars, status, stepIndex]);
+    setExpanded(current => expandMemoryViewerPointerTargetRegion(current, highlightedPointerTarget, staticScalars, heapObjects, pointers, aggregates));
+  }, [activePointerIdentity, aggregates, heapObjects, highlightedPointerTarget, pointers, staticScalars, status, stepIndex]);
 
   const {
     stackSectionRef,
@@ -977,9 +1096,10 @@ function MemoryViewerRegions({
   } = useStackHorizontalScroll(expanded.heap);
 
   useLayoutEffect(() => {
-    if (!highlightedPointerTarget) return;
-    if (highlightedPointerTargetIsStatic ? !expanded.static : !expanded.stack) return;
-    const scrollArea = highlightedPointerTargetIsStatic ? staticScrollRef.current : stackScrollRef.current;
+    if (!highlightedPointerTarget || highlightedPointerTargetRegion === null || !expanded[highlightedPointerTargetRegion]) return;
+    const scrollArea = highlightedPointerTargetRegion === 'static'
+      ? staticScrollRef.current
+      : highlightedPointerTargetRegion === 'heap' ? heapScrollRef.current : stackScrollRef.current;
     const selector = highlightedPointerTarget.kind === 'array-cell'
       ? `[data-memory-viewer-array-element-key="${highlightedPointerTarget.elementKey}"]`
       : highlightedPointerTarget.kind === 'aggregate-field'
@@ -989,9 +1109,10 @@ function MemoryViewerRegions({
           : `[data-memory-viewer-scalar-id="${highlightedPointerTarget.allocationId}"]`;
     const target = scrollArea?.querySelector<HTMLElement>(selector);
     if (!target) return;
-    if (highlightedPointerTargetIsStatic) ensureStaticVisible(target, 12);
+    if (highlightedPointerTargetRegion === 'static') ensureStaticVisible(target, 12);
+    else if (highlightedPointerTargetRegion === 'heap') ensureHeapVisible(target, 12);
     else ensureVisible(target, 12);
-  }, [ensureStaticVisible, ensureVisible, expanded.stack, expanded.static, highlightedPointerTarget, highlightedPointerTargetIsStatic, stackScrollRef, staticScrollRef]);
+  }, [ensureHeapVisible, ensureStaticVisible, ensureVisible, expanded.heap, expanded.stack, expanded.static, highlightedPointerTarget, highlightedPointerTargetRegion, heapScrollRef, stackScrollRef, staticScrollRef]);
 
   function clearExitTimer() {
     exitTimerRef.current?.clear();
@@ -1271,7 +1392,7 @@ function MemoryViewerRegions({
       ? exitPresentation.deletedArrays.map(array => array.rootId)
       : []);
     const deletedAggregateIds = new Set(isCurrentPresentation
-      ? exitPresentation.deletedAggregates.map(aggregate => aggregate.rootId)
+      ? exitPresentation.deletedAggregates.map(aggregate => aggregate.viewId ?? aggregate.rootId)
       : []);
     const stackArrays = arrays.filter(array => array.region === 'stack');
     const stackAggregates = aggregates.filter(aggregate => aggregate.region === 'stack');
@@ -1292,7 +1413,7 @@ function MemoryViewerRegions({
         ...exitPresentation.deletedScalars.map(snapshot => ({ id: snapshot.id, kind: 'scalar' as const, snapshot })),
         ...exitPresentation.deletedPointers.map(snapshot => ({ id: snapshot.id, kind: 'pointer' as const, snapshot })),
         ...exitPresentation.deletedArrays.map(snapshot => ({ id: snapshot.rootId, kind: 'array' as const, snapshot })),
-        ...exitPresentation.deletedAggregates.map(snapshot => ({ id: snapshot.rootId, kind: 'aggregate' as const, snapshot })),
+        ...exitPresentation.deletedAggregates.map(snapshot => ({ id: snapshot.viewId ?? snapshot.rootId, kind: 'aggregate' as const, snapshot })),
       ] : [],
     );
     const objectsByScope = new Map<number, MemoryViewerStackObject[]>();
@@ -1434,7 +1555,7 @@ function MemoryViewerRegions({
     return staticItems.length === 0 ? (
       <span className="memory-viewer-region-empty">Vacío</span>
     ) : (
-      <ol className="memory-viewer-static-list" aria-label="Objetos de duración estática">
+      <ol className="memory-viewer-static-list" aria-label="Objetos de duración estática o thread-local">
         {staticItems.map(item => (
           <li key={`${item.kind}-${item.id}`}>
             {item.kind === 'scalar' ? (
@@ -1480,20 +1601,39 @@ function MemoryViewerRegions({
       heapObjects,
       isCurrentPresentation ? heapExitPresentation.deletedObjects : [],
     );
+    const visibleItems = mergeMemoryViewerHeapViews(
+      displayedObjects,
+      aggregates.filter(aggregate => aggregate.region === 'heap'),
+      heapObjects,
+    );
+    const changedAggregateMemberKeys = new Set(valueChangePresentation.stepIndex === stepIndex
+      ? valueChangePresentation.aggregateMemberKeys
+      : []);
 
-    return displayedObjects.length === 0 ? (
+    return visibleItems.length === 0 ? (
       <span className="memory-viewer-region-empty">Vacío</span>
     ) : (
       <ol className="memory-viewer-heap-list" aria-label="Bloques del heap, ordenados por dirección">
-        {displayedObjects.map(block => {
-          const isExitingBlock = deletedObjectIds.has(block.id);
+        {visibleItems.map(item => {
+          const isExitingBlock = item.kind === 'block' && deletedObjectIds.has(item.id);
           return (
-            <li key={block.id}>
-              <MemoryViewerScalarCard
-                record={heapCardRecord(block)}
-                exiting={isExitingBlock}
-                fading={isExitingBlock && heapExitPresentation.phase === 'fading'}
-              />
+            <li key={`${item.kind}-${item.id}`}>
+              {item.kind === 'block' ? (
+                <MemoryViewerScalarCard
+                  record={heapCardRecord(item.snapshot)}
+                  exiting={isExitingBlock}
+                  fading={isExitingBlock && heapExitPresentation.phase === 'fading'}
+                />
+              ) : (
+                <MemoryViewerAggregateBlock
+                  aggregate={item.snapshot}
+                  changedMemberKeys={changedAggregateMemberKeys}
+                  pointerTargetFieldKey={item.id === highlightedAggregateTargetId ? highlightedAggregateTargetFieldKey : null}
+                  pointerTargetRoot={highlightedPointerTarget?.kind === 'aggregate-root' && item.id === highlightedAggregateTargetId}
+                  onPointerHoverChange={updatePointerHover}
+                  onPointerFocusChange={updatePointerFocus}
+                />
+              )}
             </li>
           );
         })}
@@ -1556,7 +1696,7 @@ function MemoryViewerRegions({
         </h3>
         <div
           id={contentId}
-          className={`memory-viewer-region-content${region === 'stack' ? ' memory-viewer-region-content--stack' : ''}${region === 'static' ? ` memory-viewer-region-content--static${staticIsEmpty ? ' memory-viewer-region-content--empty' : ''}` : ''}${region === 'heap' ? ` memory-viewer-region-content--heap${heapObjects.length === 0 ? ' memory-viewer-region-content--empty' : ''}` : ''}`}
+          className={`memory-viewer-region-content${region === 'stack' ? ' memory-viewer-region-content--stack' : ''}${region === 'static' ? ` memory-viewer-region-content--static${staticIsEmpty ? ' memory-viewer-region-content--empty' : ''}` : ''}${region === 'heap' ? ` memory-viewer-region-content--heap${heapObjects.length === 0 && !aggregates.some(aggregate => aggregate.region === 'heap') ? ' memory-viewer-region-content--empty' : ''}` : ''}`}
           ref={region === 'stack' ? stackScrollRef : region === 'static' ? staticScrollRef : heapScrollRef}
           role="region"
           aria-labelledby={headingId}
@@ -1584,7 +1724,7 @@ function MemoryViewerRegions({
           Se omitieron {omittedAggregateObjects} structs por el límite de inspección.
         </div>
       )}
-      {renderRegion('static', 'Static')}
+      {renderRegion('static', 'Static / TLS')}
       {renderRegion('stack', 'Stack')}
       {renderRegion('heap', 'Heap')}
     </section>

@@ -1,4 +1,5 @@
 import type { DebugAggregateSnapshot } from '@playground/c11-engine/core';
+import { sameArrayElement } from './arraySnapshots.ts';
 
 type DebugAggregateMemberSnapshot = DebugAggregateSnapshot['members'][number];
 
@@ -8,6 +9,7 @@ export function sameMemoryViewerAggregateSnapshot(
   right: DebugAggregateSnapshot,
 ): boolean {
   return left.rootId === right.rootId
+    && left.viewId === right.viewId
     && left.name === right.name
     && left.origin === right.origin
     && left.duration === right.duration
@@ -49,6 +51,10 @@ function sameMember(left: DebugAggregateMemberSnapshot, right: DebugAggregateMem
     && left.kind === right.kind
     && left.offset === right.offset
     && left.size === right.size
+    && left.bitWidth === right.bitWidth
+    && left.bitOffset === right.bitOffset
+    && left.storageUnitSize === right.storageUnitSize
+    && sameFlexibleArray(left.flexibleArray, right.flexibleArray)
     && left.address === right.address
     && left.initialized === right.initialized
     && left.displayValue === right.displayValue
@@ -57,11 +63,31 @@ function sameMember(left: DebugAggregateMemberSnapshot, right: DebugAggregateMem
     && sameTarget(left.target, right.target);
 }
 
-/** Detach nested member values, target provenance, and padding before retaining a Worker snapshot. */
+function sameFlexibleArray(
+  left: DebugAggregateMemberSnapshot['flexibleArray'],
+  right: DebugAggregateMemberSnapshot['flexibleArray'],
+): boolean {
+  return left === right || (left !== undefined && right !== undefined
+    && left.elementSize === right.elementSize
+    && left.capacityBytes === right.capacityBytes
+    && left.length === right.length
+    && left.status === right.status
+    && left.omittedElements === right.omittedElements
+    && left.elements.length === right.elements.length
+    && left.elements.every((element, index) => sameArrayElement(element, right.elements[index]!)));
+}
+
+/** Detach nested member values, target provenance, FAM cells, and padding before retaining a Worker snapshot. */
 export function cloneMemoryViewerAggregateSnapshot(snapshot: DebugAggregateSnapshot): DebugAggregateSnapshot {
   const members = Object.freeze(snapshot.members.map(member => Object.freeze({
     ...member,
     ...(member.target ? { target: Object.freeze({ ...member.target }) } : {}),
+    ...(member.flexibleArray ? {
+      flexibleArray: Object.freeze({
+        ...member.flexibleArray,
+        elements: Object.freeze(member.flexibleArray.elements.map(element => Object.freeze({ ...element }))),
+      }),
+    } : {}),
   })));
   const padding = Object.freeze(snapshot.padding.map(span => Object.freeze({ ...span })));
   return Object.freeze({ ...snapshot, members, padding });
@@ -82,6 +108,7 @@ export function findMemoryViewerChangedAggregateMemberKeys(
     return earlier && (earlier.initialized !== member.initialized
       || earlier.displayValue !== member.displayValue
       || earlier.pointerStatus !== member.pointerStatus
+      || !sameFlexibleArray(earlier.flexibleArray, member.flexibleArray)
       || !sameTarget(earlier.target, member.target))
       ? [member.key]
       : [];

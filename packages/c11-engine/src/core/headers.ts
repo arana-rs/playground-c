@@ -96,6 +96,7 @@ export const LIBRARY_DECLARATIONS: Readonly<Record<string, readonly string[]>> =
   'limits.h': Object.freeze([]),
   'math.h': Object.freeze([]),
   'stdarg.h': Object.freeze([]),
+  'stdalign.h': Object.freeze([]),
   'stdbool.h': Object.freeze([]),
   'stddef.h': Object.freeze([]),
   'stdint.h': Object.freeze([]),
@@ -266,6 +267,11 @@ int isnormal(double);
 int signbit(double);
 int fpclassify(double);`),
   'stdarg.h': guarded('stdarg.h', stdargBody),
+  'stdalign.h': guarded('stdalign.h', `
+#define alignas _Alignas
+#define alignof _Alignof
+#define __alignas_is_defined 1
+#define __alignof_is_defined 1`),
   'stdbool.h': guarded('stdbool.h', `
 #define bool _Bool
 #define true 1
@@ -275,6 +281,8 @@ int fpclassify(double);`),
 typedef unsigned long size_t;
 typedef long ptrdiff_t;
 typedef int wchar_t;
+typedef struct { long long __c11_max_align_ll; long double __c11_max_align_ld; } max_align_t;
+#define offsetof(type, member) __builtin_offsetof(type, member)
 #define NULL ((void *)0)`),
   'stdint.h': guarded('stdint.h', stdintBody),
   'stdio.h': guarded('stdio.h', stdioBody),

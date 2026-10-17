@@ -2007,6 +2007,46 @@ body,
   grid-row: 3;
 }
 
+.memory-viewer-aggregate--has-fam .memory-viewer-aggregate-body {
+  grid-template-rows:
+    var(--memory-viewer-metadata-line-height)
+    var(--memory-viewer-value-height)
+    var(--memory-viewer-metadata-line-height)
+    var(--memory-viewer-metadata-line-height)
+    var(--memory-viewer-metadata-line-height)
+    var(--memory-viewer-metadata-line-height);
+}
+
+.memory-viewer-aggregate-fam-view {
+  display: flex;
+  width: max-content;
+  max-width: 100%;
+  grid-column: 1;
+  grid-row: 3 / span 2;
+  align-items: center;
+  gap: 8px;
+}
+
+.memory-viewer-aggregate-fam-cells {
+  grid-row: auto;
+  flex: 0 0 auto;
+}
+
+.memory-viewer-aggregate--readonly .memory-viewer-aggregate-fam-cells::before {
+  box-shadow: inset 0 0 0 1px var(--memory-string-border);
+}
+
+.memory-viewer-aggregate-fam-omitted {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: var(--memory-viewer-metadata-line-height);
+  white-space: nowrap;
+}
+
+.memory-viewer-aggregate--has-fam .memory-viewer-aggregate-footer {
+  grid-row: 5 / span 2;
+}
+
 .memory-viewer-aggregate-root-address {
   display: block;
   grid-column: 1;
@@ -2067,6 +2107,11 @@ body,
 }
 
 .memory-viewer-window:is([data-memory-viewer-mode="normal"], [data-memory-viewer-mode="debug"])
+  .memory-viewer-aggregate--has-fam .memory-viewer-aggregate-footer {
+  grid-row: 5 / span 2;
+}
+
+.memory-viewer-window:is([data-memory-viewer-mode="normal"], [data-memory-viewer-mode="debug"])
   .memory-viewer-aggregate-footer > .memory-viewer-object-name {
   max-width: 100%;
   min-width: 0;
@@ -2085,6 +2130,22 @@ body,
     var(--memory-viewer-metadata-line-height)
     max-content
     var(--memory-viewer-metadata-line-height);
+}
+
+.memory-viewer-window[data-memory-viewer-mode="minimal"] .memory-viewer-aggregate--has-fam .memory-viewer-aggregate-body {
+  grid-template-rows:
+    var(--memory-viewer-metadata-line-height)
+    max-content
+    max-content
+    var(--memory-viewer-metadata-line-height);
+}
+
+.memory-viewer-window[data-memory-viewer-mode="minimal"] .memory-viewer-aggregate--has-fam .memory-viewer-aggregate-fam-view {
+  grid-row: 3;
+}
+
+.memory-viewer-window[data-memory-viewer-mode="minimal"] .memory-viewer-aggregate--has-fam .memory-viewer-aggregate-footer {
+  grid-row: 4;
 }
 
 .memory-viewer-window[data-memory-viewer-mode="minimal"] .memory-viewer-aggregate-body > .memory-viewer-array-placeholder,

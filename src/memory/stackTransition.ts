@@ -108,8 +108,8 @@ export function compareMemoryViewerStackSnapshots(
   const currentArrayIds = new Set(currentArrays.map(array => array.rootId));
   const previousPointerIds = new Set(previousPointers.filter(pointer => pointer.region === 'stack').map(pointer => pointer.id));
   const currentPointerIds = new Set(currentPointers.filter(pointer => pointer.region === 'stack').map(pointer => pointer.id));
-  const previousAggregateIds = new Set(previousAggregates.filter(aggregate => aggregate.region === 'stack').map(aggregate => aggregate.rootId));
-  const currentAggregateIds = new Set(currentAggregates.filter(aggregate => aggregate.region === 'stack').map(aggregate => aggregate.rootId));
+  const previousAggregateIds = new Set(previousAggregates.filter(aggregate => aggregate.region === 'stack').map(aggregate => aggregate.viewId ?? aggregate.rootId));
+  const currentAggregateIds = new Set(currentAggregates.filter(aggregate => aggregate.region === 'stack').map(aggregate => aggregate.viewId ?? aggregate.rootId));
   const previousScopeIds = new Set(previousScopes.map(scope => scope.id));
   const currentScopeIds = new Set(currentScopes.map(scope => scope.id));
 
@@ -120,8 +120,8 @@ export function compareMemoryViewerStackSnapshots(
     deletedPointers: previousPointers.filter(pointer => pointer.region === 'stack' && !currentPointerIds.has(pointer.id)),
     createdArrays: currentArrays.filter(array => !previousArrayIds.has(array.rootId)),
     deletedArrays: previousArrays.filter(array => !currentArrayIds.has(array.rootId)),
-    createdAggregates: currentAggregates.filter(aggregate => aggregate.region === 'stack' && !previousAggregateIds.has(aggregate.rootId)),
-    deletedAggregates: previousAggregates.filter(aggregate => aggregate.region === 'stack' && !currentAggregateIds.has(aggregate.rootId)),
+    createdAggregates: currentAggregates.filter(aggregate => aggregate.region === 'stack' && !previousAggregateIds.has(aggregate.viewId ?? aggregate.rootId)),
+    deletedAggregates: previousAggregates.filter(aggregate => aggregate.region === 'stack' && !currentAggregateIds.has(aggregate.viewId ?? aggregate.rootId)),
     enteredScopes: currentScopes.filter(scope => !previousScopeIds.has(scope.id)),
     exitedScopes: previousScopes.filter(scope => !currentScopeIds.has(scope.id)),
   };
@@ -139,9 +139,9 @@ export function chooseMemoryViewerStackFocusId(
   previousAggregates: readonly DebugAggregateSnapshot[] = [],
   currentAggregates: readonly DebugAggregateSnapshot[] = [],
 ): number | null {
-  const previousIds = [...previousScalars.map(scalar => scalar.id), ...previousPointers.map(pointer => pointer.id), ...previousArrays.map(array => array.rootId), ...previousAggregates.map(aggregate => aggregate.rootId)]
+  const previousIds = [...previousScalars.map(scalar => scalar.id), ...previousPointers.map(pointer => pointer.id), ...previousArrays.map(array => array.rootId), ...previousAggregates.map(aggregate => aggregate.viewId ?? aggregate.rootId)]
     .sort((left, right) => left - right);
-  const currentIds = [...currentScalars.map(scalar => scalar.id), ...currentPointers.map(pointer => pointer.id), ...currentArrays.map(array => array.rootId), ...currentAggregates.map(aggregate => aggregate.rootId)]
+  const currentIds = [...currentScalars.map(scalar => scalar.id), ...currentPointers.map(pointer => pointer.id), ...currentArrays.map(array => array.rootId), ...currentAggregates.map(aggregate => aggregate.viewId ?? aggregate.rootId)]
     .sort((left, right) => left - right);
   let focusedId: number | null = null;
   let focusedPosition = -1;
@@ -202,18 +202,20 @@ export function chooseMemoryViewerStackFocusId(
   }
 
   for (const aggregate of transition.deletedAggregates) {
-    const position = previousIds.indexOf(aggregate.rootId);
+    const aggregateId = aggregate.viewId ?? aggregate.rootId;
+    const position = previousIds.indexOf(aggregateId);
     if (position > focusedPosition) {
-      focusedId = aggregate.rootId;
+      focusedId = aggregateId;
       focusedPosition = position;
       focusedWasCreated = false;
     }
   }
 
   for (const aggregate of transition.createdAggregates) {
-    const position = currentIds.indexOf(aggregate.rootId);
+    const aggregateId = aggregate.viewId ?? aggregate.rootId;
+    const position = currentIds.indexOf(aggregateId);
     if (position > focusedPosition || (position === focusedPosition && !focusedWasCreated)) {
-      focusedId = aggregate.rootId;
+      focusedId = aggregateId;
       focusedPosition = position;
       focusedWasCreated = true;
     }

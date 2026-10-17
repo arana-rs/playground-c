@@ -98,11 +98,11 @@ test('P1 separates preparation restrictions from detected runtime UB', () => {
   }
 });
 
-test('features beyond P3 remain explicit preparation failures', () => {
-  for (const body of [
-    'return _Generic(1, int: 2);',
-    'return 0b10;',
-  ]) {
+test('P5 generic selection runs while binary integer literals remain unsupported', () => {
+  const selected = execute(prepared('return _Generic(1L, int: 0, long: 2, default: 3);'));
+  assert.equal(selected.kind, 'terminated', JSON.stringify(selected));
+  assert.equal(selected.mainReturn, 2);
+  for (const body of ['return 0b10;']) {
     const result = prepare(project(body));
     assert.equal(result.kind, 'prepare-error', body);
     assert.equal(result.diagnostics[0].code, 'UNSUPPORTED_FEATURE', body);
