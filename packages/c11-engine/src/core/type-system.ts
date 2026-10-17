@@ -18,7 +18,7 @@ const integerTypes = new Set<CType>([
   'long', 'unsigned long', 'long long', 'unsigned long long',
 ]);
 export function isInteger(type: CType): boolean { return integerTypes.has(type); }
-export function isArithmetic(type: CType): boolean { return isInteger(type) || type === 'float' || type === 'double'; }
+export function isArithmetic(type: CType): boolean { return isInteger(type) || type === 'float' || type === 'double' || type === 'long double'; }
 export function isScalar(type: CType): boolean { return isArithmetic(type) || isPointer(type); }
 export function isObject(type: CType): boolean { return type !== 'void' && !isFunction(type); }
 
@@ -52,12 +52,14 @@ const integerLayout: Record<string, { size: number; alignment: number; bits: num
 export function scalarSize(type: CType): number {
   if (type === 'float') return 4;
   if (type === 'double') return 8;
+  if (type === 'long double') return 16;
   if (isPointer(type)) return 8;
   return typeof type === 'string' ? integerLayout[type]?.size ?? 0 : 0;
 }
 export function scalarAlignment(type: CType): number {
   if (type === 'float') return 4;
   if (type === 'double') return 8;
+  if (type === 'long double') return 16;
   if (isPointer(type)) return 8;
   return typeof type === 'string' ? integerLayout[type]?.alignment ?? 0 : 0;
 }

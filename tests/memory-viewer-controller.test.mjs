@@ -17,6 +17,10 @@ function paused(line) {
   return { kind: 'paused', location: { file: 'main.c', line, column: 1 }, metrics };
 }
 
+function inputNeeded(line, stdout = new Uint8Array(), stderr = new Uint8Array()) {
+  return { kind: 'input-needed', location: { file: 'main.c', line, column: 1 }, stdout, stderr, metrics };
+}
+
 function terminated() {
   return { kind: 'terminated', exitCode: 0, rawExitStatus: 0, mainReturn: 0, stdout: new Uint8Array(), stderr: new Uint8Array(), metrics };
 }
@@ -234,6 +238,7 @@ test('pasos manuales crean historial navegable sin volver a ejecutar el VM', () 
   assert.equal(controller.state.stepIndex, 2);
   assert.equal(controller.state.canPrevious, true);
   assert.equal(controller.state.canNext, false);
+  assert.equal(controller.state.canStop, false);
   assert.equal(worker.terminated, true);
 
   controller.previous();
@@ -965,4 +970,241 @@ test('el watchdog cubre preparación y pasos, pero no la espera entre ticks o ac
   preparing.timers.advance(100);
   assert.equal(preparing.controller.state.status, 'error');
   assert.equal(preparing.workers[0].terminated, true);
+});
+
+test('I/O apagado responde EOF al primer input-needed sin publicar una espera oculta', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker);
+  controller.setStdinInteractiveEnabled(false);
+  controller.next();
+
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 1, inputRequestId: 7, progress: inputNeeded(2), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+
+  assert.deepEqual(worker.messages.at(-1), {
+    type: 'debug-stdin-eof', jobId, requestId: 1, inputRequestId: 7,
+  });
+  assert.equal(controller.state.status, 'running');
+  assert.equal(controller.state.inputRequestId, null);
+  assert.equal(controller.state.stepIndex, 0, 'EOF continúa el mismo paso sin crear historial');
+  assert.ok(controller.state.transcript.some(entry => entry.text === '[EOF]\n'));
+  assert.equal(controller.sendStdinLine('9'), false);
+
+  const messageCount = worker.messages.length;
+  controller.setStdinInteractiveEnabled(true);
+  assert.equal(worker.messages.length, messageCount, 'reactivar I/O no reabre stdin después de EOF');
+});
+
+test('I/O apagado cierra la espera desde el historial sin mover su cursor', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker, 1);
+  controller.next();
+  worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(2), events: [] });
+  controller.next();
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 2, inputRequestId: 13, progress: inputNeeded(3), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+  controller.previous();
+  assert.equal(controller.state.isViewingHistory, true);
+  assert.equal(controller.state.inputRequestId, null, 'el formulario de stdin queda oculto en el historial');
+
+  controller.setStdinInteractiveEnabled(false);
+  assert.deepEqual(worker.messages.at(-1), {
+    type: 'debug-stdin-eof', jobId, requestId: 2, inputRequestId: 13,
+  });
+  assert.equal(controller.state.stepIndex, 0);
+  assert.equal(controller.state.location.line, 1);
+  assert.equal(controller.state.isViewingHistory, true);
+
+  const messageCount = worker.messages.length;
+  controller.setStdinInteractiveEnabled(true);
+  assert.equal(controller.sendStdinLine('ignored'), false, 'el token interno ya quedó cerrado');
+  assert.equal(worker.messages.length, messageCount, 'I/O vuelve a mostrarse sin reiniciar la sesión');
+
+  worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: terminated(), events: [] });
+  assert.equal(controller.state.stepIndex, 0, 'la respuesta del paso pendiente conserva el cursor histórico');
+  assert.equal(controller.state.location.line, 1);
+  assert.equal(controller.state.isViewingHistory, true);
+});
+
+test('I/O encendido mantiene la entrada interactiva habitual', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker);
+  controller.setStdinInteractiveEnabled(true);
+  controller.next();
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 1, inputRequestId: 21, progress: inputNeeded(2), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+
+  assert.equal(controller.state.status, 'waiting-input');
+  assert.equal(controller.state.inputRequestId, 21);
+  assert.equal(worker.messages.length, 2, 'no se envía EOF con I/O encendido');
+  assert.equal(controller.sendStdinLine('5'), true);
+  assert.deepEqual(worker.messages.at(-1), {
+    type: 'debug-stdin', jobId, requestId: 1, inputRequestId: 21,
+    bytes: new TextEncoder().encode('5\n'),
+  });
+});
+
+test('stdin mantiene el mismo paso a través de esperas repetidas y conserva salida/historial monotónicos', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker, 1);
+  controller.next();
+  const step = worker.messages[1];
+
+  worker.emit({ type: 'debug-output', jobId, requestId: step.requestId, sequence: 1, stream: 'stdout', chunk: new TextEncoder().encode('prompt> ') });
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'prompt> ', 'la salida aparece antes del primer wait');
+  worker.emit({ type: 'debug-output', jobId, requestId: 99, sequence: 2, stream: 'stdout', chunk: new TextEncoder().encode('stale') });
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: step.requestId, inputRequestId: 1,
+    progress: inputNeeded(2), events: [objectLifecycleEvent(2, 'object-create', 'heap')],
+    heapObjects: [heapSnapshot(1, '0x1000')], pointers: [], arrays: [], omittedArrayObjects: 0,
+    aggregates: [], omittedAggregateObjects: 0, stackScalars: [], staticObjects: [],
+  });
+  assert.equal(controller.state.status, 'waiting-input');
+  assert.equal(controller.state.inputRequestId, 1);
+  assert.equal(controller.state.stepIndex, 0, 'la espera no crea una ubicación histórica');
+  assert.equal(controller.state.lifecycle.eventCount, 1, 'los eventos transitorios se conservan una vez');
+  assert.equal(controller.sendStdinLine('12'), true);
+  assert.deepEqual(worker.messages.at(-1), {
+    type: 'debug-stdin', jobId, requestId: step.requestId, inputRequestId: 1,
+    bytes: new TextEncoder().encode('12\n'),
+  });
+
+  worker.emit({ type: 'debug-output', jobId, requestId: step.requestId, sequence: 2, stream: 'stdout', chunk: new TextEncoder().encode('part 12 ') });
+  worker.emit({ type: 'debug-output', jobId, requestId: step.requestId, sequence: 2, stream: 'stdout', chunk: new TextEncoder().encode('duplicate') });
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: step.requestId, inputRequestId: 2,
+    progress: inputNeeded(2), events: [objectLifecycleEvent(3, 'object-create', 'heap')],
+    heapObjects: [heapSnapshot(1, '0x1000'), heapSnapshot(2, '0x1008')], pointers: [], arrays: [], omittedArrayObjects: 0,
+    aggregates: [], omittedAggregateObjects: 0, stackScalars: [scalarSnapshot({ displayValue: '12' })], staticObjects: [],
+  });
+  assert.equal(controller.state.inputRequestId, 2, 'cada parada real de entrada recibe un token nuevo');
+  assert.equal(controller.state.stepIndex, 0, 'el segundo wait sigue sin añadir historia');
+  assert.equal(controller.state.stackScalars[0].displayValue, '12', 'se muestra la conversión ya asignada antes del segundo wait');
+  assert.equal(controller.state.lifecycle.eventCount, 2);
+  assert.equal(controller.sendStdinLine('34'), true);
+  assert.equal(worker.messages.at(-1).requestId, step.requestId, 'la continuación reusa el request del mismo paso');
+  assert.equal(worker.messages.at(-1).inputRequestId, 2);
+
+  worker.emit({ type: 'debug-output', jobId, requestId: step.requestId, sequence: 3, stream: 'stdout', chunk: new TextEncoder().encode('34\n') });
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: step.requestId, progress: paused(3), events: [objectLifecycleEvent(4, 'object-delete', 'heap')],
+    heapObjects: [heapSnapshot(1, '0x1000')], pointers: [], arrays: [], omittedArrayObjects: 0,
+    aggregates: [], omittedAggregateObjects: 0, stackScalars: [scalarSnapshot({ displayValue: '46' })], staticObjects: [],
+  });
+  assert.equal(controller.state.status, 'paused');
+  assert.equal(controller.state.stepIndex, 1, 'el request pendiente crea una sola entrada al pausar');
+  assert.equal(controller.state.inputRequestId, null);
+  assert.equal(controller.state.lifecycle.eventCount, 3, 'los eventos de las dos esperas y la pausa se agregan sin perderse');
+  assert.equal(controller.state.heapObjects.length, 1, 'las instantáneas finales reemplazan el estado transitorio');
+
+  const transcriptBeforeHistory = controller.state.transcript;
+  const outputText = transcriptBeforeHistory.map(entry => entry.text).join('');
+  assert.equal(outputText, 'prompt> 12\npart 12 34\n34\n');
+  const messageCount = worker.messages.length;
+  controller.previous();
+  assert.equal(controller.state.isViewingHistory, true);
+  assert.equal(controller.state.inputRequestId, null);
+  assert.equal(controller.state.canStop, true, 'Stop sigue disponible al recorrer historia mientras la VM vive');
+  controller.next();
+  assert.equal(controller.state.transcript, transcriptBeforeHistory, 'navegar snapshots no vuelve a emitir salida ni stdin');
+  assert.equal(worker.messages.length, messageCount);
+});
+
+test('EOF usa el token de la espera una sola vez y Stop conserva salida e historial parcial', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker);
+  controller.next();
+  worker.emit({ type: 'debug-output', jobId, requestId: 1, sequence: 1, stream: 'stderr', chunk: new TextEncoder().encode('diagnóstico parcial') });
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 1, inputRequestId: 41, progress: inputNeeded(2), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+  assert.equal(controller.sendStdinEOF(), true);
+  assert.equal(controller.sendStdinEOF(), false);
+  assert.equal(controller.sendStdinLine('ignored'), false);
+  assert.deepEqual(worker.messages.at(-1), { type: 'debug-stdin-eof', jobId, requestId: 1, inputRequestId: 41 });
+  assert.ok(controller.state.transcript.some(entry => entry.text === '[EOF]\n'));
+
+  controller.stop();
+  assert.equal(controller.state.status, 'cancelled');
+  assert.equal(controller.state.canStop, false);
+  assert.equal(controller.state.stepIndex, 1);
+  assert.equal(worker.terminated, true);
+  assert.ok(controller.state.transcript.some(entry => entry.text === 'diagnóstico parcial'));
+  const transcript = controller.state.transcript;
+  worker.emit({ type: 'debug-output', jobId, requestId: 1, sequence: 2, stream: 'stderr', chunk: new TextEncoder().encode('tarde') });
+  assert.equal(controller.state.transcript, transcript, 'la salida tardía tras Stop queda descartada');
+  assert.equal(controller.sendStdinEOF(), false);
+});
+
+test('una espera de stdin queda oculta en historia vieja y reaparece al volver a su frontera', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker, 1);
+  assert.equal(controller.state.canStop, true, 'Stop sigue disponible mientras la VM pausada permanece viva');
+  controller.next();
+  worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(2), events: [] });
+  controller.next();
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 2, inputRequestId: 13, progress: inputNeeded(2), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+
+  assert.equal(controller.state.status, 'waiting-input');
+  assert.equal(controller.state.inputRequestId, 13);
+  assert.equal(controller.state.canStop, true);
+  controller.previous();
+  assert.equal(controller.state.isViewingHistory, true);
+  assert.equal(controller.state.status, 'paused');
+  assert.equal(controller.state.inputRequestId, null, 'no se proyecta al pasado el formulario de la VM viva');
+  assert.equal(controller.sendStdinLine('invalido'), false);
+  assert.equal(controller.state.canStop, true);
+
+  controller.next();
+  assert.equal(controller.state.status, 'waiting-input');
+  assert.equal(controller.state.inputRequestId, 13, 'la misma petición reaparece al volver al frontier');
+  assert.equal(worker.messages.length, 3, 'recorrer el futuro cacheado no envía otro debug-step');
+  assert.equal(controller.sendStdinLine('5'), true);
+  worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: paused(3), events: [] });
+  assert.equal(controller.state.status, 'paused');
+  controller.previous();
+  assert.equal(controller.state.canStop, true, 'el VM pausado sigue siendo cancelable desde cualquier paso visible');
+});
+
+test('el watchdog se pausa durante el wait y vuelve a contar al enviar stdin', () => {
+  const configuration = { ...RUN_CONFIGURATION, timeoutMs: 100 };
+  const { controller, workers, timers } = setup({ configuration });
+  const worker = workers[0];
+  const jobId = ready(worker);
+  controller.next();
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 1, inputRequestId: 7, progress: inputNeeded(2), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+  timers.advance(10_000);
+  assert.equal(controller.state.status, 'waiting-input');
+  assert.equal(controller.sendStdinLine('3'), true);
+  timers.advance(99);
+  assert.equal(controller.state.status, 'running');
+  timers.advance(1);
+  assert.equal(controller.state.status, 'error');
+  assert.equal(controller.state.canStop, false);
+  assert.equal(worker.terminated, true);
 });

@@ -10,13 +10,14 @@ import type {
 import {
   EngineFailure, enforceLimit, failure, freshMetrics, normalizedLimits, now, programs,
 } from './internal.ts';
+import { formatBinary80Hex } from './binary80.ts';
 import type {
   AggregateDefinition, Binding, CValue, Expression, Initializer, InitializerDesignator,
   Location, ObjectPointerValue, ObjectReference, ObjectScalarValue,
 } from './internal.ts';
 import { compile } from './bytecode.ts';
 import type { CompiledFunction, Scope } from './bytecode.ts';
-import { binary, callBuiltin, convert, isFloatingClassificationBuiltin, promote, unary } from './numeric.ts';
+import { binary, callBuiltin, convert, isFloatingClassificationBuiltin, promote, truth, unary } from './numeric.ts';
 import { arrayOf, compatibleType, isAggregate, isArithmetic, isArray, isFunction, isInteger, isPointer, isScalar, pointerTo, sameType, sizeOfType, typeName } from './type-system.ts';
 import { VirtualMemory } from './memory.ts';
 import { dispatchLibraryBuiltin } from './library.ts';
@@ -106,14 +107,6 @@ function heapAddressRandomForSeed(seed: number): () => number {
     return (state >>> 0) / 0x1_0000_0000;
   };
 }
-type DebugDiscardedStdioReturn = 'zero' | 'eof' | 'one' | 'null' | 'void';
-const DEBUG_DISCARDED_STDIO_RETURNS: Readonly<Record<string, DebugDiscardedStdioReturn>> = Object.freeze({
-  printf: 'zero', fprintf: 'zero', putchar: 'zero', putc: 'zero', fputc: 'zero', puts: 'zero', fputs: 'zero', fwrite: 'zero',
-  scanf: 'eof', fscanf: 'eof', getchar: 'eof', getc: 'eof', fgetc: 'eof', ungetc: 'eof',
-  fgets: 'null', fopen: 'null', __c11_stdin: 'null', __c11_stdout: 'null', __c11_stderr: 'null',
-  fread: 'zero', fclose: 'zero', fflush: 'zero', fseek: 'zero', ftell: 'eof', feof: 'one', ferror: 'zero',
-  rewind: 'void', clearerr: 'void', perror: 'void',
-});
 type PendingDebugEvent = DebugEvent extends infer Event
   ? Event extends DebugEvent ? Omit<Event, 'sequence'> : never
   : never;
@@ -203,6 +196,9 @@ function debugEscapedByte(byte: number, context: 'character' | 'string'): string
 }
 
 function debugScalarValue(type: CValue['type'], value: ObjectScalarValue): string {
+  if (type === 'long double' && typeof value === 'object' && value !== null && value.kind === 'binary80') {
+    return formatBinary80Hex(value);
+  }
   if (type === '_Bool') return value === 0n || value === 0 ? '0' : '1';
   if (type === 'char' || type === 'signed char' || type === 'unsigned char') {
     if (typeof value !== 'bigint') return '?';
@@ -249,7 +245,7 @@ export function createDebugSession(
   options?: ExecuteOptions,
   debugOptions?: DebugSessionOptions,
 ): DebugExecutionSession {
-  return createRuntimeSession(program, options, false, debugOptions === undefined ? {} : debugOptions) as DebugExecutionSession;
+  return createRuntimeSession(program, options, true, debugOptions === undefined ? {} : debugOptions) as DebugExecutionSession;
 }
 
 function createRuntimeSession(
@@ -266,7 +262,7 @@ function createRuntimeSession(
   let awaitingInput = false;
   let stdinEnded = !interactiveStdin;
   let terminalResult: ExecuteResult | DebugLimitResult | undefined;
-  let runRuntime: (() => ExecuteProgress | DebugPausedResult) | undefined;
+  let runRuntime: (() => ExecuteProgress | DebugProgress) | undefined;
   let pendingInputError: unknown;
   let debugEvents: DebugEventCollector | undefined;
   let inspectDebugScalars: (() => readonly DebugScalarSnapshot[]) | undefined;
@@ -282,6 +278,7 @@ function createRuntimeSession(
   let debugStepActive = false;
   let debugStepStartLocation: Location | undefined;
   let debugStepExecuted = false;
+  let debugInputSuspended = false;
   let debugVisitedInstructions: Map<Frame, Set<number>> | undefined = debugOptions === undefined ? undefined : new Map();
   const output = () => io?.snapshot() ?? { stdout: new Uint8Array(), stderr: new Uint8Array() };
   const exposedDebugLocation = (): DebugSourceLocation | null => debugLocation
@@ -322,14 +319,24 @@ function createRuntimeSession(
   const session: RuntimeSession = {
     resume(): ExecuteProgress | DebugProgress {
       if (terminalResult) return { ...terminalResult, metrics: { ...metrics }, ...output() };
-      if (awaitingInput) return { kind: 'input-needed', ...output(), metrics: { ...metrics } };
+      if (awaitingInput) {
+        const waiting = { kind: 'input-needed' as const, ...output(), metrics: { ...metrics } };
+        if (debugOptions === undefined) return waiting;
+        const current = exposedDebugLocation() ?? runtimeLocation;
+        return {
+          ...waiting,
+          location: Object.freeze({ file: current.file, line: current.line, column: current.column }),
+        };
+      }
       const resumeStarted = now();
       if (debugOptions !== undefined) {
         debugPause = undefined;
-        debugStepStartLocation = debugLocation ?? undefined;
-        debugStepExecuted = false;
-        debugVisitedInstructions = new Map();
-        debugStepActive = debugLocation !== null;
+        if (!debugInputSuspended) {
+          debugStepStartLocation = debugLocation ?? undefined;
+          debugStepExecuted = false;
+          debugVisitedInstructions = new Map();
+          debugStepActive = debugLocation !== null;
+        }
       }
       try {
         if (pendingInputError !== undefined) {
@@ -341,14 +348,25 @@ function createRuntimeSession(
         } else {
           const progress = runRuntime();
           if (progress.kind === 'paused') {
+            debugInputSuspended = false;
             metrics.executeMs += now() - resumeStarted;
             return { ...progress, metrics: { ...metrics } };
           }
-          if (progress.kind !== 'input-needed') terminalResult = progress;
-          else if (debugOptions !== undefined) {
-            terminalResult = resultForError(new Error('La sesión debug no puede solicitar stdin.'));
+          if (progress.kind === 'input-needed' && debugOptions !== undefined) {
+            const current = exposedDebugLocation() ?? runtimeLocation;
+            debugInputSuspended = true;
+            metrics.executeMs += now() - resumeStarted;
+            return {
+              ...progress,
+              location: Object.freeze({ file: current.file, line: current.line, column: current.column }),
+              metrics: { ...metrics },
+            };
           }
-          if (terminalResult) debugLocation = null;
+          if (progress.kind !== 'input-needed') terminalResult = progress;
+          if (terminalResult) {
+            debugLocation = null;
+            debugInputSuspended = false;
+          }
           metrics.executeMs += now() - resumeStarted;
           if (terminalResult) return { ...terminalResult, metrics: { ...metrics } };
           return { ...progress, metrics: { ...metrics }, ...output() };
@@ -356,6 +374,7 @@ function createRuntimeSession(
       } catch (error) {
         terminalResult = resultForError(error);
         debugLocation = null;
+        debugInputSuspended = false;
       }
       metrics.executeMs += now() - resumeStarted;
       return { ...terminalResult!, metrics: { ...metrics }, ...output() };
@@ -438,10 +457,7 @@ function createRuntimeSession(
         (!suppliedIO || typeof suppliedIO !== 'object' || Array.isArray(suppliedIO))) {
       failure('INVALID_OPTIONS', 'io debe ser un objeto.', location);
     }
-    const ioOptions = debugOptions === undefined ? suppliedIO : suppliedIO === undefined ? undefined : {
-      // A debug session keeps C argv, but never copies stdin or virtual files.
-      argv: suppliedIO.argv,
-    };
+    const ioOptions = suppliedIO;
     io = new VirtualIO({
       entry: ir.entry,
       io: ioOptions,
@@ -901,6 +917,50 @@ function createRuntimeSession(
         throw error;
       }
     };
+    const reallocateDebugHeap = (
+      pointer: ObjectPointerValue | null,
+      bytes: number,
+      at: Location,
+    ): ObjectPointerValue | null => {
+      if (!debugEvents || !debugObjects || pointer === null) {
+        return pointer === null ? allocateDebugHeap(bytes, at) : memory.reallocateRaw(pointer, bytes, at);
+      }
+
+      const oldReference = memory.canFree(pointer) ? memory.rootReference(pointer.allocationId) : undefined;
+      if (!oldReference) return memory.reallocateRaw(pointer, bytes, at);
+
+      const hasOldRecord = debugObjects.has(pointer.allocationId);
+      const reservedEvents = bytes === 0 ? Number(hasOldRecord) : Number(hasOldRecord) + 1;
+      debugEvents.reserveMany(reservedEvents, at);
+
+      let resized: ObjectPointerValue | null;
+      try {
+        resized = memory.reallocateRaw(pointer, bytes, at);
+      } catch (error) {
+        debugEvents.cancelMany(reservedEvents);
+        throw error;
+      }
+      if (bytes === 0 || resized === null) {
+        if (resized === null && bytes > 0) {
+          debugEvents.cancelMany(reservedEvents);
+        } else if (hasOldRecord && oldReference) {
+          commitDebugObjectDelete(oldReference, at, null, null);
+        }
+        return null;
+      }
+
+      const newReference = memory.rootReference(resized.allocationId);
+      if (!newReference) {
+        debugEvents.cancelMany(reservedEvents);
+        failure('ENGINE_INTERNAL_ERROR', 'Falta la raíz de una reasignación heap recién creada.', at);
+      }
+      if (hasOldRecord && oldReference) commitDebugObjectDelete(oldReference, at, null, null);
+      createDebugObjectRecord(newReference, {
+        duration: 'heap', origin: 'heap', typeSummary: 'untyped heap block', location: at,
+        frameId: null, scopeId: null,
+      });
+      return resized;
+    };
     const commitDebugObjectDelete = (
       reference: ObjectReference,
       at: Location,
@@ -1167,12 +1227,7 @@ function createRuntimeSession(
       }
       return convert(value, type, at);
     };
-    const truthValue = (value: CValue): boolean => {
-      if (value.value === null) return false;
-      if (typeof value.value === 'bigint') return value.value !== 0n;
-      if (typeof value.value === 'number') return value.value !== 0;
-      return true;
-    };
+    const truthValue = (value: CValue): boolean => truth(value, runtimeLocation);
     const addAccess = (evaluation: Evaluation, objectId: number, access: Access): void => {
       const previous = evaluation.accesses.get(objectId);
       evaluation.accesses.set(objectId, {
@@ -1873,17 +1928,6 @@ function createRuntimeSession(
       if (index >= 0) cursor.frame.temporaryObjects.splice(index, 1);
       memory.release(cursor.marker, at);
     }
-    function discardedDebugStdioReturn(
-      name: string, resultType: CValue['type'] | undefined, at: Location,
-    ): CValue | undefined {
-      if (debugOptions === undefined) return undefined;
-      const behavior = DEBUG_DISCARDED_STDIO_RETURNS[name];
-      if (!behavior) return undefined;
-      if (behavior === 'null') return { type: resultType ?? pointerTo('void'), value: null };
-      if (behavior === 'void') return { type: 'void', value: 0n };
-      const value = behavior === 'eof' ? -1 : behavior === 'one' ? 1 : 0;
-      return valueForType(integer(value), resultType ?? 'int', at);
-    }
     function invokeBuiltin(
       name: string, args: CValue[], resultType: CValue['type'] | undefined, at: Location, frame: Frame,
     ): LibraryBuiltinResult {
@@ -1916,8 +1960,6 @@ function createRuntimeSession(
         memory.write(target, { type: target.type, value: null }, at);
         return { type: 'void', value: 0n };
       }
-      const discardedIO = discardedDebugStdioReturn(name, resultType, at);
-      if (discardedIO) return discardedIO;
       const library = dispatchLibraryBuiltin(name, args, resultType, libraryContext);
       if (library) return library;
       if (name === 'malloc') {
@@ -1926,6 +1968,15 @@ function createRuntimeSession(
         if (typeof amount !== 'bigint' || amount < 0n) failure('INVALID_ALLOCATION_SIZE', 'malloc requiere un tamaño entero no negativo.', at);
         if (amount > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'El tamaño de malloc excede el rango representable.', at);
         const pointer = allocateDebugHeap(Number(amount), at);
+        return { type: resultType && isPointer(resultType) ? resultType : pointerTo('void'), value: pointer };
+      }
+      if (name === 'realloc') {
+        if (args.length !== 2) failure('ARGUMENT_COUNT', 'realloc requiere dos argumentos.', at);
+        const source = valueForType(args[0], pointerTo('void'), at);
+        const amount = args[1].value;
+        if (typeof amount !== 'bigint' || amount < 0n) failure('INVALID_ALLOCATION_SIZE', 'realloc requiere un tamaño entero no negativo.', at);
+        if (amount > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'El tamaño de realloc excede el rango representable.', at);
+        const pointer = reallocateDebugHeap(source.value as ObjectPointerValue | null, Number(amount), at);
         return { type: resultType && isPointer(resultType) ? resultType : pointerTo('void'), value: pointer };
       }
       if (name === 'free') {
@@ -2097,6 +2148,7 @@ function createRuntimeSession(
               kind: 'paused',
               location: Object.freeze({ file: node.location.file, line: node.location.line, column: node.location.column }),
               metrics,
+              ...output(),
             };
             work.push(() => step(frame));
             return;

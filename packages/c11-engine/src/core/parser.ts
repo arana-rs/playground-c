@@ -315,7 +315,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       }
     }
     if (count('double')) {
-      if (count('long') && words.length === 2) unsupported(at, 'P3 no implementa long double binary80.');
+      if (count('long') === 1 && words.length === 2) return 'long double';
       if (words.length !== 1) failure('TYPE_ERROR', 'Especificadores de tipo incompatibles.', at);
       return 'double';
     }
@@ -1618,7 +1618,8 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
                 if (!(isScalar(actual) || isAggregate(actual) && isComplete(actual, aggregates))) failure('TYPE_ERROR', 'Un argumento variádico requiere un tipo completo permitido.', node.args[index].location);
               }
             }
-            if (node.name && node.builtin && floatingClassifications.has(node.name) && node.args[0] && node.args[0].type !== 'float' && node.args[0].type !== 'double') {
+            if (node.name && node.builtin && floatingClassifications.has(node.name) && node.args[0] &&
+                node.args[0].type !== 'float' && node.args[0].type !== 'double' && node.args[0].type !== 'long double') {
               failure('TYPE_ERROR', `«${node.name}» requiere un argumento flotante.`, node.args[0].location);
             }
             node.type = signature.returnType; break;

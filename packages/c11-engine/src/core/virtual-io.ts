@@ -191,9 +191,11 @@ export class VirtualStream {
     return true;
   }
 
-  tell(): number { return this.closed ? -1 : this.cursor - (this.pushedByte === undefined ? 0 : 1); }
+  tell(): number { return this.closed ? -1 : this.cursor; }
 
   clearError(): void { this.eofFlag = false; this.errorFlag = false; }
+
+  markError(): void { this.errorFlag = true; }
 
   close(): boolean {
     if (this.closed) { this.errorFlag = true; return false; }

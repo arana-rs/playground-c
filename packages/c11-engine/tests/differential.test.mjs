@@ -101,7 +101,7 @@ test('P1 separates preparation restrictions from detected runtime UB', () => {
 test('features beyond P3 remain explicit preparation failures', () => {
   for (const body of [
     'return _Generic(1, int: 2);',
-    'return 0b10;', 'long double x = 1.0L; return 0;',
+    'return 0b10;',
   ]) {
     const result = prepare(project(body));
     assert.equal(result.kind, 'prepare-error', body);

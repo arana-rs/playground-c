@@ -1,6 +1,6 @@
 # Motor C11: matriz y hoja de ruta
 
-Estado del motor **0.1.0: P4 implementado parcialmente** en `packages/c11-engine`, con Run/Stop y consola integrados en el editor. La matriz mantiene el alcance completo como hoja de ruta: de las 65 familias —35 del lenguaje, 29 headers y una extensión opcional—, **44 están iniciadas parcialmente, 21 pendientes y ninguna completa**. P1–P4 tienen capacidades parciales; P5–P6 siguen pendientes. Una flecha señala ampliación parcial, no cobertura completa desde la primera fase.
+Estado del motor **0.1.0: P4 implementado parcialmente** en `packages/c11-engine`, con Run/Stop y consola integrados en el editor. La matriz mantiene el alcance completo como hoja de ruta: de las 65 familias —35 del lenguaje, 29 headers y una extensión opcional—, **45 están iniciadas parcialmente, 19 pendientes y una implementada**. P1–P4 tienen capacidades parciales; P5–P6 siguen pendientes. Una flecha señala ampliación parcial, no cobertura completa desde la primera fase.
 
 ## Estado implementado: P4
 
@@ -8,9 +8,9 @@ P4 conserva los escalares, expresiones, control, funciones, punteros y objetos d
 
 Los proyectos admiten varias unidades de traducción. `static` limita el linkage al archivo y `extern` enlaza declaraciones entre unidades; funciones K&R, `inline`, `_Noreturn`, objetos globales y funciones variádicas se cubren dentro del perfil probado. `main` admite `int main(void)`, `int main()` sin parámetros y el formulario con `argc` y `argv`; la aplicación puede configurar el vector C completo, que termina con un puntero nulo. Las funciones variádicas admiten las promociones predeterminadas y `va_start`, `va_arg`, `va_copy` y `va_end`.
 
-Los 15 headers virtuales se interpretan como subconjuntos; no se leen del host. P4 suma `assert.h`, `ctype.h`, `errno.h`, `inttypes.h`, `iso646.h`, `stdarg.h`, `stdio.h` y `string.h` a los headers numéricos y de memoria anteriores. Las pruebas cubren una selección de macros `PRI`/`SCN`, strings/memoria, clasificación C-locale, conversiones enteras, subconjuntos de formatos, `stdin`/`stdout`/`stderr`, streams y archivos binarios virtuales, EOF, errores, seek y ungetc. `%a`/`%A`, `%lc`/`%ls` y conversiones de `long double` siguen anunciados como limitaciones de stdio. Ningún header se declara completo.
+Los 16 headers virtuales se interpretan como subconjuntos; no se leen del host. P4 suma `assert.h`, `ctype.h`, `errno.h`, `inttypes.h`, `iso646.h`, `stdarg.h`, `stdio.h`, `string.h` y un subconjunto de `wchar.h` a los headers numéricos y de memoria anteriores. Las pruebas cubren una selección de macros `PRI`/`SCN`, strings/memoria, clasificación C-locale, conversiones enteras, formatos `printf`/`scanf`, `stdin`/`stdout`/`stderr`, streams y archivos binarios virtuales, EOF, errores, seek y ungetc. `%a`/`%A`, `%L` y `%lc`/`%ls` están cubiertos en `printf`; wide conversions aceptan ASCII en el locale C. Sigue pendiente el scanset wide `scanf %l[` y hay un límite de precisión publicado. Ningún header se declara completo.
 
-Son parciales **L01, L02, L03, L04, L05, L06, L07, L08, L09, L11, L12, L13, L14, L15, L16, L17, L18, L19, L20, L21, L22, L23, L24, L25, L26, L28, L29, L31 y L32**. Las 15 familias de biblioteca parciales son **B01, B03, B04, B06, B07, B08, B09, B11, B15, B17, B18, B19, B20, B21 y B23**. Permanecen pendientes 6 familias del lenguaje, 14 headers y Annex K. Las familias parciales retienen sus capacidades pendientes: entre ellas, `typedef` y declaradores completos, qualifiers, bit-fields, `long double`, `offsetof`, `max_align_t`, locales, caracteres anchos, matemáticas completas, `exit`/`atexit`, formatos menos comunes, atomics, threads, VLA, `_Generic` y `_Alignas`.
+Son parciales **L01, L02, L03, L04, L05, L06, L07, L08, L09, L11, L12, L13, L14, L15, L16, L17, L18, L19, L20, L21, L22, L23, L24, L25, L26, L28, L29, L31 y L32**; **L10 (long double binary80)** está implementada. Las 16 familias de biblioteca parciales son **B01, B03, B04, B06, B07, B08, B09, B11, B15, B17, B18, B19, B20, B21, B23 y B28**. Permanecen pendientes 5 familias del lenguaje, 13 headers y Annex K. Las familias parciales retienen sus capacidades pendientes: entre ellas, `typedef` y declaradores completos, qualifiers, bit-fields, `offsetof`, `max_align_t`, locales, APIs amplias de caracteres anchos, funciones matemáticas completas, `exit`/`atexit`, formatos menos comunes, atomics, threads, VLA, `_Generic` y `_Alignas`.
 
 La [API y cobertura concreta del paquete](../packages/c11-engine/README.md) están disponibles desde `core`, `browser` y `node`. El core prepara proyectos virtuales y nunca accede al filesystem del host. `runProject` y `runFile` adaptan entradas; cada ejecución reinicia argumentos, entrada, salida, streams y archivos virtuales. Run toma una copia del texto, prepara y ejecuta en un Worker. Stop lo termina; la consola decodifica stdout/stderr y conserva salida parcial en errores o límites.
 
@@ -27,7 +27,7 @@ El diseño siguiente combina el contrato implementado de P1/P2/P3/P4 con las fas
 
 ## Perfil de datos implementado y objetivo
 
-El perfil objetivo usa memoria little-endian, bytes de 8 bits y LP64. **P1–P4 implementan los tipos enteros, `float`, `double` y punteros de esta tabla; P3 añade layout de agregados y contabilidad de objetos virtuales vivos**. `long double` queda pendiente:
+El perfil objetivo usa memoria little-endian, bytes de 8 bits y LP64. **P1–P4 implementan los tipos enteros, `float`, `double`, `long double` y punteros de esta tabla; P3 añade layout de agregados y contabilidad de objetos virtuales vivos**:
 
 | Tipo | Bits de valor/representación | Tamaño / alineación (bytes) |
 | --- | --- | --- |
@@ -37,11 +37,11 @@ El perfil objetivo usa memoria little-endian, bytes de 8 bits y LP64. **P1–P4 
 | `long`, `long long` | 64 | 8 / 8 |
 | Puntero | dirección virtual de 64 | 8 / 8 |
 | `float`, `double` | binary32 / binary64 | 4 / 4; 8 / 8 |
-| `long double` · pendiente P5 | binary80, almacenado en 16 bytes | 16 / 16 |
+| `long double` · implementado P4 (L10) | x87 binary80: 64 bits de significando y 15 de exponente; almacenado en 16 bytes | 16 / 16 |
 
 Este destino sigue el [psABI x86-64](https://gitlab.com/x86-psABIs/x86-64-ABI/blob/master/x86-64-ABI/low-level-sys-info.tex) y las opciones de [GCC x86](https://gcc.gnu.org/onlinedocs/gcc/x86-Options.html). El perfil fija `char` firmado, enteros en complemento a dos, conversión a entero firmado fuera de rango mediante low bits y right shift firmado aritmético. `sizeof` devuelve un unsigned de 64 bits. Los enteros se representan con `BigInt`, nunca con `number`; unsigned envuelve módulo 2^N y el overflow aritmético firmado detectado se diagnostica. Los `struct` alinean sus miembros y tamaño final; los `union` ubican miembros en offset cero, también cuando son anónimos. La vista de bytes sigue little-endian. Bit-fields y miembros flexibles quedan pendientes en L27/P5.
 
-Los literales flotantes se redondean directamente al formato de destino; `float` aplica binary32 tras cada operación/conversión y `double` usa binary64. `FLT_EVAL_METHOD` vale 0; se conservan NaN, infinito, subnormales y cero negativo. Las funciones matemáticas usan `Math` del host sin prometer redondeo correcto universal o igualdad bit a bit entre motores JavaScript. Se elige evaluación de operandos/argumentos izquierda a derecha en los puntos donde C permite un orden no especificado; esto no legaliza accesos sin secuenciar. Bit-fields, miembros flexibles, linkage general, locales, binary80, `offsetof`, `max_align_t` y `_Alignof` siguen pendientes según sus filas de la matriz. Los registros de CPU no necesitan simularse para este modelo.
+Los literales flotantes se redondean directamente al formato de destino; `float` aplica binary32, `double` usa binary64 y `long double` conserva binary80. `FLT_EVAL_METHOD` vale 0; se conservan NaN, infinito, subnormales y cero negativo. Las funciones matemáticas usan `Math` del host sin prometer redondeo correcto universal o igualdad bit a bit entre motores JavaScript. Se elige evaluación de operandos/argumentos izquierda a derecha en los puntos donde C permite un orden no especificado; esto no legaliza accesos sin secuenciar. Bit-fields, miembros flexibles, linkage general, locales, funciones matemáticas `long double`, `offsetof`, `max_align_t` y `_Alignof` siguen pendientes según sus filas de la matriz. Los registros de CPU no necesitan simularse para este modelo.
 
 El UB que el motor detecte detendrá la ejecución con diagnóstico; no se promete detectar universalmente todo UB. Un resultado dependiente de la implementación debe seguir el perfil publicado; un orden no especificado debe documentar la política elegida sin presentarla como garantía de todo C.
 
@@ -53,9 +53,9 @@ P1–P4 están implementados parcialmente. Cada fila conserva capacidades pendie
 | --- | --- | --- |
 | P1 · Implementado | Primer Run | Archivo único; int main(void), variables int, aritmética, bloques, asignaciones y return; diagnósticos, límites, Worker y consola. |
 | P2 · Implementado | Cálculo y control | Enteros escalares LP64, promociones/conversiones, float/double básicos, expresiones, ramas, bucles, funciones tipadas, recursión y cinco headers parciales. |
-| P3 · Implementado parcialmente | Objetos y memoria | Punteros virtuales, arrays, structs/unions con miembros nombrados y anónimos, enums compatibles con `int`, inicialización, literales de cadena, compound literals, globals y malloc/free básicos; allocations heap con direcciones virtuales pseudoaleatorias y una vista debug de sus intervalos vivos. `static` local, linkage general, `offsetof`, `max_align_t` y headers completos siguen pendientes. |
-| P4 · Implementado parcialmente | Traducción y biblioteca base | Preprocesador y proyectos virtuales parciales, varias unidades, variádicas, stdio, strings y utilidades base. Las 29 familias de lenguaje y 29 headers conservan alcance pendiente. |
-| P5 | C11 avanzado | Declaraciones, qualifiers, layout, long double binary80 y resto de biblioteca sin capacidades condicionales. |
+| P3 · Implementado parcialmente | Objetos y memoria | Punteros virtuales, arrays, structs/unions con miembros nombrados y anónimos, enums compatibles con `int`, inicialización, literales de cadena, compound literals, globals y malloc/realloc/free básicos; allocations heap con direcciones virtuales pseudoaleatorias y una vista debug de sus intervalos vivos. `realloc(NULL,n)` actúa como `malloc(n)`; `realloc(p,0)` libera y devuelve `NULL`; una reserva fallida no nula conserva el bloque anterior. El linkage C general, `offsetof`, `max_align_t` y headers completos siguen pendientes. |
+| P4 · Implementado parcialmente | Traducción y biblioteca base | Preprocesador y proyectos virtuales parciales, varias unidades, variádicas, stdio, conversiones binary80, formatos `%a`/`%A`, `%L`, `%lc`/`%ls` C-locale ASCII, strings y utilidades base. Las familias siguen parciales donde conservan alcance pendiente. |
+| P5 | C11 avanzado | Declaraciones, qualifiers, layout y capacidades restantes de la biblioteca sin capacidades condicionales, incluidas las funciones matemáticas `long double`. |
 | P6 | Capacidades independientes | VLA, complejos, atomics, threads, TLS concurrente y evaluaciones separadas de Annex F/G y Annex K. |
 
 ## API y límites entre módulos
@@ -97,6 +97,8 @@ interface DebugSessionOptions {
 
 interface DebugExecutionSession {
   resume(): DebugProgress;
+  appendStdin(bytes: Uint8Array): void;
+  endStdin(): void;
   currentLocation(): DebugSourceLocation | null;
   drainEvents(): readonly DebugEvent[];
   inspectScalars(): readonly DebugScalarSnapshot[];
@@ -116,20 +118,30 @@ interface DebugScalarSnapshot {
   readonly displayValue: string;
 }
 
-interface DebugPausedResult {
+interface DebugPausedResult extends ExecutionOutput {
   readonly kind: 'paused';
   readonly location: DebugSourceLocation;
+  readonly stdout: Uint8Array; // snapshot acumulado
+  readonly stderr: Uint8Array; // snapshot acumulado
   readonly metrics: EngineMetrics;
 }
 
-type DebugProgress = DebugPausedResult | ExecuteResult | DebugLimitResult;
+interface DebugInputNeededResult extends ExecutionOutput {
+  readonly kind: 'input-needed';
+  readonly location: DebugSourceLocation; // instrucción C suspendida
+  readonly stdout: Uint8Array; // snapshot acumulado
+  readonly stderr: Uint8Array; // snapshot acumulado
+  readonly metrics: EngineMetrics;
+}
+
+type DebugProgress = DebugPausedResult | DebugInputNeededResult | ExecuteResult | DebugLimitResult;
 ```
 
 `debugOptions` admite `maxEvents` y `heapAddressSeed`; el seed debe ser un entero de 32 bits sin signo. Un objeto `null`, claves desconocidas o valores fuera de esos rangos producen un diagnóstico.
 
 Cada evento tiene `sequence: number`, `kind`, `location` (`{ file, line, column }`) y `frameId`/`scopeId` (`number | null`). `kind` puede ser `frame-enter`, `frame-exit`, `scope-enter`, `scope-exit`, `object-create` u `object-delete`; los eventos de frame incluyen `functionName: string`, y los de scope llevan también `scopeName: string`, asignado desde el AST. El cuerpo de función usa su nombre y un bloque desnudo usa `bloque`. Las etiquetas de control son canónicas y no incluyen sus condiciones: `if(...)`, `while(...)`, `for(...)`, `do { ... } while (...)` y `switch(...)`; `else` conserva `else`. El bloque de un `for` usa `bloque de for`. Un bloque compuesto de control produce una sola activación; los bloques anidados siguen siendo activaciones independientes. `frameId` y `scopeId` identifican, respectivamente, una activación de función y una activación de scope. `location` señala la operación disponible en el runtime; retornos y saltos usan la ubicación de su operación. La salida normal de un bloque informa la ubicación del token `}` conservado por el parser; los scopes cerrados por `return` o salto usan la ubicación de esa transición. `frame-enter` usa la declaración de la función y `frame-exit` usa el `return` explícito o, al caer al final, la llave de cierre del cuerpo. Los eventos correlacionan activaciones, scopes y objetos sin registrar instrucciones ni accesos a valores.
 
-`inspectScalars()` toma una instantánea nueva de las variables aritméticas automáticas ya publicadas y parámetros cuyos frames siguen activos. Una variable local aparece después de ejecutar su declaración; un parámetro aparece al entrar en su función. Incluye `_Bool`, `char`, enteros signed/unsigned, `float`, `double` y enums en representación `int`. Los IDs numéricos coinciden con los eventos reales (`id === allocationId`), y `address` convierte la dirección virtual BigInt a hexadecimal. Un objeto indeterminado se entrega como `initialized: false` y `displayValue: '?'`; la consulta no ejecuta una lectura C ni altera memoria, eventos o ubicación. Los enteros y enums se muestran en decimal exacto, `_Bool` como `0`/`1`, char como literal C con escapes y flotantes mediante decimal corto round-trip, con `-0`, `nan`, `inf` y `-inf` explícitos. Los enums usan el nombre de tipo `int`, como en el modelo actual del motor. Esta inspección no lee arrays, punteros, structs ni unions.
+`inspectScalars()` toma una instantánea nueva de las variables aritméticas automáticas ya publicadas y parámetros cuyos frames siguen activos. Una variable local aparece después de ejecutar su declaración; un parámetro aparece al entrar en su función. Incluye `_Bool`, `char`, enteros signed/unsigned, `float`, `double`, `long double` y enums en representación `int`. Los IDs numéricos coinciden con los eventos reales (`id === allocationId`), y `address` convierte la dirección virtual BigInt a hexadecimal. Un objeto indeterminado se entrega como `initialized: false` y `displayValue: '?'`; la consulta no ejecuta una lectura C ni altera memoria, eventos o ubicación. Los enteros y enums se muestran en decimal exacto, `_Bool` como `0`/`1`, char como literal C con escapes, `float`/`double` mediante decimal corto round-trip y `long double` en hexadecimal binary80 exacto, con `-0`, `nan`, `inf` y `-inf` explícitos. Los enums usan el nombre de tipo `int`, como en el modelo actual del motor. Esta inspección no lee arrays, punteros, structs ni unions.
 
 El layout virtual LP64 publicado por `VIRTUAL_MEMORY_LAYOUT` y `CAPABILITIES.virtualMemory` separa Static `[0x10000, 0x20000)`, Stack `[0x20000, 0x30000)` y Heap `[0x30000, 0x40000)`, cada una con 64 KiB nominales. Las direcciones iniciales se alinean a 16 bytes; cada objeto reserva además 16 bytes de guard y el redondeo correspondiente, así que los bytes C efectivos dependen de los allocations vivos. `maxMemoryBytes` cuenta solo bytes C y no amplía estos rangos. Static persiste durante la sesión; Stack usa first-fit ordenado y devuelve los extents al cerrar scope/frame. Su agotamiento produce `STATIC_ADDRESS_SPACE_EXHAUSTED` o `STACK_ADDRESS_SPACE_EXHAUSTED`. El agotamiento de Heap conserva `malloc` devolviendo `NULL` sin diagnóstico de región.
 
@@ -137,13 +149,13 @@ El layout virtual LP64 publicado por `VIRTUAL_MEMORY_LAYOUT` y `CAPABILITIES.vir
 
 `currentLocation()` identifica la siguiente posición de fuente que se ejecutará, o devuelve `null` si falla el setup o ya existe un resultado terminal. `drainEvents()` recoge también los eventos emitidos mientras se crea la sesión; se puede llamar antes del primer `resume()` para inspeccionar inicialización y entrada a `main`. Devuelve los eventos desde el drain anterior y no reinicia el contador ni el límite total. `inspectScalars()` está disponible antes de avanzar, durante pausas y después de resultados terminales: tras un retorno normal devuelve `[]`; error/límite conserva solo los objetos vivos en el estado donde se detuvo el VM, sin unwind sintético. El método genera DTO serializables nuevos al solicitarse; el consumidor conserva una copia por pausa si necesita historial. Las instantáneas no consumen `maxEvents`.
 
-`DebugProgress` añade `paused` a los resultados terminales y al límite propio de depuración. `paused` lleva solo `location` y `metrics`, sin campos de consola; los resultados terminales reutilizan sus tipos compartidos y tienen `stdout` y `stderr` vacíos. No hay `input-needed` en debug. `ExecuteOptions.io.argv` sigue configurable; `stdin` y `files` se ignoran y no se copian ni consumen. Las funciones que usan streams/archivos devuelven valores neutros deterministas, descritos en el [README del motor](../packages/c11-engine/README.md). Sus argumentos C se evalúan antes de aplicar esos valores, por lo que el descarte de E/S puede cambiar las ramas que toma el programa y no simula una entrada. `sprintf`, `snprintf` y `sscanf` siguen operando sobre buffers.
+`DebugProgress` añade `paused` e `input-needed` a los resultados terminales y al límite propio de depuración. Tanto las pausas como las esperas y resultados terminales llevan snapshots acumulados de `stdout` y `stderr`. `createDebugSession` reutiliza `ExecuteOptions.io` completo: `argv`, bytes iniciales de `stdin` y `files` virtuales, con el mismo `VirtualIO` y despacho stdio de Run. El stdin interactivo queda abierto tras los bytes iniciales; un lector que agota temporalmente su buffer devuelve `input-needed` con la ubicación C suspendida y deja visible el prompt emitido. `appendStdin(bytes)` y `endStdin()` alimentan o cierran la misma sesión; reanudar continúa el generador y la visita de línea conservando argumentos evaluados, conversiones parciales, estado de memoria y efectos, sin volver a ejecutar la instrucción. Una llamada a `resume()` mientras espera devuelve la espera y sus snapshots sin avanzar. `endStdin()` produce EOF sticky después de consumir bytes pendientes. `maxIOBytes` comparte el presupuesto de ejecución usado por Run; `execute()` por lotes conserva EOF al agotar el stdin inicial. Las rutas siguen siendo virtuales y no usan DOM, `File`, `Worker` ni filesystem del host desde el core.
 
 Los eventos de objeto describen raíces de almacenamiento reales del programa: incluyen `objectId`/`allocationId: number`, `duration`, `origin`, `typeSummary: string`, `addressVirtual: bigint` y `size: number`, además de `name?: string` cuando existe. Para cada raíz, `objectId` y `allocationId` contienen el mismo ID y correlacionan creación/eliminación. `duration` distingue `automatic`, `static`, `heap` y `compound-literal`; `origin` distingue `variable`, `parameter`, `compound-literal`, `heap` y `string-literal`. Los snapshots escalares llevan el mismo `origin` tipado que su evento de creación, de modo que la UI identifica parámetros por metadata del binding. Un array o struct emite una sola raíz: no se crean eventos separados para elementos o miembros ni se fuerza la materialización de subobjetos perezosos. Se incluyen los literales de cadena observables por C; se excluyen objetos de infraestructura como `errno`, `argv` y el almacenamiento interno de `va_list`.
 
 Los objetos con duración automática y los compound literals de bloque pertenecen a una activación y terminan al salir de su scope; los objetos de heap terminan al liberarlos con `free`. En los eventos de creación y eliminación, `frameId`/`scopeId` señalan el dueño del lifetime para esos objetos; son nulos para heap, objetos estáticos y literales de cadena. Los objetos estáticos y los literales se crean una vez por sesión y no reciben eliminación sintética al terminar el programa. Los objetos automáticos ordinarios se publican al ejecutar su declaración; los parámetros, al entrar en la función. La celda interna puede estar reservada desde que entra su scope, pero no hay `object-create` ni snapshot visible antes de ese punto de ejecución. Un cierre emite `object-delete` solo para una raíz que ya tuvo `object-create`, con el mismo `allocationId`; errores y límites conservan el estado sin unwind sintético. D1 traza solo allocations realizadas por el runtime actual, no es un inventario estático de todas las declaraciones C: los estáticos locales se crean al alcanzar su scope, de modo que una función o bloque no alcanzado no emite ese evento. Los eventos globales pueden emitirse al construir la sesión, antes del primer `resume()`. `drainEvents()` devuelve todo lo acumulado desde el drain anterior, en orden de secuencia.
 
-El presupuesto `maxEvents` cuenta todos los eventos de la sesión y no se reinicia al drenar. Si se excede, la sesión devuelve el resultado de depuración `kind: 'debug-limit'`, `resource: 'maxDebugEvents'`, con `limit`, `diagnostics`, `metrics` y buffers de salida vacíos; conserva el prefijo emitido y no descarta eventos silenciosamente. El límite se comprueba antes de mutar el estado que produciría el evento excedente. Este resultado pertenece a `DebugProgress` y no amplía `ExecuteResult` ni `LimitResource` de las sesiones normales.
+El presupuesto `maxEvents` cuenta todos los eventos de la sesión y no se reinicia al drenar. Si se excede, la sesión devuelve el resultado de depuración `kind: 'debug-limit'`, `resource: 'maxDebugEvents'`, con `limit`, `diagnostics`, `metrics` y los snapshots de salida acumulados; conserva el prefijo emitido y no descarta eventos silenciosamente. El límite se comprueba antes de mutar el estado que produciría el evento excedente. Este resultado pertenece a `DebugProgress` y no amplía `ExecuteResult` ni `LimitResource` de las sesiones normales.
 
 ### Debug API · D1 (etapa 2): avance por línea
 
@@ -219,7 +231,7 @@ P4 introduce puertos virtuales para stdin/stdout/stderr y archivos. `maxIOBytes`
 | L07 | Nombres, typedef, declaradores y tipos compatibles | P1→P5 | Shadowing, tags, tipos incompletos y declarador de puntero a función. |
 | L08 | Enteros, _Bool y literales LP64 | P1→P2 | 9007199254740993ULL exacto; wrap unsigned; tamaños del perfil. |
 | L09 | float/double, literales decimales y hexadecimales | P2 | (float)16777217 redondea a 16777216; ±0, NaN e infinito se preservan. |
-| L10 | long double binary80 | P5 | sizeof(long double)==16; 1.0L+0x1p-63L != 1.0L. |
+| L10 | long double binary80 | P4 | `sizeof(long double)==16`; `1.0L+0x1p-63L != 1.0L`; almacenamiento binary80 y alineación de 16 bytes. |
 | L11 | Promociones, conversiones, casts y argumentos | P1→P5 | unsigned char promociona; -1 &lt; 1U es falso; retorno convertido. |
 | L12 | Unarios, prefijo/postfix y acceso | P1→P3 | Cubrir + - ! ~ & * [] . -&gt; () con objetos/funciones; distinguir ++i de i++. |
 | L13 | Aritmética, bits y comparaciones | P1→P2 | -7/3==-2; resto, shifts, & ^ \| y comparaciones con extremos. |
@@ -248,7 +260,7 @@ P4 introduce puertos virtuales para stdin/stdout/stderr y archivos. `maxIOBytes`
 
 ## Matriz de biblioteca estándar
 
-Los 29 headers de C11 aparecen en el inventario como familias de alcance completo. P1–P3 iniciaron parcialmente **B06 (`float.h`), B09 (`limits.h`), B11 (`math.h`), B17 (`stdbool.h`), B18 (`stddef.h`), B19 (`stdint.h`) y B21 (`stdlib.h`)**. P4 añade **B01 (`assert.h`), B03 (`ctype.h`), B04 (`errno.h`), B07 (`inttypes.h`), B08 (`iso646.h`), B15 (`stdarg.h`), B20 (`stdio.h`) y B23 (`string.h`)**. Los otros **14 permanecen pendientes**. Ningún header se declara completo. Las aceptaciones siguientes describen el objetivo de cada familia, incluidos elementos todavía rechazados. [WG14 N1570, §7](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+Los 29 headers de C11 aparecen en el inventario como familias de alcance completo. P1–P3 iniciaron parcialmente **B06 (`float.h`), B09 (`limits.h`), B11 (`math.h`), B17 (`stdbool.h`), B18 (`stddef.h`), B19 (`stdint.h`) y B21 (`stdlib.h`)**. P4 añade **B01 (`assert.h`), B03 (`ctype.h`), B04 (`errno.h`), B07 (`inttypes.h`), B08 (`iso646.h`), B15 (`stdarg.h`), B20 (`stdio.h`), B23 (`string.h`) y B28 (`wchar.h`)**. Los otros **13 permanecen pendientes**. Ningún header se declara completo. Las aceptaciones siguientes describen el objetivo de cada familia, incluidos elementos todavía rechazados. [WG14 N1570, §7](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
 
 | ID | Área y alcance | Fase | Aceptación mínima propuesta |
 | --- | --- | --- | --- |
@@ -257,29 +269,29 @@ Los 29 headers de C11 aparecen en el inventario como familias de alcance complet
 | B03 | &lt;ctype.h&gt; · clasificación y transformación | P4→P5 | EOF y unsigned char válidos; toupper y clasificación bajo locale definido. |
 | B04 | &lt;errno.h&gt; · errores de biblioteca | P4→P6 | Conversión fuera de rango fija ERANGE; errno independiente por hilo en P6. |
 | B05 | &lt;fenv.h&gt; · entorno flotante | P5→P6 | Guardar/restaurar entorno, consultar flags y redondeo; Annex F se valida aparte. |
-| B06 | &lt;float.h&gt; · límites flotantes | P2→P5 | Radix 2; mantisas 24/53/64; FLT_EVAL_METHOD corresponde a la evaluación real. |
+| B06 | &lt;float.h&gt; · límites flotantes | P2→P5 | Radix 2; mantisas 24/53/64; macros LDBL_* concuerdan con binary80; FLT_EVAL_METHOD corresponde a la evaluación real. |
 | B07 | &lt;inttypes.h&gt; · formatos y conversiones anchas | P4 | PRI/SCN macros y strtoimax preservan el extremo de 64 bits. |
 | B08 | &lt;iso646.h&gt; · operadores alternativos | P4 | and, or y not expanden a sus operadores y respetan precedencia. |
 | B09 | &lt;limits.h&gt; · límites enteros | P2→P4 | CHAR_BIT==8 y LONG_MAX exacto; constantes tienen los tipos correctos. |
 | B10 | &lt;locale.h&gt; · locales virtuales | P5 | setlocale/localeconv; estado C inicial y datos de locale reproducibles. |
-| B11 | &lt;math.h&gt; · familias f/d/ld y clasificación | P2→P6 | sqrt, fmod, fma, clasificación y errores; binary80 en P5; Annex F aparte. |
+| B11 | &lt;math.h&gt; · familias f/d/ld y clasificación | P2→P6 | sqrt, fmod, fma, clasificación y errores; variantes `long double` y Annex F siguen aparte. |
 | B12 | &lt;setjmp.h&gt; · salto no local | P5 | setjmp devuelve 0; longjmp vuelve con 7 y restaura el frame válido. |
 | B13 | &lt;signal.h&gt; · señales virtuales | P5 | signal registra handler; raise lo invoca; terminación anormal queda identificada. |
 | B14 | &lt;stdalign.h&gt; · macros de alineación | P5 | alignas/alignof aplican la alineación y exponen macros coherentes. |
 | B15 | &lt;stdarg.h&gt; · recorrido de varargs | P4 | va_copy mantiene recorrido independiente y va_end cierra ambos. |
 | B16 | &lt;stdatomic.h&gt; · operaciones y fences | P6 | CAS, fetch_add, atomic_flag y órdenes bajo scheduler reproducible. |
 | B17 | &lt;stdbool.h&gt; · macros booleanas | P2→P4 | bool b=9 normaliza a 1; true/false y macro de disponibilidad correctos. |
-| B18 | &lt;stddef.h&gt; · tipos, NULL y offsetof | P3→P5 | P3 ofrece `NULL`, `size_t` y `ptrdiff_t`; `offsetof` y `max_align_t` quedan para P5 y deben concordar con layout. |
+| B18 | &lt;stddef.h&gt; · tipos, NULL y offsetof | P3→P5 | Ofrece `NULL`, `size_t`, `ptrdiff_t` y `wchar_t`; `offsetof` y `max_align_t` quedan pendientes y deben concordar con layout. |
 | B19 | &lt;stdint.h&gt; · tipos exactos/least/fast y límites | P2→P4 | int64_t y UINT64_C exactos; intptr_t representa la dirección virtual. |
-| B20 | &lt;stdio.h&gt; · FILE, formatos, buffers y archivos virtuales | P4→P5 | snprintf, EOF/error, lectura binaria, seek, ungetc y limpieza al salir. |
-| B21 | &lt;stdlib.h&gt; · memoria, conversión, sort, RNG y entorno | P3→P5 | `NULL`, `size_t`, malloc/free; strtol, qsort, rand, multibyte, atexit/exit y entorno virtual después. |
+| B20 | &lt;stdio.h&gt; · FILE, formatos, buffers y archivos virtuales | P4→P5 | `printf`/`scanf` parciales, `%a`/`%A`, `%L`, wide ASCII de C locale, EOF/error, lectura binaria, seek y ungetc; API y formatos restantes siguen pendientes. |
+| B21 | &lt;stdlib.h&gt; · memoria, conversión, sort, RNG y entorno | P3→P5 | `NULL`, `size_t`, malloc/realloc/free; `realloc(p,0)` libera y devuelve `NULL`; strtol, qsort, rand, multibyte, atexit/exit y entorno virtual después. |
 | B22 | &lt;stdnoreturn.h&gt; · macro noreturn | P5 | noreturn corresponde a _Noreturn; validar declaración y uso. |
 | B23 | &lt;string.h&gt; · bytes, strings y colación | P4→P5 | memmove solapado, strcmp, strtok y strxfrm bajo locale virtual. |
 | B24 | &lt;tgmath.h&gt; · selección matemática por tipo | P6 | Seleccionar real/complejo y precisión correcta sin evaluar argumentos dos veces. |
 | B25 | &lt;threads.h&gt; · hilos, mutex, condición y TSS | P6 | Dos hilos, join, mutex/cnd, call_once y destructor TSS; sin carreras ocultas. |
 | B26 | &lt;time.h&gt; · reloj y calendario | P5 | Fuente temporal virtual, timespec_get, difftime, mktime y strftime deterministas. |
 | B27 | &lt;uchar.h&gt; · conversiones char16_t/char32_t | P5 | mbrtoc16/32 y c16/32rtomb con mbstate; secuencia inválida diagnosticada. |
-| B28 | &lt;wchar.h&gt; · texto ancho, streams y multibyte | P5 | Conversiones con estado, strings anchas, formatos y orientación de FILE. |
+| B28 | &lt;wchar.h&gt; · texto ancho, streams y multibyte | P4→P5 | P4 declara `wchar_t`, `wint_t`, `WEOF` y convierte `%lc`/`%ls` ASCII bajo locale C; conversiones con estado, streams, scanset wide y demás APIs quedan pendientes. |
 | B29 | &lt;wctype.h&gt; · clasificación ancha | P5 | wctype/wctrans, iswalpha y towupper conforme al locale seleccionado. |
 
 ### Extensión opcional
@@ -336,15 +348,15 @@ El ejemplo termina con `exitCode: 1`. P2 se valida con regresiones P1, pruebas d
 
 P3 añade direcciones y punteros virtuales LP64, punteros a función tipados, conversión de punteros a objetos con `void *`, aritmética/diferencia limitada al mismo array, one-past y diagnósticos de acceso fuera de límites, null, liveness y `free` inválido. Implementa arrays multidimensionales y decay, layout/copia/paso/retorno de structs y unions con miembros nombrados y anónimos, enums compatibles con `int` mediante expresiones constantes enteras de rango `int`, designadores recursivos, brace elision y cero-fill. Los literales de cadena incluyen NUL y son de solo lectura; los compound literals admiten duración automática de bloque y estática de archivo. Los globals se reinician al comenzar cada ejecución. `maxMemoryBytes` y `peakMemoryBytes` suman todos los bytes virtuales vivos de parámetros/locales, globals/estáticos, cadenas y heap.
 
-La biblioteca parcial incluye `<stddef.h>` con `NULL`, `size_t` y `ptrdiff_t`, y `<stdlib.h>` con `NULL`, `size_t`, `malloc` y `free`; esta implementación elige que `malloc(0)` devuelva `NULL`. `offsetof` y `max_align_t` siguen en B18/P5. Permanecen en sus fases previstas `static` local, linkage general y varias unidades. Bit-fields y miembros flexibles pertenecen a L27/P5. Strings en esta fase son literales y arrays de `char`: las funciones de `string.h` siguen en P4→P5.
+La biblioteca parcial incluye `<stddef.h>` con `NULL`, `size_t` y `ptrdiff_t`, y `<stdlib.h>` con `NULL`, `size_t`, `malloc`, `realloc` y `free`. Este perfil elige que `malloc(0)` y `realloc(p, 0)` devuelvan `NULL`; `realloc(p, 0)` libera `p`, mientras que un fallo normal de reserva conserva el bloque anterior. `realloc(NULL, n)` se comporta como `malloc(n)`. `offsetof` y `max_align_t` siguen en B18/P5. P4 ya añade `static` local y varias unidades con enlace de ámbito de archivo; el linkage C general sigue pendiente. Bit-fields y miembros flexibles pertenecen a L27/P5. Strings en esta fase son literales y arrays de `char`: las funciones de `string.h` siguen en P4→P5.
 
 El [ejemplo inicial](../src/examples/main.c) recorre un puntero por un array, modifica una celda con `*p` y avanza un puntero de caracteres hasta el NUL de una cadena. Los arrays mayores de 10 elementos y matrices conservan sus placeholders locales; unions y structs con más de 10 miembros usan placeholders globales, y los miembros anidados no admitidos conservan placeholders locales. Estas vistas no detienen el programa. El [demo P2–P4](../src/examples/p2-p4-full-demo.c) conserva los casos completos de tipos, control, memoria, preprocesador y biblioteca. La matriz permanece abierta hasta completar y validar cada familia.
 
 
 ## Hito implementado parcialmente: P4
 
-P4 añade traducción por unidades virtuales, macros y directivas, funciones K&R y variádicas, `main(argc, argv)` y una biblioteca C parcial. La cobertura comprobada incluye argumentos y salida por bytes, `printf`/`snprintf` y `scanf`/`sscanf` habituales, streams/archivos virtuales, assert, clasificación C-locale, errno, inttypes y funciones básicas de strings/memoria. Los headers se suministran como código C virtual; el core no busca archivos del host.
+P4 añade traducción por unidades virtuales, macros y directivas, funciones K&R y variádicas, `main(argc, argv)` y una biblioteca C parcial. La cobertura comprobada incluye argumentos y salida por bytes, `printf`/`snprintf` y `scanf`/`sscanf`, `%a`/`%A`, conversiones `%L` binary80, `%lc`/`%ls` ASCII bajo locale C, streams/archivos virtuales, assert, clasificación C-locale, errno, inttypes y funciones básicas de strings/memoria. Los errores de conversión wide no representable fijan `EILSEQ`; el scanset wide `scanf %l[` sigue pendiente. Los headers se suministran como código C virtual; el core no busca archivos del host.
 
 `SourceProject` admite `translationUnits`; `ExecuteOptions.io` admite `argv`, `stdin` y archivos iniciales. Cada ejecución tiene un entorno de E/S nuevo, y el presupuesto `maxIOBytes` comparte capacidad entre entradas, salida y archivos residentes. La UI decodifica stdout/stderr y usa un límite de 1 MiB de E/S y 1.000.000 pasos de preprocesamiento. El paquete fija 5.000.000 pasos por defecto para el core.
 
-P4 es un incremento parcial: las familias L01–L35 y B01–B29 siguen teniendo pendientes. Las suites de aceptación no demuestran conformidad C11 completa; P5 y P6 conservan los tipos, declaraciones, headers y capacidades concurrentes todavía fuera del perfil.
+P4 es un incremento parcial: las familias de lenguaje y biblioteca conservan capacidades pendientes, salvo L10 binary80 implementada. Las suites de aceptación no demuestran conformidad C11 completa; P5 y P6 conservan declaraciones, headers y capacidades concurrentes todavía fuera del perfil.

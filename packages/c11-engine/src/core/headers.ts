@@ -1,4 +1,4 @@
-import { HEAP_ALLOCATOR_BUILTINS } from './allocator-builtins.ts';
+import { HEAP_ALLOCATOR_BUILTINS, HEAP_ALLOCATOR_SIGNATURES } from './allocator-builtins.ts';
 
 const guarded = (name: string, body: string): string => {
   const guard = `__C11_VIRTUAL_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
@@ -13,11 +13,13 @@ const limitsMacros: Record<string, string> = {
 };
 
 const floatMacros: Record<string, string> = {
-  FLT_RADIX: '2', FLT_ROUNDS: '1', FLT_EVAL_METHOD: '0',
+  FLT_RADIX: '2', FLT_ROUNDS: '1', FLT_EVAL_METHOD: '0', DECIMAL_DIG: '21',
   FLT_MANT_DIG: '24', FLT_DIG: '6', FLT_DECIMAL_DIG: '9', FLT_MIN_EXP: '(-125)', FLT_MAX_EXP: '128', FLT_MIN_10_EXP: '(-37)', FLT_MAX_10_EXP: '38',
   FLT_EPSILON: '0x1p-23F', FLT_MIN: '0x1p-126F', FLT_MAX: '0x1.fffffep127F', FLT_TRUE_MIN: '0x1p-149F', FLT_HAS_SUBNORM: '1',
   DBL_MANT_DIG: '53', DBL_DIG: '15', DBL_DECIMAL_DIG: '17', DBL_MIN_EXP: '(-1021)', DBL_MAX_EXP: '1024', DBL_MIN_10_EXP: '(-307)', DBL_MAX_10_EXP: '308',
   DBL_EPSILON: '0x1p-52', DBL_MIN: '0x1p-1022', DBL_MAX: '0x1.fffffffffffffp1023', DBL_TRUE_MIN: '0x1p-1074', DBL_HAS_SUBNORM: '1',
+  LDBL_MANT_DIG: '64', LDBL_DIG: '18', LDBL_DECIMAL_DIG: '21', LDBL_MIN_EXP: '(-16381)', LDBL_MAX_EXP: '16384', LDBL_MIN_10_EXP: '(-4931)', LDBL_MAX_10_EXP: '4932',
+  LDBL_EPSILON: '0x1p-63L', LDBL_MIN: '0x1p-16382L', LDBL_MAX: '0x1.ffffffffffffffffp16383L', LDBL_TRUE_MIN: '0x1p-16445L', LDBL_HAS_SUBNORM: '1',
 };
 
 const integerTypes: Record<string, string> = {};
@@ -57,10 +59,6 @@ const stdioFunctions = [
   'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'ungetc', 'feof', 'ferror', 'clearerr', 'perror',
 ];
 const inttypesFunctions = ['imaxabs', 'imaxdiv', 'strtoimax', 'strtoumax'];
-const heapAllocatorPrototypes: Readonly<Record<(typeof HEAP_ALLOCATOR_BUILTINS)[number], string>> = Object.freeze({
-  malloc: 'void *malloc(size_t);',
-});
-
 const inttypesFormatFamilies = [
   ...[8, 16, 32, 64].flatMap((width) => [
     { suffix: String(width), signed: `int${width}_t`, unsigned: `uint${width}_t` },
@@ -102,6 +100,7 @@ export const LIBRARY_DECLARATIONS: Readonly<Record<string, readonly string[]>> =
   'stddef.h': Object.freeze([]),
   'stdint.h': Object.freeze([]),
   'stdio.h': Object.freeze(stdioFunctions),
+  'wchar.h': Object.freeze([]),
   'stdlib.h': Object.freeze([...HEAP_ALLOCATOR_BUILTINS, 'free']),
   'string.h': Object.freeze(stringFunctions),
 });
@@ -275,12 +274,17 @@ int fpclassify(double);`),
   'stddef.h': guarded('stddef.h', `
 typedef unsigned long size_t;
 typedef long ptrdiff_t;
+typedef int wchar_t;
 #define NULL ((void *)0)`),
   'stdint.h': guarded('stdint.h', stdintBody),
   'stdio.h': guarded('stdio.h', stdioBody),
+  'wchar.h': guarded('wchar.h', `
+#include <stddef.h>
+typedef unsigned int wint_t;
+#define WEOF ((wint_t)-1)`),
   'stdlib.h': guarded('stdlib.h', `
 #include <stddef.h>
-${HEAP_ALLOCATOR_BUILTINS.map((name) => heapAllocatorPrototypes[name]).join('\n')}
+${HEAP_ALLOCATOR_BUILTINS.map((name) => HEAP_ALLOCATOR_SIGNATURES[name].prototype).join('\n')}
 void free(void *);`),
   'string.h': guarded('string.h', stringBody),
 };

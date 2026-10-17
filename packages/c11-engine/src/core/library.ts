@@ -1,4 +1,6 @@
 import type { AggregateValue, CType, CValue, Location, ObjectPointerValue } from './internal.ts';
+import { binary80FromNumber, binary80ToRational, formatBinary80Hex, parseBinary80 } from './binary80.ts';
+import type { Binary80Value } from './binary80.ts';
 import { isValidVirtualOpenMode } from './virtual-io.ts';
 import { normalizeVirtualPath } from './virtual-path.ts';
 import type { VirtualByteRead, VirtualIO, VirtualStream } from './virtual-io.ts';
@@ -6,7 +8,7 @@ import type { VirtualByteRead, VirtualIO, VirtualStream } from './virtual-io.ts'
 const EOF_VALUE = -1;
 const INPUT_NEEDED = 'input-needed' as const;
 const STREAM_READ_CHUNK_BYTES = 4096;
-const ERRNO = Object.freeze({ EIO: 5, ENOENT: 2, EBADF: 9, EINVAL: 22, ERANGE: 34 });
+const ERRNO = Object.freeze({ EIO: 5, ENOENT: 2, EBADF: 9, EINVAL: 22, ERANGE: 34, EILSEQ: 84 });
 const intTypes = new Set(['_Bool', 'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'long', 'unsigned long', 'long long', 'unsigned long long']);
 const decodeUtf8 = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 
@@ -449,6 +451,10 @@ function printfBuiltin(name: string, args: readonly CValue[], resultType: CType 
   }
   if (name === 'fprintf' && !stream) { context.errno.set(ERRNO.EBADF); return returnInteger(-1, resultType, context); }
   const formatted = formatOutput(args[formatIndex], args.slice(formatIndex + 1), context, at);
+  if (formatted === null) {
+    if (!destination) stream.markError();
+    return returnInteger(-1, resultType, context);
+  }
   if (destination) {
     const count = capacity === undefined ? formatted.length : Math.min(formatted.length, Math.max(0, capacity - 1));
     if (capacity === undefined || capacity > 0) {
@@ -465,7 +471,7 @@ function printfBuiltin(name: string, args: readonly CValue[], resultType: CType 
   return returnInteger(formatted.length, resultType, context);
 }
 
-function formatOutput(formatValue: CValue, args: readonly CValue[], context: LibraryRuntimeContext, at: Location): Uint8Array {
+function formatOutput(formatValue: CValue, args: readonly CValue[], context: LibraryRuntimeContext, at: Location): Uint8Array | null {
   const format = decodeUtf8(cString(formatValue, at, context));
   context.chargeWork(format.length, at);
   let argumentIndex = 0;
@@ -518,18 +524,16 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
     for (const candidate of ['hh', 'll', 'h', 'l', 'j', 'z', 't', 'L']) if (format.startsWith(candidate, index)) { length = candidate; index += candidate.length; break; }
     const specifier = format[index++];
     if (!specifier) invalid(context, 'La cadena de formato termina dentro de una conversión.', at);
-    if ((length === 'L' && 'fFeEgGaA'.includes(specifier)) || (length === 'l' && 'sc'.includes(specifier))) {
-      return context.fail('UNSUPPORTED_FEATURE', `La conversión printf «%${length}${specifier}» requiere tipos long double o wide characters, aún fuera de este perfil.`, at);
-    }
-    if (specifier === 'a' || specifier === 'A') {
-      return context.fail('UNSUPPORTED_FEATURE', 'La conversión printf «%a»/«%A» aún no está implementada en este perfil.', at);
-    }
     if (specifier === 'n') {
       const pointer = take();
       context.writeScalar(pointer, context.makeInt(total, printfCountType(length)), at);
       continue;
     }
     const value = take();
+    const longDouble = length === 'L' && 'fFeEgGaA'.includes(specifier) ? asBinary80(value) : undefined;
+    if (length === 'L' && 'fFeEgGaA'.includes(specifier) && !longDouble) {
+      return context.fail('LIBRARY_ARGUMENT', `La conversión «%L${specifier}» requiere un argumento long double.`, at);
+    }
     let core: Uint8Array;
     let isNumeric = false;
     if ('diuoxX'.includes(specifier)) {
@@ -548,6 +552,24 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
       reserve(Math.max(width ?? 0, sign.length + prefix.length + zeroPrecision + digits.length));
       const body = '0'.repeat(zeroPrecision) + digits;
       core = encodePadded(sign + prefix, body, width ?? 0, flags, true, context, at);
+    } else if ('aA'.includes(specifier)) {
+      isNumeric = true;
+      if (precision !== undefined && precision > 100_000) return context.fail('UNSUPPORTED_FEATURE', 'La precisión hexadecimal supera el máximo implementado (100000 dígitos).', at);
+      reserve(Math.max(width ?? 0, (precision ?? 64) + 32));
+      const uppercase = specifier === 'A';
+      const { prefix, digits, negative, finite } = formatHexFloatValue(value, longDouble, precision, flags.includes('#'), uppercase, context, at);
+      const sign = negative ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '';
+      core = encodePadded(sign + prefix, digits, width ?? 0, flags, finite, context, at);
+    } else if (length === 'L' && 'fFeEgG'.includes(specifier)) {
+      isNumeric = true;
+      const requestedPrecision = precision ?? 6;
+      if (requestedPrecision > 100) return context.fail('UNSUPPORTED_FEATURE', 'La precisión decimal supera el máximo implementado (100 dígitos).', at);
+      const formatted = formatBinary80Decimal(longDouble!, specifier.toLowerCase() as 'f' | 'e' | 'g', requestedPrecision, flags.includes('#'));
+      let digits = formatted.digits;
+      if (specifier === specifier.toUpperCase()) digits = digits.toUpperCase();
+      const sign = formatted.negative ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '';
+      reserve(Math.max(width ?? 0, sign.length + digits.length));
+      core = encodePadded(sign, digits, width ?? 0, flags, formatted.finite, context, at);
     } else if ('fFeEgG'.includes(specifier)) {
       isNumeric = true;
       const numeric = typeof value.value === 'number' ? value.value : typeof value.value === 'bigint' ? Number(value.value) : NaN;
@@ -574,10 +596,20 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
       reserve(Math.max(width ?? 0, sign.length + digits.length));
       core = encodePadded(sign, digits, width ?? 0, flags, true, context, at);
     } else if (specifier === 's') {
-      let bytes = cString(value, at, context);
+      let bytes = length === 'l'
+        ? wideStringToBytes(value, precision, total, context, at)
+        : cString(value, at, context);
+      if (bytes === null) return null;
       if (precision !== undefined) bytes = bytes.subarray(0, precision);
       core = padBytes(bytes, width ?? 0, flags.includes('-'), context, at, total);
     } else if (specifier === 'c') {
+      if (length === 'l') {
+        const byte = wideCharacterToByte(integerValue(value, at, context), context, at);
+        if (byte === null) return null;
+        core = padBytes(new Uint8Array([byte]), width ?? 0, flags.includes('-'), context, at, total);
+        append(core);
+        continue;
+      }
       const byte = Number(BigInt.asUintN(8, integerValue(value, at, context)));
       core = padBytes(new Uint8Array([byte]), width ?? 0, flags.includes('-'), context, at, total);
     } else if (specifier === 'p') {
@@ -595,6 +627,162 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
   let offset = 0;
   for (const part of pieces) { result.set(part, offset); offset += part.length; }
   return result;
+}
+
+function wideCharacterToByte(value: bigint, context: LibraryRuntimeContext, at: Location): number | null {
+  const scalar = Number(BigInt.asUintN(32, value));
+  context.chargeWork(1, at);
+  if (scalar > 0x7f) {
+    context.errno.set(ERRNO.EILSEQ);
+    return null;
+  }
+  return scalar;
+}
+
+function wideStringToBytes(
+  value: CValue,
+  precision: number | undefined,
+  total: number,
+  context: LibraryRuntimeContext,
+  at: Location,
+): Uint8Array | null {
+  if (value.value === null) invalid(context, 'No se puede leer una cadena wide desde un puntero nulo.', at);
+  const bytes: number[] = [];
+  while (precision === undefined || bytes.length < precision) {
+    const scalarBytes = context.readBytes(context.offsetPointer(value, bytes.length * 4, at), 4, at);
+    const scalar = new DataView(scalarBytes.buffer, scalarBytes.byteOffset, scalarBytes.byteLength).getUint32(0, true);
+    if (scalar === 0) break;
+    context.chargeWork(1, at);
+    if (scalar > 0x7f) {
+      context.errno.set(ERRNO.EILSEQ);
+      return null;
+    }
+    bytes.push(scalar);
+    context.preflightOutputBytes(total + bytes.length, at);
+  }
+  return Uint8Array.from(bytes);
+}
+
+function asBinary80(value: CValue): Binary80Value | undefined {
+  if (typeof value.value !== 'object' || value.value === null) return undefined;
+  const candidate = value.value as unknown as Partial<Binary80Value>;
+  return candidate.kind === 'binary80' ? candidate as Binary80Value : undefined;
+}
+
+function formatHexFloatValue(
+  value: CValue,
+  longDouble: Binary80Value | undefined,
+  precision: number | undefined,
+  alternate: boolean,
+  uppercase: boolean,
+  context: LibraryRuntimeContext,
+  at: Location,
+): { prefix: string; digits: string; negative: boolean; finite: boolean } {
+  const binary = longDouble ?? binary80FromNumber(
+    typeof value.value === 'number' ? value.value : typeof value.value === 'bigint' ? Number(value.value) : NaN,
+  );
+  const rendered = formatBinary80Hex(binary, precision, uppercase);
+  const negative = rendered.startsWith('-');
+  let unsigned = negative ? rendered.slice(1) : rendered;
+  const finite = binary.classification === 'finite';
+  if (alternate && finite && !unsigned.includes('.')) {
+    const markerIndex = unsigned.search(/[pP]/);
+    unsigned = markerIndex < 0 ? `${unsigned}.` : `${unsigned.slice(0, markerIndex)}.${unsigned.slice(markerIndex)}`;
+  }
+  const prefix = unsigned.startsWith('0x') || unsigned.startsWith('0X') ? unsigned.slice(0, 2) : '';
+  const digits = prefix ? unsigned.slice(2) : unsigned;
+  void context; void at;
+  return { prefix, digits, negative, finite };
+}
+
+function formatBinary80Decimal(
+  value: Binary80Value,
+  conversion: 'f' | 'e' | 'g',
+  precision: number,
+  alternate: boolean,
+): { digits: string; negative: boolean; finite: boolean } {
+  if (value.classification !== 'finite') {
+    return { digits: value.classification === 'nan' ? 'nan' : 'inf', negative: value.negative, finite: false };
+  }
+  const { numerator, denominator, negative } = binary80ToRational(value);
+  if (numerator === 0n) {
+    if (conversion === 'f') return { digits: precision === 0 ? alternate ? '0.' : '0' : `0.${'0'.repeat(precision)}`, negative, finite: true };
+    if (conversion === 'e') return { digits: `${precision === 0 ? alternate ? '0.' : '0' : `0.${'0'.repeat(precision)}`}e+00`, negative, finite: true };
+    const count = precision === 0 ? 1 : precision;
+    const digits = alternate && count > 1 ? `0.${'0'.repeat(count - 1)}` : alternate ? '0.' : '0';
+    return { digits, negative, finite: true };
+  }
+  if (conversion === 'f') return { digits: formatRationalFixed(numerator, denominator, precision, alternate), negative, finite: true };
+  if (conversion === 'e') return { digits: formatRationalScientific(numerator, denominator, precision, alternate), negative, finite: true };
+
+  const significantDigits = precision === 0 ? 1 : precision;
+  const rounded = roundedSignificand(numerator, denominator, significantDigits);
+  const useScientific = rounded.exponent < -4 || rounded.exponent >= significantDigits;
+  if (useScientific) {
+    const coefficient = rounded.coefficient.toString().padStart(significantDigits, '0');
+    let fraction = coefficient.slice(1);
+    if (!alternate) fraction = fraction.replace(/0+$/, '');
+    const mantissa = fraction.length ? `${coefficient[0]}.${fraction}` : alternate ? `${coefficient[0]}.` : coefficient[0];
+    return { digits: `${mantissa}e${rounded.exponent < 0 ? '-' : '+'}${String(Math.abs(rounded.exponent)).padStart(2, '0')}`, negative, finite: true };
+  }
+  const decimalPosition = rounded.exponent + 1;
+  const coefficient = rounded.coefficient.toString().padStart(significantDigits, '0');
+  let whole: string, fraction: string;
+  if (decimalPosition >= significantDigits) {
+    whole = coefficient + '0'.repeat(decimalPosition - significantDigits); fraction = '';
+  } else if (decimalPosition > 0) {
+    whole = coefficient.slice(0, decimalPosition); fraction = coefficient.slice(decimalPosition);
+  } else {
+    whole = '0'; fraction = '0'.repeat(-decimalPosition) + coefficient;
+  }
+  if (!alternate) fraction = fraction.replace(/0+$/, '');
+  const digits = fraction.length ? `${whole}.${fraction}` : alternate ? `${whole}.` : whole;
+  return { digits, negative, finite: true };
+}
+
+function formatRationalFixed(numerator: bigint, denominator: bigint, precision: number, alternate: boolean): string {
+  const rounded = roundRationalScaled(numerator, denominator, precision);
+  if (precision === 0) return alternate ? `${rounded}.` : String(rounded);
+  const digits = rounded.toString().padStart(precision + 1, '0');
+  return `${digits.slice(0, -precision)}.${digits.slice(-precision)}`;
+}
+
+function formatRationalScientific(numerator: bigint, denominator: bigint, precision: number, alternate: boolean): string {
+  let exponent = floorLog10Rational(numerator, denominator);
+  let rounded = roundRationalScaled(numerator, denominator, precision - exponent);
+  const carry = 10n ** BigInt(precision + 1);
+  if (rounded >= carry) { rounded /= 10n; exponent++; }
+  const digits = rounded.toString().padStart(precision + 1, '0');
+  const fraction = digits.slice(1);
+  const mantissa = precision === 0
+    ? alternate ? `${digits[0]}.` : digits[0]
+    : `${digits[0]}.${fraction}`;
+  return `${mantissa}e${exponent < 0 ? '-' : '+'}${String(Math.abs(exponent)).padStart(2, '0')}`;
+}
+
+function roundedSignificand(numerator: bigint, denominator: bigint, precision: number): { exponent: number; coefficient: bigint } {
+  let exponent = floorLog10Rational(numerator, denominator);
+  let coefficient = roundRationalScaled(numerator, denominator, precision - 1 - exponent);
+  if (coefficient >= 10n ** BigInt(precision)) { coefficient /= 10n; exponent++; }
+  return { exponent, coefficient };
+}
+
+function floorLog10Rational(numerator: bigint, denominator: bigint): number {
+  let exponent = numerator.toString().length - denominator.toString().length;
+  if (exponent >= 0) {
+    if (numerator < denominator * 10n ** BigInt(exponent)) exponent--;
+  } else if (numerator * 10n ** BigInt(-exponent) < denominator) exponent--;
+  return exponent;
+}
+
+function roundRationalScaled(numerator: bigint, denominator: bigint, decimalScale: number): bigint {
+  let scaledNumerator = numerator, scaledDenominator = denominator;
+  if (decimalScale >= 0) scaledNumerator *= 10n ** BigInt(decimalScale);
+  else scaledDenominator *= 10n ** BigInt(-decimalScale);
+  const quotient = scaledNumerator / scaledDenominator;
+  const remainder = scaledNumerator % scaledDenominator;
+  const twice = remainder * 2n;
+  return twice > scaledDenominator || twice === scaledDenominator && (quotient & 1n) === 1n ? quotient + 1n : quotient;
 }
 
 function safeFormatNumber(text: string, context: LibraryRuntimeContext, at: Location): number {
@@ -906,6 +1094,7 @@ interface ScanInput {
   take(): VirtualByteRead;
   readonly consumed: number;
   finish(): void;
+  markError(): void;
 }
 
 function makeScanInput(stream: VirtualStream | undefined, source: Uint8Array | undefined, at: Location): ScanInput {
@@ -934,6 +1123,7 @@ function makeScanInput(stream: VirtualStream | undefined, source: Uint8Array | u
       if (stream && pending?.kind === 'byte') stream.ungetByte(pending.value, at);
       pending = undefined;
     },
+    markError() { stream?.markError(); },
   };
 }
 
@@ -1041,8 +1231,8 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     }
     const isCharacter = specifier === 'c';
     const isString = specifier === 's' || specifier === '[';
-    if ((length === 'L' && 'fFeEgGaA'.includes(specifier)) || (length === 'l' && 'cs'.includes(specifier))) {
-      return context.fail('UNSUPPORTED_FEATURE', `La conversión scanf «%${length}${specifier}» requiere tipos long double o wide characters, aún fuera de este perfil.`, at);
+    if (length === 'l' && specifier === '[') {
+      return context.fail('UNSUPPORTED_FEATURE', 'La conversión wide scanf «%l[» aún no está implementada.', at);
     }
     // C's scanf skips leading whitespace for %s and numeric conversions, but
     // not for %c or %[]. This also lets a later %s cross a pending line break.
@@ -1050,6 +1240,29 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     const bytes: number[] = [];
     if (isCharacter) {
       const wanted = widthText ? width : 1;
+      if (length === 'l') {
+        const scalars: number[] = [];
+        let encodingError = false;
+        while (scalars.length < wanted) {
+          const byte = yield* scanPeek(input);
+          if (byte < 0) break;
+          if (byte > 0x7f) {
+            yield* scanTake(input);
+            context.errno.set(ERRNO.EILSEQ);
+            input.markError();
+            encodingError = true;
+            break;
+          }
+          scalars.push(yield* scanTake(input)); context.chargeWork(1, at);
+        }
+        if (encodingError) break;
+        if (scalars.length < wanted) { mismatch(true); break; }
+        if (!suppress) {
+          writeBytes(takeDestination(), encodeWideScalars(scalars), at, context);
+          assigned++;
+        }
+        continue;
+      }
       while (bytes.length < wanted) {
         const byte = yield* scanPeek(input);
         if (byte < 0) break;
@@ -1064,6 +1277,30 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
       continue;
     }
     if (isString) {
+      if (length === 'l') {
+        const scalars: number[] = [];
+        let encodingError = false;
+        while (scalars.length < width) {
+          const byte = yield* scanPeek(input);
+          if (byte < 0 || asciiWhitespace.has(byte)) break;
+          if (byte > 0x7f) {
+            yield* scanTake(input);
+            context.errno.set(ERRNO.EILSEQ);
+            input.markError();
+            encodingError = true;
+            break;
+          }
+          scalars.push(yield* scanTake(input)); context.chargeWork(1, at);
+        }
+        if (encodingError) break;
+        if (!scalars.length) { mismatch((yield* scanPeek(input)) < 0); break; }
+        if (!suppress) {
+          scalars.push(0);
+          writeBytes(takeDestination(), encodeWideScalars(scalars), at, context);
+          assigned++;
+        }
+        continue;
+      }
       while (bytes.length < width) {
         const byte = yield* scanPeek(input);
         if (byte < 0 || (specifier === 's' ? asciiWhitespace.has(byte) : scansetInvert ? scanset!.has(byte) : !scanset!.has(byte))) break;
@@ -1080,16 +1317,24 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     const integerConversion = 'diuoxX'.includes(specifier);
     const floatConversion = 'fFeEgGaA'.includes(specifier);
     if (!integerConversion && !floatConversion && specifier !== 'p') invalid(context, `La conversión scanf «%${length}${specifier}» no está implementada.`, at);
-    if (floatConversion && !['', 'l'].includes(length)) invalid(context, `El modificador «${length}» no es válido para scanf «%${specifier}».`, at);
+    if (floatConversion && !['', 'l', 'L'].includes(length)) invalid(context, `El modificador «${length}» no es válido para scanf «%${specifier}».`, at);
     if (integerConversion && length === 'L') invalid(context, `El modificador «L» no es válido para scanf «%${specifier}».`, at);
-    const accepted = specifier === 'p'
-      ? /[0-9a-fA-FxX()nil]/
-      : integerConversion
-        ? (specifier === 'd' || specifier === 'i' ? /[0-9a-fA-FxX+-]/ : specifier === 'o' ? /[0-7+-]/ : specifier === 'x' || specifier === 'X' ? /[0-9a-fA-FxX+-]/ : /[0-9+-]/)
-        : /[0-9A-Za-z.+()\-]/;
+    const accepted = specifier === 'p' ? /[0-9a-fA-FxX()nil]/ : null;
+    let floatToken = '';
+    let integerToken = '';
     while (bytes.length < width) {
       const byte = yield* scanPeek(input);
-      if (byte < 0 || !accepted.test(String.fromCharCode(byte))) break;
+      if (byte < 0) break;
+      const character = String.fromCharCode(byte);
+      if (floatConversion) {
+        const candidate = floatToken + character;
+        if (!isScannedFloatPrefix(candidate)) break;
+        floatToken = candidate;
+      } else if (integerConversion) {
+        const candidate = integerToken + character;
+        if (!isScannedIntegerPrefix(candidate, specifier)) break;
+        integerToken = candidate;
+      } else if (!accepted?.test(character)) break;
       bytes.push(yield* scanTake(input)); context.chargeWork(1, at);
     }
     const token = scanTokenToString(bytes);
@@ -1105,15 +1350,18 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
       }
       continue;
     }
-    let parsed: bigint | number | undefined;
+    let parsed: bigint | number | Binary80Value | undefined;
     if (integerConversion) parsed = parseScannedInteger(token, specifier);
+    else if (length === 'L') parsed = parseScannedBinary80(token);
     else parsed = parseScannedFloat(token);
     if (parsed === undefined) { mismatch(bytes.length === 0 && (yield* scanPeek(input)) < 0); break; }
     if (!suppress) {
       const destination = takeDestination();
       const value: CValue = typeof parsed === 'bigint'
         ? context.makeInt(parsed, scanIntegerType(specifier, length))
-        : { type: length === 'l' ? 'double' : 'float', value: parsed };
+        : typeof parsed === 'number'
+          ? { type: length === 'l' ? 'double' : 'float', value: parsed }
+          : { type: 'long double', value: parsed as unknown as CValue['value'] };
       context.writeScalar(destination, value, at);
       assigned++;
     }
@@ -1121,6 +1369,18 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
   input.finish();
   if (!assigned && inputFailure) return eofMinusOne(resultType, context);
   return returnInteger(assigned, resultType, context);
+}
+
+function parseScannedBinary80(text: string): Binary80Value | undefined {
+  try { return parseBinary80(text); }
+  catch { return undefined; }
+}
+
+function encodeWideScalars(scalars: readonly number[]): Uint8Array {
+  const bytes = new Uint8Array(scalars.length * 4);
+  const view = new DataView(bytes.buffer);
+  scalars.forEach((scalar, index) => view.setUint32(index * 4, scalar, true));
+  return bytes;
 }
 
 function scanIntegerType(specifier: string, length: string): CType {
@@ -1155,6 +1415,20 @@ function parseScannedInteger(text: string, specifier: string): bigint | undefine
   return text.startsWith('-') ? -value : value;
 }
 
+function isScannedIntegerPrefix(text: string, specifier: string): boolean {
+  const body = text.replace(/^[+-]/, '');
+  if (!body) return true;
+  if (specifier === 'd' || specifier === 'u') return /^\d+$/.test(body);
+  if (specifier === 'o') return /^[0-7]+$/.test(body);
+  if (specifier === 'x' || specifier === 'X') {
+    return /^0[xX]$/i.test(body) || /^(?:0[xX])?[0-9a-f]+$/i.test(body);
+  }
+  if (specifier === 'i') {
+    return /^0[xX]$/i.test(body) || /^0[xX][0-9a-f]+$/i.test(body) || /^0[0-7]*$/.test(body) || /^[1-9]\d*$/.test(body);
+  }
+  return false;
+}
+
 function parseScannedFloat(text: string): number | undefined {
   if (/^[+-]?inf(?:inity)?$/i.test(text)) return text.startsWith('-') ? -Infinity : Infinity;
   if (/^[+-]?nan(?:\([a-z0-9_]*\))?$/i.test(text)) return text.startsWith('-') ? -NaN : NaN;
@@ -1179,4 +1453,19 @@ function parseScannedFloat(text: string): number | undefined {
   const power = explicitExponent - 4 * fractional.length + shift;
   const magnitude = power > 1023 ? Infinity : power < -1075 ? 0 : Number(leading) * 2 ** power;
   return sign < 0 ? -magnitude : magnitude;
+}
+
+function isScannedFloatPrefix(text: string): boolean {
+  const body = text.replace(/^[+-]/, '');
+  if (!body) return true;
+  const lower = body.toLowerCase();
+  if ('infinity'.startsWith(lower) || lower === 'inf' || 'nan'.startsWith(lower)) return true;
+  if (/^nan\([a-z0-9_]*\)?$/i.test(body)) return true;
+
+  // Keep only prefixes that can still become a decimal or hexadecimal float.
+  // This leaves punctuation after a complete token for the next conversion.
+  if (/^(?:\d+(?:\.\d*)?(?:[eE][+-]?\d*)?|\.\d+(?:[eE][+-]?\d*)?|\.)$/.test(body)) return true;
+  if (/^0[xX]$/i.test(body) || /^0[xX](?:[0-9a-f]+(?:\.[0-9a-f]*)?|\.[0-9a-f]+)(?:[pP][+-]?\d*)?$/i.test(body) ||
+      /^0[xX][0-9a-f]*\.$/i.test(body)) return true;
+  return false;
 }

@@ -10,12 +10,17 @@ export type {
   MemoryViewerLifecycleBatch,
   MemoryViewerState,
   MemoryViewerStatus,
+  MemoryViewerTranscriptEntry,
 } from './MemoryViewerController.ts';
 
 export interface MemoryViewerActions {
   readonly togglePlay: () => void;
   readonly previous: () => void;
   readonly next: () => void;
+  readonly sendStdinLine: (line: string) => boolean;
+  readonly sendStdinEOF: () => boolean;
+  readonly setStdinInteractiveEnabled: (enabled: boolean) => void;
+  readonly stop: () => void;
 }
 
 export type MemoryViewerHookValue = MemoryViewerState & MemoryViewerActions;
@@ -40,6 +45,13 @@ export function useMemoryViewer(source: string): MemoryViewerHookValue {
   const togglePlay = useCallback(() => controller.togglePlay(), [controller]);
   const previous = useCallback(() => controller.previous(), [controller]);
   const next = useCallback(() => controller.next(), [controller]);
+  const sendStdinLine = useCallback((line: string) => controller.sendStdinLine(line), [controller]);
+  const sendStdinEOF = useCallback(() => controller.sendStdinEOF(), [controller]);
+  const setStdinInteractiveEnabled = useCallback(
+    (enabled: boolean) => controller.setStdinInteractiveEnabled(enabled),
+    [controller],
+  );
+  const stop = useCallback(() => controller.stop(), [controller]);
 
-  return { ...state, togglePlay, previous, next };
+  return { ...state, togglePlay, previous, next, sendStdinLine, sendStdinEOF, setStdinInteractiveEnabled, stop };
 }

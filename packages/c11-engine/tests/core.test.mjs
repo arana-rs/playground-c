@@ -86,7 +86,6 @@ test('comments and CRLF preserve original file, line and column', () => {
 
 test('C11 syntax scheduled after P4 is rejected explicitly rather than approximated', () => {
   for (const source of [
-    'int main(void){long double x = 1.0L;return 0;}',
     'int main(void){return _Generic(1, int: 2);}',
   ]) preparationError(source);
 });
@@ -126,7 +125,7 @@ test('return stops runtime work, but preparation validates unreachable source', 
   terminated('return 7; int x; x / 0;', 7);
   terminated('{return 5;} return 8;', 5);
   preparationError('int main(void){return 1; return missing;}', 'UNKNOWN_IDENTIFIER');
-  preparationError('int main(void){return 1; long double x;}');
+  preparationError('int main(void){return 1; _Generic(1, int: 2);}');
 });
 
 test('prepared programs are immutable, validated and each execution uses fresh state', () => {

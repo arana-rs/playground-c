@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createDebugSession, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
+import { createDebugSession, createExecutionSession, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
 import { runFile } from '@playground/c11-engine/browser';
 import { RUN_CONFIGURATION } from '../src/execution/useRunner.ts';
 
@@ -22,14 +22,82 @@ const heapLifecycleSource = [
   '}',
 ].join('\n');
 
-test('the initial memory example reports its struct pointer update and returns zero', async () => {
+test('the initial example accepts a size and round-trips it through virtual memory and a file', async () => {
   const file = new File([initialExampleSource], 'main.c', { type: 'text/x-c' });
-  const result = await runFile(file, RUN_CONFIGURATION.options);
+  const options = {
+    ...RUN_CONFIGURATION.options,
+    execute: {
+      ...RUN_CONFIGURATION.options.execute,
+      io: { stdin: '8\n' },
+    },
+  };
+  const result = await runFile(file, options);
   assert.equal(result.kind, 'terminated', JSON.stringify(result));
   assert.equal(result.mainReturn, 0);
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(result.stdout, new TextEncoder().encode('B: 20 (base=20)\n'));
+  const stdout = new TextDecoder().decode(result.stdout);
+  assert.match(stdout, /Memoria dinamica: B:9\/9 \(base=9\)\n/);
+  assert.match(stdout, /Archivo virtual, leido y cerrado: B:9\/9\n/);
+  assert.match(stdout, /Un tercio en long double:/);
   assert.deepEqual(result.stderr, new Uint8Array());
+});
+
+test('the initial example exposes its prompt and handles valid input, EOF and invalid input in Run and Debug', () => {
+  const prepared = prepare({
+    entry: 'main.c',
+    files: [{ name: 'main.c', source: initialExampleSource }],
+  }, RUN_CONFIGURATION.options.prepare);
+  assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));
+
+  const executeInteractive = (session, input) => {
+    let progress = session.resume();
+    let prompt;
+    let submitted = false;
+    for (let index = 0; index < 1_000; index += 1) {
+      if (progress.kind === 'paused') {
+        progress = session.resume();
+        continue;
+      }
+      if (progress.kind === 'input-needed') {
+        prompt ??= new TextDecoder().decode(progress.stdout);
+        assert.equal(new TextDecoder().decode(progress.stderr), '');
+        assert.equal(submitted, false, 'el ejemplo solo solicita una línea');
+        if (input === null) session.endStdin();
+        else session.appendStdin(new TextEncoder().encode(input));
+        submitted = true;
+        progress = session.resume();
+        continue;
+      }
+      return { result: progress, prompt };
+    }
+    assert.fail('La sesión no alcanzó un resultado terminal en 1.000 pasos.');
+  };
+
+  for (const [mode, createSession] of [
+    ['Run', () => createExecutionSession(prepared.program, RUN_CONFIGURATION.options.execute)],
+    ['Debug', () => createDebugSession(prepared.program, RUN_CONFIGURATION.options.execute, RUN_CONFIGURATION.debug)],
+  ]) {
+    const valid = executeInteractive(createSession(), '8\n');
+    assert.equal(valid.result.kind, 'terminated', `${mode}: ${JSON.stringify(valid.result)}`);
+    assert.equal(valid.result.mainReturn, 0);
+    assert.equal(valid.prompt, 'Tamano del texto (8-64): ');
+    const validOutput = new TextDecoder().decode(valid.result.stdout);
+    assert.match(validOutput, /Memoria dinamica: B:9\/9 \(base=9\)\n/);
+    assert.match(validOutput, /Archivo virtual, leido y cerrado: B:9\/9\n/);
+    assert.deepEqual(valid.result.stderr, new Uint8Array());
+
+    const eof = executeInteractive(createSession(), null);
+    assert.equal(eof.result.kind, 'terminated', `${mode}: ${JSON.stringify(eof.result)}`);
+    assert.equal(eof.result.mainReturn, 0);
+    assert.equal(eof.prompt, 'Tamano del texto (8-64): ');
+    assert.match(new TextDecoder().decode(eof.result.stdout), /Fin de entrada; no se reservo memoria\./);
+    assert.deepEqual(eof.result.stderr, new Uint8Array());
+
+    const invalid = executeInteractive(createSession(), 'nope\n');
+    assert.equal(invalid.result.kind, 'terminated', `${mode}: ${JSON.stringify(invalid.result)}`);
+    assert.equal(invalid.result.exitCode, 1);
+    assert.match(new TextDecoder().decode(invalid.result.stdout), /Entrada invalida: escribe un entero\./);
+  }
 });
 
 test('debug tracks heap allocations through free and replacement with a focused fixture', () => {

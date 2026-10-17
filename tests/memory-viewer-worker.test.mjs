@@ -256,6 +256,105 @@ test('el Worker inspecciona bloques heap vivos por dirección, tamaño e identid
   }
 });
 
+test('el Worker conserva el scanf suspendido, sus efectos parciales y la salida incremental', async () => {
+  const responses = [];
+  const scope = { onmessage: null, postMessage: response => responses.push(response) };
+  const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
+  Object.defineProperty(globalThis, 'self', { configurable: true, writable: true, value: scope });
+
+  try {
+    await import('../src/memory/memory.worker.ts?memory-viewer-stdin-continuation-test');
+    const source = [
+      '#include <stdio.h>',
+      'int main(void) {',
+      '    int values[2] = {0, 0};',
+      '    int index = 0;',
+      '    int second = 0;',
+      '    int count = 0;',
+      '    printf("prompt> ");',
+      '    count = scanf("%d %d", &values[index++], &second);',
+      '    printf("values=%d,%d index=%d count=%d\\n", values[0], second, index, count);',
+      '    return 0;',
+      '}',
+    ].join('\n');
+    scope.onmessage({ data: { type: 'debug-start', jobId: 111, fileName: 'main.c', source } });
+    assert.equal(responses[0].type, 'debug-ready');
+
+    let requestId = 1;
+    let firstWait;
+    while (requestId <= 12) {
+      scope.onmessage({ data: { type: 'debug-step', jobId: 111, requestId } });
+      const progress = responses.at(-1);
+      assert.equal(progress.type, 'debug-progress');
+      if (progress.progress.kind === 'input-needed') {
+        firstWait = progress;
+        break;
+      }
+      assert.equal(progress.progress.kind, 'paused', 'la VM permanece viva hasta alcanzar scanf');
+      requestId += 1;
+    }
+    assert.ok(firstWait, 'scanf solicita entrada sin finalizar la sesión');
+    assert.ok(firstWait.inputRequestId > 0);
+    assert.equal('stdout' in firstWait.progress, false, 'input-needed no clona snapshots de salida acumulados');
+    assert.equal('stderr' in firstWait.progress, false);
+    const waitIndex = responses.indexOf(firstWait);
+    const firstOutput = responses.findIndex(response => response.type === 'debug-output');
+    assert.ok(firstOutput >= 0 && firstOutput < waitIndex, 'el prompt llega antes del evento input-needed');
+    assert.equal(new TextDecoder().decode(responses[firstOutput].chunk), 'prompt> ');
+
+    const stepRequestId = firstWait.requestId;
+    const firstInputToken = firstWait.inputRequestId;
+    const responseCount = responses.length;
+    scope.onmessage({ data: {
+      type: 'debug-stdin', jobId: 111, requestId: stepRequestId, inputRequestId: firstInputToken + 1,
+      bytes: new TextEncoder().encode('999\n'),
+    } });
+    assert.equal(responses.length, responseCount, 'un token de entrada obsoleto no reanuda el scanf');
+
+    scope.onmessage({ data: {
+      type: 'debug-stdin', jobId: 111, requestId: stepRequestId, inputRequestId: firstInputToken,
+      bytes: new TextEncoder().encode('12 \n'),
+    } });
+    const secondWait = responses.at(-1);
+    assert.equal(secondWait.type, 'debug-progress');
+    assert.equal(secondWait.progress.kind, 'input-needed', 'el segundo %d sigue esperando el resto de la misma llamada');
+    assert.equal('stdout' in secondWait.progress, false, 'los waits repetidos transportan solo deltas de salida');
+    assert.equal('stderr' in secondWait.progress, false);
+    assert.equal(secondWait.requestId, stepRequestId, 'la continuación conserva la solicitud del mismo paso');
+    assert.notEqual(secondWait.inputRequestId, firstInputToken, 'el segundo wait tiene un token nuevo');
+    const array = secondWait.arrays.find(item => item.name === 'values');
+    assert.equal(array.elements[0].displayValue, '12', 'la primera conversión ya fue asignada antes de la segunda espera');
+    assert.equal(secondWait.stackScalars.find(item => item.name === 'index').displayValue, '1', 'el argumento &values[index++] no se evalúa otra vez');
+
+    scope.onmessage({ data: {
+      type: 'debug-stdin', jobId: 111, requestId: stepRequestId, inputRequestId: secondWait.inputRequestId,
+      bytes: new TextEncoder().encode('34\n'),
+    } });
+    const resumed = responses.at(-1);
+    assert.equal(resumed.type, 'debug-progress');
+    assert.equal(resumed.progress.kind, 'paused');
+    assert.equal('stdout' in resumed.progress, false, 'una pausa intermedia tampoco duplica el prefijo de salida');
+    assert.equal('stderr' in resumed.progress, false);
+    assert.equal(resumed.requestId, stepRequestId);
+    assert.equal(resumed.progress.location.line, 9, 'la línea scanf termina y la VM se detiene en la instrucción siguiente');
+    assert.equal(resumed.stackScalars.find(item => item.name === 'index').displayValue, '1');
+
+    requestId += 1;
+    scope.onmessage({ data: { type: 'debug-step', jobId: 111, requestId } });
+    const outputEvents = responses.filter(response => response.type === 'debug-output' && response.stream === 'stdout');
+    const outputText = outputEvents.map(response => new TextDecoder().decode(response.chunk)).join('');
+    assert.equal(outputText, 'prompt> values=12,34 index=1 count=2\n', 'cada byte producido se envía una sola vez y en orden');
+    assert.ok(outputEvents.every((response, index) => index === 0 || response.sequence > outputEvents[index - 1].sequence));
+
+    requestId += 1;
+    scope.onmessage({ data: { type: 'debug-step', jobId: 111, requestId } });
+    assert.equal(responses.at(-1).progress.kind, 'terminated');
+  } finally {
+    if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
+    else delete globalThis.self;
+  }
+});
+
 test('el Worker transmite el origen real de parámetros y locales en el mismo scope', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };

@@ -1,6 +1,5 @@
 import type {
   DebugEvent,
-  DebugProgress,
   DebugAggregateSnapshot,
   DebugArraySnapshot,
   DebugHeapObjectSnapshot,
@@ -11,7 +10,7 @@ import type {
 } from '@playground/c11-engine/core';
 import { RUN_CONFIGURATION } from '../execution/configuration.ts';
 import type { RunConfiguration } from '../execution/configuration.ts';
-import type { MemoryViewerCommand, MemoryViewerResponse } from './protocol.ts';
+import type { MemoryViewerCommand, MemoryViewerProgress, MemoryViewerResponse } from './protocol.ts';
 import { PersistentSnapshotHistory } from './PersistentSnapshotHistory.ts';
 import type { PersistentSnapshotBatch } from './PersistentSnapshotHistory.ts';
 import { cloneMemoryViewerArraySnapshot, sameMemoryViewerArraySnapshot } from './arraySnapshots.ts';
@@ -21,7 +20,13 @@ import { cloneMemoryViewerPointerSnapshot, sameMemoryViewerPointerSnapshot } fro
 export const MEMORY_VIEWER_PLAY_INTERVAL_MS = RUN_CONFIGURATION.memoryViewer.playIntervalMs;
 export const MEMORY_VIEWER_HISTORY_LIMIT = RUN_CONFIGURATION.memoryViewer.historySteps;
 
-export type MemoryViewerStatus = 'starting' | 'paused' | 'running' | 'terminated' | 'error' | 'limit';
+export type MemoryViewerStatus = 'starting' | 'paused' | 'running' | 'waiting-input' | 'terminated' | 'cancelled' | 'error' | 'limit';
+
+export interface MemoryViewerTranscriptEntry {
+  readonly stream: 'stdout' | 'stderr' | 'stdin' | 'system';
+  readonly text: string;
+  readonly tone?: 'system' | 'warning' | 'error';
+}
 
 /** Immutable, persistent batches let later UI replay lifecycle events without copying each prefix. */
 export interface MemoryViewerLifecycleBatch {
@@ -45,6 +50,13 @@ export interface MemoryViewerState {
   readonly location: DebugSourceLocation | null;
   readonly status: MemoryViewerStatus;
   readonly isPlaying: boolean;
+  /** Monotonic session transcript; it is deliberately independent of the selected history point. */
+  readonly transcript: readonly MemoryViewerTranscriptEntry[];
+  /** Token for the currently displayed input wait, hidden while browsing cached history. */
+  readonly inputRequestId: number | null;
+  readonly isViewingHistory: boolean;
+  /** Whether Stop can cancel a live VM, including while a cached history entry is selected. */
+  readonly canStop: boolean;
   readonly canPrevious: boolean;
   readonly canNext: boolean;
   /** Zero-based VM line-step index; remains monotonic after old history is pruned. */
@@ -116,15 +128,16 @@ function createWorker(): Worker {
   return new Worker(new URL('./memory.worker.ts', import.meta.url), { type: 'module' });
 }
 
-function diagnosticMessage(progress: Exclude<DebugProgress, { kind: 'paused' }>): string | null {
+function diagnosticMessage(progress: Exclude<MemoryViewerProgress, { kind: 'paused' }>): string | null {
   if (!('diagnostics' in progress) || progress.diagnostics.length === 0) return null;
   return progress.diagnostics
     .map(item => `${item.file}:${item.line}:${item.column}: ${item.message}`)
     .join('\n');
 }
 
-function statusForProgress(progress: DebugProgress): MemoryViewerStatus {
+function statusForProgress(progress: MemoryViewerProgress): MemoryViewerStatus {
   if (progress.kind === 'paused') return 'paused';
+  if (progress.kind === 'input-needed') return 'waiting-input';
   if (progress.kind === 'terminated') return 'terminated';
   if (progress.kind === 'limit' || progress.kind === 'debug-limit') return 'limit';
   return 'error';
@@ -179,6 +192,15 @@ export class MemoryViewerController {
   private pendingRequestId: number | null = null;
   private pendingOriginStep: number | null = null;
   private pendingOriginLocation: DebugSourceLocation | null = null;
+  private pendingInputLocation: DebugSourceLocation | null = null;
+  private inputRequestId: number | null = null;
+  private lastInputRequestId = 0;
+  private inputEnded = false;
+  private stdinInteractiveEnabled = true;
+  private lastOutputSequence = 0;
+  private readonly outputDecoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+  private transcript: readonly MemoryViewerTranscriptEntry[] = Object.freeze([]);
+  private lastEventSequence = 0;
   private watchdog: ReturnType<typeof setTimeout> | undefined;
   private playbackTimer: ReturnType<typeof setTimeout> | undefined;
   private vmAlive = false;
@@ -237,14 +259,33 @@ export class MemoryViewerController {
     const entry = this.history[this.cursor];
     const stepIndex = this.history.length === 0 ? 0 : this.historyOffset + this.cursor;
     const selectedIsRunning = this.pendingOriginStep !== null && this.pendingOriginStep === stepIndex;
-    const status = entry ? (selectedIsRunning ? 'running' : entry.status) : 'starting';
+    const isAtPendingFrontier = selectedIsRunning && this.cursor === this.history.length - 1;
+    const isInputWaitVisible = isAtPendingFrontier && this.inputRequestId !== null;
+    const status = entry
+      ? (isInputWaitVisible ? 'waiting-input' : selectedIsRunning ? 'running' : entry.status)
+      : 'starting';
     const hasHistoryFuture = this.cursor < this.history.length - 1;
     const canAdvanceVm = !this.pendingStart && this.pendingRequestId === null && this.vmAlive && entry?.status === 'paused';
+    const showTransientMemory = isInputWaitVisible;
+    const selectedLifecycle = showTransientMemory ? this.lifecycle : entry?.lifecycle ?? null;
+    const selectedScopes = showTransientMemory ? this.activeScopeTop : entry?.activeScopeTop ?? null;
+    const heapBatch = showTransientMemory ? this.heapSnapshotHistory.latestBatch : entry?.heapSnapshotHistory ?? null;
+    const pointerBatch = showTransientMemory ? this.pointerSnapshotHistory.latestBatch : entry?.pointerSnapshotHistory ?? null;
+    const arrayBatch = showTransientMemory ? this.arraySnapshotHistory.latestBatch : entry?.arraySnapshotHistory ?? null;
+    const aggregateBatch = showTransientMemory ? this.aggregateSnapshotHistory.latestBatch : entry?.aggregateSnapshotHistory ?? null;
+    const stackBatch = showTransientMemory ? this.stackSnapshotHistory.latestBatch : entry?.stackSnapshotHistory ?? null;
+    const staticBatch = showTransientMemory ? this.staticSnapshotHistory.latestBatch : entry?.staticSnapshotHistory ?? null;
+    const viewingHistory = this.cursor < this.history.length - 1
+      || (this.pendingOriginStep !== null && !isAtPendingFrontier);
     return {
       source: this.source,
-      location: entry?.location ?? null,
+      location: isInputWaitVisible ? this.pendingInputLocation : entry?.location ?? null,
       status,
       isPlaying: this.isPlaying,
+      transcript: this.transcript,
+      inputRequestId: isInputWaitVisible ? this.inputRequestId : null,
+      isViewingHistory: viewingHistory,
+      canStop: this.active !== null && (this.pendingStart || this.pendingRequestId !== null || this.vmAlive),
       canPrevious: this.cursor > 0,
       canNext: hasHistoryFuture || canAdvanceVm,
       stepIndex,
@@ -254,16 +295,16 @@ export class MemoryViewerController {
         : `El historial conserva los últimos ${this.maxHistoryEntries.toLocaleString('es-ES')} pasos; los más antiguos ya no están disponibles.`,
       hasUsedHeap: this.hasUsedHeap,
       hasHeapAllocationCalls: this.hasHeapAllocationCalls,
-      lifecycle: entry?.lifecycle ?? null,
-      activeScopes: materializeActiveScopes(entry?.activeScopeTop ?? null),
-      heapObjects: this.heapSnapshotHistory.materialize(entry?.heapSnapshotHistory ?? null),
-      pointers: this.pointerSnapshotHistory.materialize(entry?.pointerSnapshotHistory ?? null),
-      arrays: this.arraySnapshotHistory.materialize(entry?.arraySnapshotHistory ?? null),
-      omittedArrayObjects: entry?.omittedArrayObjects ?? 0,
-      aggregates: this.aggregateSnapshotHistory.materialize(entry?.aggregateSnapshotHistory ?? null),
-      omittedAggregateObjects: entry?.omittedAggregateObjects ?? 0,
-      stackScalars: this.stackSnapshotHistory.materialize(entry?.stackSnapshotHistory ?? null),
-      staticObjects: this.staticSnapshotHistory.materialize(entry?.staticSnapshotHistory ?? null),
+      lifecycle: selectedLifecycle,
+      activeScopes: materializeActiveScopes(selectedScopes),
+      heapObjects: this.heapSnapshotHistory.materialize(heapBatch),
+      pointers: this.pointerSnapshotHistory.materialize(pointerBatch),
+      arrays: this.arraySnapshotHistory.materialize(arrayBatch),
+      omittedArrayObjects: showTransientMemory ? this.omittedArrayObjects : entry?.omittedArrayObjects ?? 0,
+      aggregates: this.aggregateSnapshotHistory.materialize(aggregateBatch),
+      omittedAggregateObjects: showTransientMemory ? this.omittedAggregateObjects : entry?.omittedAggregateObjects ?? 0,
+      stackScalars: this.stackSnapshotHistory.materialize(stackBatch),
+      staticObjects: this.staticSnapshotHistory.materialize(staticBatch),
     };
   }
 
@@ -281,6 +322,15 @@ export class MemoryViewerController {
     this.pendingRequestId = null;
     this.pendingOriginStep = null;
     this.pendingOriginLocation = null;
+    this.pendingInputLocation = null;
+    this.inputRequestId = null;
+    this.lastInputRequestId = 0;
+    this.inputEnded = false;
+    this.lastOutputSequence = 0;
+    this.outputDecoders.stdout = new TextDecoder();
+    this.outputDecoders.stderr = new TextDecoder();
+    this.transcript = Object.freeze([]);
+    this.lastEventSequence = 0;
     this.vmAlive = false;
     this.isPlaying = false;
     this.history = [];
@@ -369,6 +419,105 @@ export class MemoryViewerController {
     if (wasPlaying) this.publish();
   }
 
+  setStdinInteractiveEnabled(enabled: boolean): void {
+    this.stdinInteractiveEnabled = enabled;
+    if (enabled) return;
+
+    const active = this.active;
+    const requestId = this.pendingRequestId;
+    const inputRequestId = this.inputRequestId;
+    if (active && requestId !== null && inputRequestId !== null) {
+      this.sendStdinEOFForRequest(active, requestId, inputRequestId);
+    }
+  }
+
+  sendStdinLine(line: string): boolean {
+    const active = this.active;
+    const inputRequestId = this.inputRequestId;
+    const requestId = this.pendingRequestId;
+    if (!active || inputRequestId === null || requestId === null || this.inputEnded
+      || this.currentState.inputRequestId !== inputRequestId) return false;
+
+    this.inputRequestId = null;
+    try {
+      const command: MemoryViewerCommand = {
+        type: 'debug-stdin', jobId: active.jobId, requestId, inputRequestId,
+        bytes: new TextEncoder().encode(`${line}\n`),
+      };
+      active.worker.postMessage(command);
+    } catch (error) {
+      this.fail(active, requestId, `No se pudo enviar la entrada: ${this.errorText(error)}`);
+      return false;
+    }
+    this.appendTranscript({ stream: 'stdin', text: `${line}\n` });
+    this.armWatchdog(active, requestId);
+    this.publish();
+    return true;
+  }
+
+  sendStdinEOF(): boolean {
+    const active = this.active;
+    const inputRequestId = this.inputRequestId;
+    const requestId = this.pendingRequestId;
+    if (!active || inputRequestId === null || requestId === null || this.inputEnded
+      || this.currentState.inputRequestId !== inputRequestId) return false;
+
+    return this.sendStdinEOFForRequest(active, requestId, inputRequestId);
+  }
+
+  private sendStdinEOFForRequest(active: ActiveWorker, requestId: number, inputRequestId: number): boolean {
+    if (this.active !== active || this.pendingRequestId !== requestId || this.inputRequestId !== inputRequestId
+      || this.inputEnded) return false;
+    this.inputRequestId = null;
+    this.inputEnded = true;
+    try {
+      const command: MemoryViewerCommand = {
+        type: 'debug-stdin-eof', jobId: active.jobId, requestId, inputRequestId,
+      };
+      active.worker.postMessage(command);
+    } catch (error) {
+      this.fail(active, requestId, `No se pudo cerrar la entrada: ${this.errorText(error)}`);
+      return false;
+    }
+    this.appendTranscript({ stream: 'system', text: '[EOF]\n', tone: 'system' });
+    this.armWatchdog(active, requestId);
+    this.publish();
+    return true;
+  }
+
+  stop(): void {
+    const active = this.active;
+    if (!active) return;
+    const pendingOrigin = this.pendingOriginStep;
+    const selectedOrigin = pendingOrigin === null
+      ? this.cursor === this.history.length - 1
+      : this.historyOffset + this.cursor === pendingOrigin;
+    const location = this.pendingInputLocation ?? this.pendingOriginLocation ?? this.history[this.cursor]?.location ?? null;
+
+    this.clearWatchdog();
+    this.pausePlayback();
+    this.pendingStart = false;
+    this.pendingRequestId = null;
+    this.pendingOriginStep = null;
+    this.pendingOriginLocation = null;
+    this.pendingInputLocation = null;
+    this.inputRequestId = null;
+    this.inputEnded = true;
+    this.vmAlive = false;
+    this.flushOutputDecoders();
+    this.appendTranscript({ stream: 'system', text: 'Sesión de depuración detenida.\n', tone: 'warning' });
+    this.appendEntry({
+      location,
+      status: 'cancelled',
+      errorMessage: null,
+      lifecycle: this.lifecycle,
+      omittedArrayObjects: this.omittedArrayObjects,
+      omittedAggregateObjects: this.omittedAggregateObjects,
+    }, selectedOrigin);
+    this.closeWorker(active);
+    this.publish();
+  }
+
   dispose(): void {
     this.disposed = true;
     this.pausePlayback();
@@ -420,6 +569,16 @@ export class MemoryViewerController {
 
   private onWorkerMessage(active: ActiveWorker, response: MemoryViewerResponse) {
     if (this.active !== active || response.jobId !== active.jobId) return;
+    if (response.type === 'debug-output') {
+      if (!this.matchesPending(response.requestId) || response.sequence <= this.lastOutputSequence) return;
+      this.lastOutputSequence = response.sequence;
+      const text = this.outputDecoders[response.stream].decode(response.chunk, { stream: true });
+      if (text) {
+        this.appendTranscript({ stream: response.stream, text });
+        this.publish();
+      }
+      return;
+    }
     if (response.type === 'debug-ready') {
       if (!this.pendingStart) return;
       this.pendingStart = false;
@@ -450,6 +609,29 @@ export class MemoryViewerController {
       return;
     }
     if (!this.matchesPending(response.requestId)) return;
+    if (response.progress.kind === 'input-needed') {
+      if (response.requestId === null || !Number.isSafeInteger(response.inputRequestId)
+        || response.inputRequestId === undefined || response.inputRequestId <= this.lastInputRequestId) return;
+      this.clearWatchdog();
+      this.pausePlayback();
+      this.lastInputRequestId = response.inputRequestId;
+      this.inputRequestId = response.inputRequestId;
+      this.pendingInputLocation = response.progress.location;
+      this.acceptEvents(response.events);
+      this.acceptHeapObjects(response.heapObjects);
+      this.acceptPointers(response.pointers);
+      this.acceptArrays(response.arrays, response.omittedArrayObjects);
+      this.acceptAggregates(response.aggregates, response.omittedAggregateObjects);
+      this.acceptStackScalars(response.stackScalars);
+      this.acceptStaticObjects(response.staticObjects);
+      this.vmAlive = true;
+      if (!this.stdinInteractiveEnabled) {
+        this.sendStdinEOFForRequest(active, response.requestId, response.inputRequestId);
+        return;
+      }
+      this.publish();
+      return;
+    }
     this.clearWatchdog();
     const originStep = this.pendingOriginStep;
     const selectedOrigin = originStep !== null && this.historyOffset + this.cursor === originStep;
@@ -458,6 +640,8 @@ export class MemoryViewerController {
     this.pendingOriginStep = null;
     const location = this.pendingOriginLocation;
     this.pendingOriginLocation = null;
+    this.pendingInputLocation = null;
+    this.inputRequestId = null;
     this.acceptEvents(response.events);
     this.acceptHeapObjects(response.heapObjects);
     this.acceptPointers(response.pointers);
@@ -467,6 +651,7 @@ export class MemoryViewerController {
     this.acceptStaticObjects(response.staticObjects);
     const entry = this.entryForProgress(response.progress, location);
     this.vmAlive = response.progress.kind === 'paused';
+    if (!this.vmAlive) this.flushOutputDecoders();
     this.appendEntry(entry, selectedOrigin);
     if (!this.vmAlive) this.closeWorker();
     if (this.isPlaying) {
@@ -483,7 +668,7 @@ export class MemoryViewerController {
   }
 
   private entryForProgress(
-    progress: DebugProgress,
+    progress: MemoryViewerProgress,
     fallbackLocation: DebugSourceLocation | null,
   ): Omit<HistoryEntry, 'activeScopeTop' | 'heapSnapshotHistory' | 'pointerSnapshotHistory' | 'arraySnapshotHistory' | 'aggregateSnapshotHistory' | 'stackSnapshotHistory' | 'staticSnapshotHistory'> {
     return {
@@ -524,17 +709,19 @@ export class MemoryViewerController {
   }
 
   private acceptEvents(events: readonly DebugEvent[]) {
-    if (events.length === 0) return;
-    if (!this.hasUsedHeap && events.some(event => event.kind === 'object-create' && event.duration === 'heap')) {
+    const freshEvents = events.filter(event => event.sequence > this.lastEventSequence);
+    if (freshEvents.length === 0) return;
+    this.lastEventSequence = freshEvents[freshEvents.length - 1].sequence;
+    if (!this.hasUsedHeap && freshEvents.some(event => event.kind === 'object-create' && event.duration === 'heap')) {
       this.hasUsedHeap = true;
     }
     this.lifecycle = {
       previous: this.lifecycle,
-      events,
-      eventCount: (this.lifecycle?.eventCount ?? 0) + events.length,
+      events: freshEvents,
+      eventCount: (this.lifecycle?.eventCount ?? 0) + freshEvents.length,
     };
     // Lifecycle events are authoritative: frame-exit, errors, and limits do not imply scope exits.
-    for (const event of events) {
+    for (const event of freshEvents) {
       if (event.kind === 'scope-enter' && event.scopeId !== null) {
         const scope: MemoryViewerActiveScope = Object.freeze({
           id: event.scopeId,
@@ -559,8 +746,12 @@ export class MemoryViewerController {
     this.pendingRequestId = null;
     this.pendingOriginStep = null;
     this.pendingOriginLocation = null;
+    this.pendingInputLocation = null;
+    this.inputRequestId = null;
+    this.inputEnded = true;
     this.vmAlive = false;
     this.pausePlayback();
+    this.flushOutputDecoders();
     this.appendEntry(
       {
         location,
@@ -617,6 +808,27 @@ export class MemoryViewerController {
     if (this.watchdog === undefined) return;
     this.timers.clearTimeout(this.watchdog);
     this.watchdog = undefined;
+  }
+
+  private appendTranscript(entry: MemoryViewerTranscriptEntry): void {
+    const previous = this.transcript[this.transcript.length - 1];
+    if (previous && previous.stream === entry.stream && previous.tone === entry.tone
+      && (entry.stream === 'stdout' || entry.stream === 'stderr')) {
+      this.transcript = Object.freeze([
+        ...this.transcript.slice(0, -1),
+        Object.freeze({ ...previous, text: previous.text + entry.text }),
+      ]);
+      return;
+    }
+    this.transcript = Object.freeze([...this.transcript, Object.freeze({ ...entry })]);
+  }
+
+  private flushOutputDecoders(): void {
+    for (const stream of ['stdout', 'stderr'] as const) {
+      const tail = this.outputDecoders[stream].decode();
+      if (tail) this.appendTranscript({ stream, text: tail });
+      this.outputDecoders[stream] = new TextDecoder();
+    }
   }
 
   private schedulePlaybackTick() {

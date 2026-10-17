@@ -76,6 +76,17 @@ test('stdio %p output round-trips object and null pointers through sscanf', () =
   executeTerminated(execute, program, undefined, 0);
 });
 
+test('stdio formats hexadecimal floats, C-locale wide characters and binary80 long doubles', () => {
+  const program = prepareProject(prepare, fixtureProject('.', 'stdio-format-hex-wide-long-double.c'));
+  const result = executeTerminated(execute, program, undefined, 0);
+  assert.equal(decodeBytes(result.stdout), '');
+});
+
+test('sscanf numeric conversions stop at separators and preserve scanf token prefixes', () => {
+  const program = prepareProject(prepare, fixtureProject('.', 'sscanf-numeric-boundaries.c'));
+  executeTerminated(execute, program, undefined, 0);
+});
+
 test('stdarg traverses default promotions and va_copy keeps an independent cursor', () => {
   const program = prepareProject(prepare, fixtureProject('.', 'varargs.c'));
   executeTerminated(execute, program, undefined, 1);

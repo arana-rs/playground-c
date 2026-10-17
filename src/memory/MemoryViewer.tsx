@@ -1,9 +1,13 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, SyntheticEvent } from 'react';
 import { Button } from '../components/arc/button/button.tsx';
+import { ConsolePanel } from '../components/ConsolePanel.tsx';
 import { SelectedFileTab } from '../components/SelectedFileTab.tsx';
 import { CodeEditor } from '../editor/CodeEditor.tsx';
+import { formatConsoleSegments } from '../execution/useRunner.ts';
+import type { ConsoleEntry, ConsoleStatusTone } from '../execution/useRunner.ts';
 import { useMemoryViewer } from './useMemoryViewer.ts';
+import { hasDirectStdioInclude } from './stdioInclude.ts';
 import type {
   DebugAggregateSnapshot,
   DebugHeapObjectSnapshot,
@@ -59,10 +63,29 @@ function getStatusLabel(
     case 'starting': return 'Preparando…';
     case 'paused': return isPlaying ? 'Reproduciendo…' : 'En pausa';
     case 'running': return isPlaying ? 'Reproduciendo…' : 'Avanzando…';
+    case 'waiting-input': return 'Esperando entrada';
     case 'terminated': return 'Fin del programa';
+    case 'cancelled': return 'Depuración detenida';
     case 'error': return 'Error de ejecución';
     case 'limit': return 'Límite de ejecución';
   }
+}
+
+function getDebugConsoleStatus(
+  status: ReturnType<typeof useMemoryViewer>['status'],
+  isPlaying: boolean,
+  isViewingHistory: boolean,
+  inputRequestId: number | null,
+): { label: string; tone: ConsoleStatusTone } {
+  if (status === 'cancelled') return { label: 'Depuración detenida', tone: 'cancelled' };
+  if (isViewingHistory) return { label: 'Historial seleccionado', tone: 'ready' };
+  if (inputRequestId !== null || status === 'waiting-input') return { label: 'Esperando entrada', tone: 'waiting' };
+  if (status === 'starting') return { label: 'Preparando depuración', tone: 'running' };
+  if (status === 'running' || (status === 'paused' && isPlaying)) return { label: 'Avanzando', tone: 'running' };
+  if (status === 'terminated') return { label: 'Finalizado', tone: 'finished' };
+  if (status === 'error') return { label: 'Error', tone: 'error' };
+  if (status === 'limit') return { label: 'Límite alcanzado', tone: 'stopped' };
+  return { label: 'En pausa', tone: 'ready' };
 }
 
 type MemoryRegion = 'static' | 'stack' | 'heap';
@@ -1594,13 +1617,38 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
     staticObjects,
     canPrevious,
     canNext,
+    canStop,
+    transcript,
+    inputRequestId,
+    isViewingHistory,
     errorMessage,
     historyNotice,
     togglePlay,
     previous,
     next,
+    sendStdinLine,
+    sendStdinEOF,
+    setStdinInteractiveEnabled,
+    stop,
   } = useMemoryViewer(source);
+  const hasStdioInclude = useMemo(() => hasDirectStdioInclude(frozenSource), [frozenSource]);
+  const [ioPreference, setIoPreference] = useState(true);
+  const showIoConsole = hasStdioInclude && ioPreference;
+  useEffect(() => {
+    setStdinInteractiveEnabled(showIoConsole);
+  }, [setStdinInteractiveEnabled, showIoConsole]);
   const hasMainSourceLocation = location?.file === 'main.c';
+  const consoleTranscript = useMemo<readonly ConsoleEntry[]>(
+    () => transcript.map(entry => entry.stream === 'system'
+      ? { stream: 'system', text: entry.text, tone: entry.tone }
+      : { stream: entry.stream, text: entry.text }),
+    [transcript],
+  );
+  const consoleSegments = useMemo(
+    () => formatConsoleSegments({ status: 'running', transcript: consoleTranscript, inputRequestId }),
+    [consoleTranscript, inputRequestId],
+  );
+  const consoleStatus = getDebugConsoleStatus(status, isPlaying, isViewingHistory, inputRequestId);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -1675,7 +1723,7 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
               type="button"
               aria-label={isPlaying ? 'Pausar reproducción' : 'Reproducir'}
               title={isPlaying ? 'Pausar reproducción' : 'Reproducir'}
-              disabled={status === 'starting' || status === 'terminated' || status === 'error' || status === 'limit'}
+              disabled={status === 'starting' || status === 'waiting-input' || status === 'terminated' || status === 'cancelled' || status === 'error' || status === 'limit'}
               onClick={togglePlay}
             >
               {isPlaying ? (
@@ -1719,6 +1767,15 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
           </div>
           <h2 id="memory-viewer-title">Memory Viewer</h2>
           <div className="memory-viewer-header-actions">
+            <label className="memory-viewer-io-toggle" data-disabled={!hasStdioInclude || undefined} title={hasStdioInclude ? 'Mostrar u ocultar la consola de depuración' : 'Disponible cuando el fuente incluye stdio.h'}>
+              <input
+                type="checkbox"
+                checked={showIoConsole}
+                disabled={!hasStdioInclude}
+                onChange={event => setIoPreference(event.currentTarget.checked)}
+              />
+              <span>I/O</span>
+            </label>
             <select
               className="memory-viewer-mode-select"
               aria-label="Modo visual de memoria"
@@ -1730,6 +1787,19 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
+            {canStop && !showIoConsole && (
+              <Button
+                className="memory-viewer-control"
+                variant="ghost"
+                size="sm"
+                type="button"
+                aria-label="Detener depuración"
+                title="Detener depuración"
+                onClick={stop}
+              >
+                Stop
+              </Button>
+            )}
             <Button
               ref={closeButtonRef}
               className="memory-viewer-control memory-viewer-icon-control"
@@ -1748,7 +1818,7 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
         <div className="memory-viewer-filebar">
           <SelectedFileTab fileName="main.c" />
           <span className="memory-viewer-status" role="status" aria-live="polite" aria-atomic="true">
-            {getStatusLabel(status, isPlaying)}
+            {isViewingHistory ? 'Historial seleccionado' : getStatusLabel(status, isPlaying)}
           </span>
           {locationLabel && <span className="memory-viewer-location">{locationLabel}</span>}
         </div>
@@ -1788,6 +1858,20 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
           staticObjects={staticObjects}
           stepIndex={stepIndex}
           status={status}
+        />
+        <ConsolePanel
+          className="memory-viewer-console"
+          label="debug"
+          ariaLabel="Consola de depuración"
+          hidden={!showIoConsole}
+          statusLabel={consoleStatus.label}
+          statusTone={consoleStatus.tone}
+          segments={consoleSegments}
+          inputRequestId={inputRequestId}
+          onSendStdinLine={sendStdinLine}
+          onSendStdinEOF={sendStdinEOF}
+          showStop={canStop}
+          onStop={stop}
         />
       </div>
     </dialog>

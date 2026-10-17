@@ -2,7 +2,7 @@ import { createDebugSession, createExecutionSession, DEFAULT_DEBUG_AGGREGATE_INS
 import type {
   DebugAggregateInspection, DebugAggregateMemberSnapshot, DebugAggregateSnapshot,
   DebugArrayElementSnapshot, DebugArrayInspection, DebugArraySnapshot, DebugExecutionSession,
-  DebugHeapObjectSnapshot, DebugPointerSnapshot, DebugScalarSnapshot, DebugSessionOptions, DebugStaticObjectSnapshot,
+  DebugHeapObjectSnapshot, DebugPointerSnapshot, DebugProgress, DebugScalarSnapshot, DebugSessionOptions, DebugStaticObjectSnapshot,
   DebugStaticObjectInspectionOptions, ExecuteProgress, ExecutionSession, PrepareResult, SourceProject,
 } from '@playground/c11-engine/core';
 
@@ -38,6 +38,15 @@ if (prepared.kind === 'prepared') {
   session.endStdin();
   const arrayOptions: DebugSessionOptions = { maxObjects: 100, maxElementsPerArray: 10, maxValueChars: 64 };
   const debug: DebugExecutionSession = createDebugSession(prepared.program, undefined, arrayOptions);
+  const debugProgress: DebugProgress = debug.resume();
+  if (debugProgress.kind === 'input-needed') {
+    const debugLocation = debugProgress.location;
+    const debugOutput: Uint8Array = debugProgress.stdout;
+    void debugLocation;
+    void debugOutput;
+    debug.appendStdin(new Uint8Array([65]));
+  }
+  debug.endStdin();
   const scalars: readonly DebugScalarSnapshot[] = debug.inspectScalars();
   const pointers: readonly DebugPointerSnapshot[] = debug.inspectPointers();
   const staticInspectionOptions: DebugStaticObjectInspectionOptions = { includeStringLiterals: false };

@@ -168,6 +168,62 @@ test('malloc/free manage heap storage, accept free(NULL), and allow zero-size fr
   run(fixtureSourceFor('p3', 'malloc-free.c'), 1);
 });
 
+test('long double conserva binary80 en almacenamiento, agregados, memcpy, llamadas y argumentos variádicos', () => {
+  run(fixtureSourceFor('p3', 'long-double-storage.c'), 0);
+});
+
+test('realloc supports null, growth, shrink, zero-size release, failure preservation, and pointer provenance copies', () => {
+  const program = compile(fixtureSourceFor('p3', 'realloc.c'));
+  assert.equal(program.hasHeapAllocationCalls, true);
+  run(fixtureSourceFor('p3', 'realloc.c'), 1);
+});
+
+test('realloc applies the memory budget to the resized live heap without double-counting the old block', () => {
+  const program = compile(`#include <stdlib.h>
+int main(void) {
+  int *values = malloc(sizeof(int));
+  if (values == NULL) return 0;
+  values[0] = 5;
+  values = realloc(values, 2 * sizeof(int));
+  if (values == NULL) return 0;
+  values[1] = 2;
+  return values[0] == 5 ? 1 : 0;
+}`);
+
+  const exactBudget = execute(program, { limits: { maxMemoryBytes: 16 } });
+  assert.equal(exactBudget.kind, 'terminated', JSON.stringify(exactBudget));
+  assert.equal(exactBudget.mainReturn, 1);
+  assert.equal(exactBudget.metrics.peakMemoryBytes, 16);
+
+  const tooSmall = execute(program, { limits: { maxMemoryBytes: 15 } });
+  assert.equal(tooSmall.kind, 'limit', JSON.stringify(tooSmall));
+  assert.equal(tooSmall.resource, 'maxMemoryBytes');
+  assert.equal(tooSmall.metrics.peakMemoryBytes, 12);
+});
+
+test('realloc diagnoses invalid bases, stale aliases, bounds changes, and indeterminate growth bytes', () => {
+  const invalidInterior = runtimeError('#include <stdlib.h>\nint main(void) { int *values = malloc(8); return realloc(values + 1, 16) != 0; }');
+  assert.equal(invalidInterior.diagnostics[0].code, 'INVALID_REALLOC');
+
+  const freed = runtimeError('#include <stdlib.h>\nint main(void) { int *values = malloc(4); free(values); return realloc(values, 8) != 0; }');
+  assert.equal(freed.diagnostics[0].code, 'INVALID_REALLOC');
+
+  const staleAlias = runtimeError('#include <stdlib.h>\nint main(void) { int *values = malloc(4); int *alias = values; values = realloc(values, 8); return alias[0]; }');
+  assert.equal(staleAlias.diagnostics[0].code, 'INACTIVE_OBJECT');
+
+  const shrunkBounds = runtimeError('#include <stdlib.h>\nint main(void) { int *values = malloc(8); values = realloc(values, 4); return values[1]; }');
+  assert.equal(shrunkBounds.diagnostics[0].code, 'POINTER_BOUNDS');
+
+  const uninitializedGrowth = runtimeError('#include <stdlib.h>\nint main(void) { int *values = malloc(4); values = realloc(values, 8); return values[1]; }');
+  assert.equal(uninitializedGrowth.diagnostics[0].code, 'UNINITIALIZED_READ');
+});
+
+test('realloc keeps LP64 size_t values as BigInt until the profile range check', () => {
+  const result = execute(compile('#include <stdlib.h>\nint main(void) { int *value = malloc(4); return realloc(value, 9007199254740993UL) != 0; }'));
+  assert.equal(result.kind, 'runtime-error', JSON.stringify(result));
+  assert.equal(result.diagnostics[0].code, 'TYPE_SIZE_RANGE');
+});
+
 test('live automatic and heap storage obey the shared byte budget and execution state resets', () => {
   const program = compile(fixtureSourceFor('p3', 'live-storage-budget.c'));
 

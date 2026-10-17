@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CAPABILITIES, createDebugSession, createExecutionSession, DEFAULT_DEBUG_AGGREGATE_INSPECTION_LIMITS, DEFAULT_DEBUG_ARRAY_INSPECTION_LIMITS, execute, prepare, VIRTUAL_HEAP_LAYOUT, VIRTUAL_MEMORY_LAYOUT } from '../dist/core/index.js';
 import { VirtualMemory } from '../dist/core/memory.js';
-import { fixtureProject, prepareProject } from './p4-test-helpers.mjs';
+import { pointerTo } from '../dist/core/type-system.js';
+import { decodeBytes, fixtureProject, prepareProject } from './p4-test-helpers.mjs';
 
 const program = (name) => prepareProject(prepare, fixtureProject('debug', name));
 const objects = (events, kind) => events.filter((event) => event.kind === kind);
@@ -32,6 +33,15 @@ function pauseBeforeLine(session, targetLine, maxSteps = 2_000) {
     if (progress.kind !== 'paused' || progress.location.line === targetLine) return progress;
   }
   assert.fail(`DebugSession no alcanzó la línea ${targetLine} en ${maxSteps} pausas.`);
+}
+
+function advanceToInputNeeded(session, maxSteps = 2_000) {
+  for (let index = 0; index < maxSteps; index += 1) {
+    const progress = session.resume();
+    if (progress.kind === 'input-needed') return progress;
+    assert.equal(progress.kind, 'paused', JSON.stringify(progress));
+  }
+  assert.fail(`DebugSession no solicitó stdin en ${maxSteps} pausas.`);
 }
 
 function assertLifecycleOnly(events) {
@@ -1050,32 +1060,254 @@ test('free inválido y malloc fallido no generan eventos heap falsos', () => {
   assert.equal(objects(allocation.events, 'object-create').filter((event) => event.origin === 'heap').length, 0);
 });
 
-test('realloc sigue fuera del runtime admitido y se rechaza al preparar', () => {
-  const result = prepare(fixtureProject('debug', 'realloc-unavailable.c'));
-  assert.equal(result.kind, 'prepare-error');
-  assert.equal(result.diagnostics[0].code, 'UNDEFINED_FUNCTION');
+test('realloc publica identidad nueva y ciclo heap coherente aunque conserve la dirección virtual', () => {
+  const session = createDebugSession(program('realloc.c'), undefined, { heapAddressSeed: 0 });
+  const run = runToTerminal(session);
+  assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
+  assert.equal(run.result.mainReturn, 0);
+
+  const created = objects(run.events, 'object-create').filter((event) => event.origin === 'heap');
+  const deleted = objects(run.events, 'object-delete').filter((event) => event.origin === 'heap');
+  assert.equal(created.length, 2, 'realloc(NULL, n) y la reasignación crean bloques');
+  assert.equal(deleted.length, 1, 'la reasignación elimina el objeto anterior');
+  assert.equal(deleted[0].allocationId, created[0].allocationId);
+  assert.notEqual(created[0].allocationId, created[1].allocationId);
+  assert.equal(created[0].size, 4);
+  assert.equal(created[1].size, 8);
+  assert.equal(created[0].addressVirtual, created[1].addressVirtual, 'el crecimiento cabe en el extent reservado');
+  assert.ok(run.events.findIndex((event) => event.kind === 'object-delete' && event.allocationId === created[0].allocationId) <
+    run.events.findIndex((event) => event.kind === 'object-create' && event.allocationId === created[1].allocationId));
+  assert.deepEqual(session.inspectHeapObjects(), [{
+    id: created[1].allocationId,
+    address: `0x${created[1].addressVirtual.toString(16)}`,
+    size: 8,
+    origin: 'heap',
+  }]);
+  assertLifecycleOnly(run.events);
 });
 
-test('debug ignora stdin y archivos, no pausa ni emite salida, y conserva los stubs puros de buffers', () => {
-  const prepared = program('debug-stdio-isolation.c');
-  const session = createDebugSession(prepared, {
-    io: { stdin: '19\n', files: [{ name: 'absent', data: new Uint8Array([65]) }] },
+test('realloc sin espacio conserva el bloque anterior y no emite eventos heap falsos', () => {
+  const session = createDebugSession(program('realloc-failure.c'), undefined, { heapAddressSeed: 0 });
+  const run = runToTerminal(session);
+  assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
+  assert.equal(run.result.mainReturn, 0);
+  assert.equal(objects(run.events, 'object-create').filter((event) => event.origin === 'heap').length, 1);
+  assert.equal(objects(run.events, 'object-delete').filter((event) => event.origin === 'heap').length, 0);
+  assert.equal(session.inspectHeapObjects().length, 1);
+  assert.equal(session.inspectHeapObjects()[0].size, 4);
+  assertLifecycleOnly(run.events);
+});
+
+test('realloc se mueve frente a un vecino, conserva datos, emite delete/create y libera el extent anterior', () => {
+  const run = runToTerminal(createDebugSession(program('realloc-move.c'), undefined, { heapAddressSeed: 0 }));
+  assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
+  assert.equal(run.result.mainReturn, 0);
+
+  const created = objects(run.events, 'object-create').filter((event) => event.origin === 'heap');
+  const deleted = objects(run.events, 'object-delete').filter((event) => event.origin === 'heap');
+  assert.equal(created.length, 4);
+  assert.equal(deleted.length, 4);
+  assert.equal(created[1].addressVirtual, created[0].addressVirtual + 32n,
+    'el segundo bloque ocupa el siguiente extent y bloquea el crecimiento en sitio');
+  assert.equal(created[2].size, 40);
+  assert.notEqual(created[2].addressVirtual, created[0].addressVirtual,
+    'realloc debe reservar otro extent cuando el vecino impide crecer');
+  assert.equal(created[3].addressVirtual, created[0].addressVirtual,
+    'una nueva reserva reutiliza la dirección del extent viejo');
+  assert.equal(deleted[0].allocationId, created[0].allocationId);
+  assert.notEqual(created[2].allocationId, created[0].allocationId);
+  assert.ok(run.events.findIndex((event) => event.kind === 'object-delete' && event.allocationId === created[0].allocationId) <
+    run.events.findIndex((event) => event.kind === 'object-create' && event.allocationId === created[2].allocationId));
+  assertLifecycleOnly(run.events);
+});
+
+test('realloc no restaura provenance de puntero truncada aunque se reponga el byte faltante', () => {
+  const at = { file: 'realloc-provenance.test.c', line: 1, column: 1 };
+  const memory = new VirtualMemory([], null, { peakMemoryBytes: 0 }, () => 0);
+  const target = memory.allocateRaw(4, at);
+  const slot = memory.allocateRaw(8, at);
+  assert.ok(target);
+  assert.ok(slot);
+
+  const pointerType = pointerTo('int');
+  const slotType = pointerTo(pointerType);
+  const slotReference = memory.dereference({ type: slotType, value: slot }, at);
+  memory.write(slotReference, { type: pointerType, value: target }, at);
+  assert.equal(memory.copyablePointerValues(slot, 8, at).length, 1);
+
+  const byteType = pointerTo('unsigned char');
+  const lastByteReference = memory.dereference(memory.pointerAdd({ type: byteType, value: slot }, 7n, at), at);
+  const lastByte = memory.read(lastByteReference, at);
+  const truncated = memory.reallocateRaw(slot, 7, at);
+  assert.ok(truncated);
+  assert.equal(memory.copyablePointerValues(truncated, 7, at).length, 0);
+
+  const expanded = memory.reallocateRaw(truncated, 8, at);
+  assert.ok(expanded);
+  const restoredByteReference = memory.dereference(memory.pointerAdd({ type: byteType, value: expanded }, 7n, at), at);
+  memory.write(restoredByteReference, lastByte, at);
+  assert.equal(memory.copyablePointerValues(expanded, 8, at).length, 0);
+
+  const restoredSlot = memory.dereference({ type: slotType, value: expanded }, at);
+  const inspected = memory.inspectPointer(restoredSlot, at);
+  assert.equal(inspected.initialized, true);
+  assert.equal(inspected.status, 'unmapped');
+  assert.equal(inspected.target, undefined, 'los ocho bytes no reconstruyen la identidad del puntero original');
+});
+
+test('debug ejecuta stdio sobre stdin y archivos virtuales y conserva retornos, errno y salida', () => {
+  const source = `#include <errno.h>
+#include <stdio.h>
+int main(void) {
+  int prompt = printf("in: ");
+  int value = 0;
+  int scanned = scanf("%d", &value);
+  FILE *file = fopen("data.bin", "r+");
+  int wrote = fputc('Z', file);
+  int reset = fseek(file, 0, 0);
+  int first = fgetc(file);
+  int second = fgetc(file);
+  int bad_seek = fseek(file, -1, 0);
+  int seek_error = errno;
+  int had_error = ferror(file);
+  clearerr(file);
+  int cleared_error = !ferror(file);
+  errno = 0;
+  FILE *missing = fopen("missing.bin", "r");
+  int missing_error = errno;
+  int reported = fprintf(stderr, "missing=%d bytes=%c%c\\n", missing_error, first, second);
+  int closed = fclose(file);
+  return prompt == 4 && scanned == 1 && value == 19 && file != NULL && wrote == 'Z' &&
+      reset == 0 && first == 'Z' && second == 'B' && bad_seek == -1 && seek_error != 0 &&
+      had_error && cleared_error && missing == NULL &&
+      missing_error != 0 && reported == 19 && closed == 0 ? 0 : 1;
+}`;
+  const prepared = prepareProject(prepare, {
+    entry: 'debug-stdio-virtual.c',
+    files: [{ name: 'debug-stdio-virtual.c', source }],
   });
-  const initialEvents = session.drainEvents();
-  assert.ok(!objects(initialEvents, 'object-create').some((event) => event.name === 'target'));
+  const session = createDebugSession(prepared, {
+    io: { stdin: '19\n', files: [{ name: 'data.bin', data: 'AB' }] },
+  });
+  const run = runToTerminal(session);
+  assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
+  assert.equal(run.result.mainReturn, 0);
+  assert.equal(decodeBytes(run.result.stdout), 'in: ');
+  assert.equal(decodeBytes(run.result.stderr), 'missing=2 bytes=ZB\n');
+  assert.ok(run.steps.some((step) => step.kind === 'paused' && decodeBytes(step.stdout) === 'in: '));
+  assertLifecycleOnly(run.events);
+});
+
+test('debug publica el prompt, suspende scanf parcialmente y reanuda la misma visita sin repetir &a[i++]', () => {
+  const source = `#include <stdio.h>
+int main(void) {
+  int values[2] = { 0, 0 };
+  int index = 0;
+  int second = 0;
+  printf("Numbers: ");
+  int converted = scanf("%d %d", &values[index++], &second);
+  int valid = converted == 2 && index == 1 && values[0] == 12 && second == 34;
+  return valid ? 0 : 1;
+}`;
+  const prepared = prepareProject(prepare, {
+    entry: 'debug-stdio-suspend.c',
+    files: [{ name: 'debug-stdio-suspend.c', source }],
+  });
+  const session = createDebugSession(prepared, { io: { stdin: '12 ' } });
+  const waiting = advanceToInputNeeded(session);
+  const scanfLine = source.split('\n').findIndex((line) => line.includes('scanf(')) + 1;
+  const nextLine = source.split('\n').findIndex((line) => line.includes('int valid')) + 1;
+  assert.equal(waiting.location.file, 'debug-stdio-suspend.c');
+  assert.equal(waiting.location.line, scanfLine);
+  assert.ok(waiting.location.column > 0);
+  assert.equal(decodeBytes(waiting.stdout), 'Numbers: ');
+  assert.deepEqual(waiting.stderr, new Uint8Array());
+  assert.equal(session.inspectScalars().find((scalar) => scalar.name === 'index')?.displayValue, '1');
+  const stored = session.inspectArrays().arrays.find((array) => array.name === 'values');
+  assert.equal(stored.elements[0].displayValue, '12');
+  assert.equal(stored.elements[1].displayValue, '0');
+
+  const stillWaiting = session.resume();
+  assert.equal(stillWaiting.kind, 'input-needed');
+  assert.deepEqual(stillWaiting.location, waiting.location);
+  assert.equal(session.inspectScalars().find((scalar) => scalar.name === 'index')?.displayValue, '1');
+
+  session.appendStdin(new TextEncoder().encode('34\n'));
+  const continued = session.resume();
+  assert.equal(continued.kind, 'paused', JSON.stringify(continued));
+  assert.equal(continued.location.line, nextLine, 'la continuación se detiene antes de la instrucción de la línea siguiente');
+  assert.equal(decodeBytes(continued.stdout), 'Numbers: ');
+  assert.equal(session.inspectScalars().find((scalar) => scalar.name === 'index')?.displayValue, '1');
+  const completed = session.inspectArrays().arrays.find((array) => array.name === 'values');
+  assert.equal(completed.elements[0].displayValue, '12');
+  assert.equal(completed.elements[1].displayValue, '0');
 
   const run = runToTerminal(session);
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
   assert.equal(run.result.mainReturn, 0);
-  assert.deepEqual(run.result.stdout, new Uint8Array());
-  assert.deepEqual(run.result.stderr, new Uint8Array());
-  assert.ok(!run.steps.some((step) => step.kind === 'input-needed'));
+});
 
-  const created = objects([...initialEvents, ...run.events], 'object-create');
-  assert.equal(created.filter((event) => event.name === 'target').length, 1);
-  assert.ok(created.some((event) => event.name === 'io_ok'));
-  assert.ok(!created.some((event) => event.name === 'io_failed'));
-  assertLifecycleOnly([...initialEvents, ...run.events]);
+test('debug conserva fgets y fread parciales hasta EOF sticky sin volver a ejecutar la línea', () => {
+  const source = `#include <stdio.h>
+int main(void) {
+  char line[8] = { 0 };
+  char *line_result = fgets(line, sizeof line, stdin);
+  unsigned char rest[4] = { 0 };
+  size_t read_count = fread(rest, 1, sizeof rest, stdin);
+  int at_eof = feof(stdin);
+  int again = getchar();
+  return line_result == line && line[0] == 'a' && line[1] == 'b' && line[2] == 'c' &&
+      line[3] == '\\n' && line[4] == 0 && read_count == 2 && rest[0] == 'x' && rest[1] == 'y' &&
+      at_eof && again == EOF && feof(stdin) ? 0 : 1;
+}`;
+  const prepared = prepareProject(prepare, {
+    entry: 'debug-stdio-eof.c',
+    files: [{ name: 'debug-stdio-eof.c', source }],
+  });
+  const session = createDebugSession(prepared, { io: { stdin: 'abc' } });
+  const lineWaiting = advanceToInputNeeded(session);
+  assert.equal(lineWaiting.location.line, source.split('\n').findIndex((line) => line.includes('fgets(')) + 1);
+  session.appendStdin(new TextEncoder().encode('\nxy'));
+  const beforeFread = session.resume();
+  assert.equal(beforeFread.kind, 'paused', JSON.stringify(beforeFread));
+  const freadLine = source.split('\n').findIndex((line) => line.includes('fread(')) + 1;
+  const restDeclarationLine = source.split('\n').findIndex((line) => line.includes('unsigned char rest')) + 1;
+  assert.equal(beforeFread.location.line, restDeclarationLine);
+  const beforeRead = session.resume();
+  assert.equal(beforeRead.kind, 'paused', JSON.stringify(beforeRead));
+  assert.equal(beforeRead.location.line, freadLine);
+
+  const freadWaiting = session.resume();
+  assert.equal(freadWaiting.kind, 'input-needed');
+  assert.equal(freadWaiting.location.line, freadLine);
+  session.endStdin();
+  const afterFread = session.resume();
+  assert.equal(afterFread.kind, 'paused', JSON.stringify(afterFread));
+  assert.equal(afterFread.location.line, source.split('\n').findIndex((line) => line.includes('int at_eof')) + 1);
+  const run = runToTerminal(session);
+  assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
+  assert.equal(run.result.mainReturn, 0);
+});
+
+test('debug comparte maxIOBytes y conserva snapshots de stdout y stderr al limitar', () => {
+  const prepared = prepareProject(prepare, {
+    entry: 'debug-stdio-limit.c',
+    files: [{
+      name: 'debug-stdio-limit.c',
+      source: '#include <stdio.h>\nint main(void) { fprintf(stderr, "E"); printf("> "); int value = 0; scanf("%d", &value); return 0; }',
+    }],
+  });
+  const session = createDebugSession(prepared, { limits: { maxIOBytes: 3 } });
+  const waiting = advanceToInputNeeded(session);
+  assert.equal(decodeBytes(waiting.stdout), '> ');
+  assert.equal(decodeBytes(waiting.stderr), 'E');
+
+  session.appendStdin(new TextEncoder().encode('7\n'));
+  const limited = session.resume();
+  assert.equal(limited.kind, 'limit', JSON.stringify(limited));
+  assert.equal(limited.resource, 'maxIOBytes');
+  assert.equal(decodeBytes(limited.stdout), '> ');
+  assert.equal(decodeBytes(limited.stderr), 'E');
 });
 
 test('los límites de eventos conservan un prefijo y no mutan memoria tras agotarse', () => {
@@ -1166,7 +1398,7 @@ test('el límite de instrucciones no fabrica salidas de scope o frame', () => {
   assert.deepEqual(objects(run.events, 'object-delete'), []);
 });
 
-test('argv sigue configurable, mientras stdin debug desaparece y la sesión normal conserva su contrato', () => {
+test('debug conserva argv y stdin iniciales, y la sesión normal conserva su contrato interactivo', () => {
   const argvProgram = prepareProject(prepare, {
     entry: 'debug-argv.c',
     files: [{
@@ -1182,11 +1414,11 @@ test('argv sigue configurable, mientras stdin debug desaparece y la sesión norm
 
   const prepared = program('interactive-input.c');
   const debug = createDebugSession(prepared, { io: { stdin: '21\n' } });
-  assert.equal(typeof debug.appendStdin, 'undefined');
-  assert.equal(typeof debug.endStdin, 'undefined');
+  assert.equal(typeof debug.appendStdin, 'function');
+  assert.equal(typeof debug.endStdin, 'function');
   const debugRun = runToTerminal(debug);
   assert.equal(debugRun.result.kind, 'terminated', JSON.stringify(debugRun.result));
-  assert.equal(debugRun.result.mainReturn, 1);
+  assert.equal(debugRun.result.mainReturn, 0);
   assert.deepEqual(debugRun.result.stdout, new Uint8Array());
   assert.deepEqual(debugRun.result.stderr, new Uint8Array());
   assert.ok(!debugRun.steps.some((step) => step.kind === 'input-needed'));
@@ -1322,6 +1554,9 @@ test('la sesión debug inspecciona escalares automáticos vivos sin leer los no 
       pointerTargetResolution: 'allocation-identity-and-byte-offset-for-bounded-array-cells-and-struct-members',
   });
   assert.equal(CAPABILITIES.debugSession.automaticObjectPublication, 'declaration-execution');
+  assert.equal(CAPABILITIES.debugSession.externalIO, 'virtual-stdio');
+  assert.equal(CAPABILITIES.debugSession.interactiveStdin, true);
+  assert.equal(CAPABILITIES.debugSession.outputSnapshots, 'cumulative-per-progress');
   assert.deepEqual(CAPABILITIES.debugSession.objectOrigins, ['variable', 'parameter', 'compound-literal', 'heap', 'string-literal']);
   const prepared = program('scalar-inspection.c');
   const session = createDebugSession(prepared);
@@ -1398,6 +1633,28 @@ test('la sesión debug inspecciona escalares automáticos vivos sin leer los no 
   assert.equal(parameterCreate.frameId, adjustFrame.frameId);
   assert.deepEqual(session.inspectScalars(), [], 'el retorno normal cierra los scopes y sus objetos');
   assert.equal(session.currentLocation(), null);
+});
+
+test('los snapshots debug muestran binary80 exacto en escalares, arrays y campos serializables', () => {
+  const session = createDebugSession(program('long-double-values.c'));
+  const pause = pauseBeforeLine(session, 14);
+  assert.equal(pause.kind, 'paused');
+
+  const scalars = session.inspectScalars();
+  const arrays = session.inspectArrays();
+  const aggregates = session.inspectAggregates();
+  const precise = '0x1.0000000000000002p+0';
+  const negativeZero = '-0x0p+0';
+  assert.equal(scalars.find((scalar) => scalar.name === 'precise')?.displayValue, precise);
+  assert.equal(scalars.find((scalar) => scalar.name === 'negative_zero')?.displayValue, negativeZero);
+  assert.deepEqual(arrays.arrays.find((array) => array.name === 'values')?.elements.map(({ displayValue }) => displayValue), [
+    precise, negativeZero,
+  ]);
+  assert.equal(aggregates.aggregates.find((aggregate) => aggregate.name === 'box')?.members
+    .find((member) => member.name === 'precise')?.displayValue, precise);
+  const snapshots = { scalars, arrays, aggregates };
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshots)), snapshots,
+    'los DTO publican binary80 como texto sin filtrar valores internos no serializables');
 });
 
 test('los parámetros recursivos conservan origen, frame y scope hasta el retorno de cada activación', () => {

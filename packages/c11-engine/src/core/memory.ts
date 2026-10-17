@@ -1,4 +1,5 @@
 import { enforceLimit, failure } from './internal.ts';
+import { binary80Decode80, binary80Encode80, binary80Zero } from './binary80.ts';
 import type {
   AggregateDefinition, AggregateValue, CType, CValue, FunctionPointerValue, Location, ObjectPointerValue,
   ObjectReference, ObjectScalarValue, ObjectSnapshot, StorageDuration,
@@ -152,6 +153,58 @@ export class VirtualMemory {
     };
   }
 
+  reallocateRaw(pointer: ObjectPointerValue | null, bytes: number, at: Location): ObjectPointerValue | null {
+    if (!Number.isSafeInteger(bytes) || bytes < 0) failure('INVALID_ALLOCATION_SIZE', 'realloc requiere un tamaño entero seguro no negativo.', at);
+    if (pointer === null) return this.allocateRaw(bytes, at);
+
+    const oldRoot = this.roots.get(pointer.allocationId);
+    if (!this.canFree(pointer) || !oldRoot) {
+      failure('INVALID_REALLOC', 'realloc requiere null o el puntero base de un bloque heap vivo.', at);
+    }
+    if (bytes === 0) {
+      this.free(pointer, at);
+      return null;
+    }
+
+    const nextBytes = this.liveBytes - oldRoot.size + bytes;
+    enforceLimit('maxMemoryBytes', nextBytes, this.maxMemoryBytes, at);
+
+    const oldFirstHeapSlot = (oldRoot.virtualBase - VIRTUAL_HEAP_LAYOUT.start) / ALLOCATION_ALIGNMENT;
+    const reservation = this.heapReservationAt(bytes, oldRoot.virtualBase, oldFirstHeapSlot) ??
+      this.chooseHeapAddress(bytes, at, oldFirstHeapSlot);
+    if (!reservation) return null;
+
+    const copiedBytes = Math.min(oldRoot.size, bytes);
+    const representation = new Map(
+      [...oldRoot.representation].filter(([offset]) => offset >= 0 && offset < copiedBytes),
+    );
+    const pointerValues = new Map(
+      [...oldRoot.pointerValues]
+        .filter(([offset]) => offset >= 0 && offset + 8 <= copiedBytes)
+        .map(([offset, value]) => [offset, { ...value }] as const),
+    );
+
+    const newReference = this.allocateRoot(
+      arrayOf('unsigned char', bytes), bytes, 'heap', at, true,
+      nextBytes, reservation, oldFirstHeapSlot,
+    );
+    const newRoot = this.roots.get(newReference.allocationId);
+    if (!newRoot) failure('ENGINE_INTERNAL_ERROR', 'Falta la raíz de una reasignación heap recién creada.', at);
+    for (const [offset, byte] of representation) newRoot.representation.set(offset, byte);
+    for (const [offset, value] of pointerValues) newRoot.pointerValues.set(offset, value);
+
+    // A successful realloc creates a fresh C object identity even when its address stays put.
+    this.invalidateRoot(oldRoot.allocationId, at);
+    const newFirstHeapSlot = (newRoot.virtualBase - VIRTUAL_HEAP_LAYOUT.start) / ALLOCATION_ALIGNMENT;
+    this.heapExtents.set(newFirstHeapSlot, newFirstHeapSlot + newRoot.heapSlotCount!);
+    this.liveBytes = nextBytes;
+
+    return {
+      kind: 'object-pointer', allocationId: newRoot.allocationId, arrayId: newRoot.id,
+      byteOffset: newRoot.byteOffset, boundsStart: newRoot.byteOffset, boundsEnd: newRoot.byteOffset + bytes,
+    };
+  }
+
   release(ref: ObjectReference, at: Location): void {
     const node = this.nodeFor(ref, at);
     if (node.id !== node.allocationId) failure('INVALID_OBJECT_RELEASE', 'Solo se puede terminar la duración de un objeto raíz automático.', at);
@@ -163,7 +216,7 @@ export class VirtualMemory {
     if (pointer === null) return;
     const root = this.roots.get(pointer.allocationId);
     if (!root || !root.alive || root.duration !== 'heap' || !root.rawAllocation || pointer.byteOffset !== root.byteOffset || pointer.arrayId !== root.id) {
-      failure('INVALID_FREE', 'free requiere null o el puntero base de un bloque vivo reservado con malloc.', at);
+      failure('INVALID_FREE', 'free requiere null o el puntero base de un bloque heap vivo.', at);
     }
     this.invalidateRoot(root.allocationId, at);
   }
@@ -738,6 +791,7 @@ export class VirtualMemory {
     raw: boolean,
     reservedNextBytes?: number,
     heapReservation?: AddressReservation,
+    ignoredHeapFirstSlot?: bigint,
   ): ObjectReference {
     const nextBytes = reservedNextBytes ?? this.nextAllocationByteCount(size, at);
     const reservation = duration === 'heap'
@@ -757,6 +811,7 @@ export class VirtualMemory {
       const firstHeapSlot = (virtualBase - VIRTUAL_HEAP_LAYOUT.start) / ALLOCATION_ALIGNMENT;
       const endHeapSlot = firstHeapSlot + reservation.heapSlotCount;
       for (const [occupiedStart, occupiedEnd] of this.heapExtents) {
+        if (occupiedStart === ignoredHeapFirstSlot) continue;
         if (firstHeapSlot < occupiedEnd && occupiedStart < endHeapSlot) {
           failure('ENGINE_INTERNAL_ERROR', 'El allocator seleccionó un intervalo heap ocupado.', at);
         }
@@ -836,7 +891,30 @@ export class VirtualMemory {
   }
 
   /** Choose a random aligned start with bounded probes, then scan live extents once as fallback. */
-  private chooseHeapAddress(size: number, at: Location): AddressReservation | undefined {
+  private heapReservationAt(
+    size: number,
+    virtualBase: bigint,
+    ignoredFirstSlot?: bigint,
+  ): AddressReservation | undefined {
+    const heapRange = VIRTUAL_MEMORY_LAYOUT.heapAddressRange;
+    const totalSlots = (heapRange.endExclusive - heapRange.start) / ALLOCATION_ALIGNMENT;
+    const slotCount = this.reservationSlotCount(size);
+    if (virtualBase < heapRange.start || virtualBase % ALLOCATION_ALIGNMENT !== 0n) return undefined;
+    const first = (virtualBase - heapRange.start) / ALLOCATION_ALIGNMENT;
+    if (first + slotCount > totalSlots) return undefined;
+    const end = first + slotCount;
+    for (const [occupiedStart, occupiedEnd] of this.heapExtents) {
+      if (occupiedStart === ignoredFirstSlot) continue;
+      if (first < occupiedEnd && occupiedStart < end) return undefined;
+    }
+    return {
+      virtualBase,
+      endExclusive: heapRange.start + end * ALLOCATION_ALIGNMENT,
+      heapSlotCount: slotCount,
+    };
+  }
+
+  private chooseHeapAddress(size: number, at: Location, ignoredFirstSlot?: bigint): AddressReservation | undefined {
     const heapRange = VIRTUAL_MEMORY_LAYOUT.heapAddressRange;
     const totalSlots = (heapRange.endExclusive - heapRange.start) / ALLOCATION_ALIGNMENT;
     const slotCount = this.reservationSlotCount(size);
@@ -850,9 +928,11 @@ export class VirtualMemory {
       // Slot counts in the configured heap region stay exactly representable as Number.
       return BigInt(Math.floor(random * Number(latestStart + 1n)));
     };
+    const occupiedExtents = [...this.heapExtents.entries()]
+      .filter(([start]) => start !== ignoredFirstSlot);
     const fits = (first: bigint): boolean => {
       const end = first + slotCount;
-      for (const [occupiedStart, occupiedEnd] of this.heapExtents) {
+      for (const [occupiedStart, occupiedEnd] of occupiedExtents) {
         if (first < occupiedEnd && occupiedStart < end) return false;
       }
       return true;
@@ -867,7 +947,7 @@ export class VirtualMemory {
 
     // A sorted list of extents bounds this fallback by live allocation count,
     // rather than searching the enormous virtual address interval one slot at a time.
-    const occupied = [...this.heapExtents.entries()]
+    const occupied = occupiedExtents
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
     let candidate = 0n;
     for (const [start, end] of occupied) {
@@ -1159,6 +1239,7 @@ export class VirtualMemory {
 
   private zeroValue(type: CType, at: Location): ObjectScalarValue {
     if (isPointer(type)) return null;
+    if (type === 'long double') return binary80Zero();
     if (isScalar(type)) return type === 'float' || type === 'double' ? 0 : 0n;
     if (isFunction(type)) return { kind: 'function-pointer', functionIndex: null } satisfies FunctionPointerValue;
     failure('INVALID_ZERO_INITIALIZER', 'El tipo no admite inicialización cero escalar.', at);
@@ -1337,6 +1418,13 @@ export class VirtualMemory {
 
   private encodeScalar(type: CType, value: ObjectScalarValue, at: Location): number[] {
     const size = sizeOfType(type, this.aggregates, at);
+    if (type === 'long double') {
+      if (typeof value !== 'object' || value === null || value.kind !== 'binary80') {
+        failure('TYPE_ERROR', 'long double requiere un valor binary80.', at);
+      }
+      const payload = binary80Encode80(value);
+      return Array.from({ length: size }, (_, index) => payload[index] ?? 0);
+    }
     if (isPointer(type)) {
       let address = 0n;
       if (value !== null) {
@@ -1367,6 +1455,7 @@ export class VirtualMemory {
   }
 
   private decodeScalar(type: CType, bytes: number[], at: Location): ObjectScalarValue {
+    if (type === 'long double') return binary80Decode80(bytes.slice(0, 10));
     if (isPointer(type)) {
       const address = this.fromBytes(bytes);
       if (address === 0n) return null;

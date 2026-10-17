@@ -1,9 +1,10 @@
 import type { Diagnostic, EngineMetrics, LimitResource, PreparedProgram } from './types.ts';
+import type { Binary80Value } from './binary80.ts';
 
 export interface Location { file: string; line: number; column: number }
 export interface Token extends Location { text: string; kind: 'identifier' | 'integer' | 'floating' | 'character' | 'string' | 'symbol' | 'eof' }
 
-export type ScalarCType = '_Bool' | 'char' | 'signed char' | 'unsigned char' | 'short' | 'unsigned short' | 'int' | 'unsigned int' | 'long' | 'unsigned long' | 'long long' | 'unsigned long long' | 'float' | 'double' | 'void';
+export type ScalarCType = '_Bool' | 'char' | 'signed char' | 'unsigned char' | 'short' | 'unsigned short' | 'int' | 'unsigned int' | 'long' | 'unsigned long' | 'long long' | 'unsigned long long' | 'float' | 'double' | 'long double' | 'void';
 export interface PointerCType {
   readonly kind: 'pointer';
   readonly base: CType;
@@ -37,7 +38,7 @@ export interface ObjectPointerValue {
   readonly boundsEnd: number;
 }
 export interface FunctionPointerValue { readonly kind: 'function-pointer'; readonly functionIndex: number | null }
-export type ObjectScalarValue = bigint | number | ObjectPointerValue | FunctionPointerValue | null;
+export type ObjectScalarValue = bigint | number | Binary80Value | ObjectPointerValue | FunctionPointerValue | null;
 export interface ScalarObjectValue { readonly initialized: boolean; readonly value?: ObjectScalarValue }
 export interface ObjectSnapshot extends ScalarObjectValue {
   /** True means every not-explicitly-snapshotted scalar subobject is zero-initialized. */
@@ -47,7 +48,7 @@ export interface ObjectSnapshot extends ScalarObjectValue {
   readonly activeMember?: number;
 }
 export interface AggregateValue { readonly kind: 'aggregate-value'; readonly snapshot: ObjectSnapshot }
-export type CValueData = bigint | number | ObjectPointerValue | FunctionPointerValue | AggregateValue | null;
+export type CValueData = bigint | number | Binary80Value | ObjectPointerValue | FunctionPointerValue | AggregateValue | null;
 export interface CValue { type: CType; value: CValueData }
 
 export interface ObjectReference {

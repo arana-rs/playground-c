@@ -52,13 +52,19 @@ export interface DebugLimitResult extends ExecutionOutput {
   readonly diagnostics: readonly Diagnostic[];
   readonly metrics: EngineMetrics;
 }
-export interface DebugPausedResult {
+export interface DebugPausedResult extends ExecutionOutput {
   readonly kind: 'paused';
   /** Source line of the next instruction visit, before it executes. */
   readonly location: DebugSourceLocation;
   readonly metrics: EngineMetrics;
 }
-export type DebugProgress = DebugPausedResult | ExecuteResult | DebugLimitResult;
+export interface DebugInputNeededResult extends ExecutionOutput {
+  /** Source instruction currently suspended while waiting for stdin. */
+  readonly kind: 'input-needed';
+  readonly location: DebugSourceLocation;
+  readonly metrics: EngineMetrics;
+}
+export type DebugProgress = DebugPausedResult | DebugInputNeededResult | ExecuteResult | DebugLimitResult;
 /** A live VM session for interactive stdin. Batch callers should use execute(). */
 export interface ExecutionSession {
   /** Run until termination, failure, a limit, or the next request for stdin. */
@@ -311,7 +317,12 @@ export interface DebugSessionOptions {
   readonly maxValueChars?: number;
 }
 export interface DebugExecutionSession {
+  /** Run one source-line visit, or continue a suspended visit until its next pause. */
   resume(): DebugProgress;
+  /** Append copied bytes after resume() returned input-needed. */
+  appendStdin(bytes: Uint8Array): void;
+  /** Close stdin; buffered bytes are consumed first and EOF remains sticky. */
+  endStdin(): void;
   /** Location of the next source instruction visit, or null after termination/setup failure. */
   currentLocation(): DebugSourceLocation | null;
   /** Return events produced since the previous drain, in sequence order. */
@@ -334,14 +345,17 @@ export const ENGINE_VERSION = '0.1.0';
 export const TARGET_PROFILE = Object.freeze({
   id: 'x86_64-linux-lp64' as const, endianness: 'little', charBits: 8, charSigned: true,
   boolBytes: 1, shortBits: 16, intBits: 32, intBytes: 4, intAlignment: 4,
-  pointerBits: 64, pointerBytes: 8, pointerAlignment: 8, longBits: 64, longLongBits: 64, floatBits: 32, doubleBits: 64,
+  pointerBits: 64, pointerBytes: 8, pointerAlignment: 8, longBits: 64, longLongBits: 64,
+  floatBits: 32, doubleBits: 64,
+  longDoubleBits: 80, longDoubleStorageBytes: 16, longDoubleAlignment: 16,
+  longDoubleSignificandBits: 64, longDoubleExponentBits: 15, longDoubleRepresentation: 'x87-binary80',
   integerRepresentation: 'twos-complement', signedNarrowing: 'wrap-twos-complement',
   signedRightShift: 'arithmetic', floatEvaluationMethod: 0,
 });
 export const CAPABILITIES = Object.freeze({
   phase: 'P4', cStandard: 'C11', completeC11: false, entry: 'int main(void), int main(), or int main(int, char **)',
   integerTypes: Object.freeze(['_Bool', 'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'long', 'unsigned long', 'long long', 'unsigned long long']),
-  floatingTypes: Object.freeze(['float', 'double']),
+  floatingTypes: Object.freeze(['float', 'double', 'long double']),
   pointerTypes: Object.freeze(['object-pointers', 'function-pointers', 'void-pointer-conversions', 'null-pointer-constants']),
   objectTypes: Object.freeze(['arrays', 'structs', 'unions', 'compound-literals', 'file-scope-objects']),
   enumerations: 'int-compatible-constants-with-integer-constant-expressions-in-int-range',
@@ -349,12 +363,13 @@ export const CAPABILITIES = Object.freeze({
   operators: Object.freeze(['+', '-', '*', '/', '%', '<<', '>>', '&', '^', '|', '~', '!', '<', '<=', '>', '>=', '==', '!=', '&&', '||', '?:', ',', '=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '^=', '|=', '++', '--', 'cast', 'sizeof', '[]', '.', '->', '&address', 'pointer-difference']),
   statements: Object.freeze(['block', 'declaration', 'expression', 'return', 'empty', 'if', 'switch', 'while', 'do', 'for', 'break', 'continue', 'goto', 'label']),
   functions: 'typed-prototypes-variadic-functions-recursion-and-function-pointers', library: 'partial', preprocessor: 'c11-translation-phases-and-macros-with-virtual-project-includes',
-  virtualHeaders: Object.freeze(['assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h', 'limits.h', 'math.h', 'stdarg.h', 'stdbool.h', 'stddef.h', 'stdint.h', 'stdio.h', 'stdlib.h', 'string.h']),
+  virtualHeaders: Object.freeze(['assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h', 'limits.h', 'math.h', 'stdarg.h', 'stdbool.h', 'stddef.h', 'stdint.h', 'stdio.h', 'stdlib.h', 'string.h', 'wchar.h']),
   multipleFiles: true,
   translationUnits: true,
   standardMacros: Object.freeze(['__FILE__', '__LINE__', '__STDC__', '__STDC_VERSION__', '__STDC_HOSTED__']),
   stddefMacros: Object.freeze(['NULL']),
-  stddefTypes: Object.freeze(['size_t', 'ptrdiff_t']),
+  stddefTypes: Object.freeze(['size_t', 'ptrdiff_t', 'wchar_t']),
+  wideCharacterTypes: Object.freeze(['wchar_t', 'wint_t']),
   stdlibFunctions: Object.freeze([...HEAP_ALLOCATOR_BUILTINS, 'free']),
   preparedProgram: Object.freeze({ heapAllocationHint: 'hasHeapAllocationCalls: resolved built-in calls across all function bodies' }),
   virtualMemory: Object.freeze({
@@ -384,7 +399,8 @@ export const CAPABILITIES = Object.freeze({
   stdioFunctions: Object.freeze(['printf', 'fprintf', 'sprintf', 'snprintf', 'scanf', 'fscanf', 'sscanf', 'fopen', 'fclose', 'fflush', 'fgetc', 'getc', 'getchar', 'fgets', 'fputc', 'putc', 'putchar', 'fputs', 'puts', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'ungetc', 'feof', 'ferror', 'clearerr', 'perror']),
   interactiveStdinFunctions: Object.freeze(['scanf', 'fscanf', 'getchar', 'getc', 'fgetc', 'fgets', 'fread']),
   debugSession: Object.freeze({
-    lifecycleEvents: true, stepGranularity: 'source-line-visits', externalIO: 'discarded',
+    lifecycleEvents: true, stepGranularity: 'source-line-visits', externalIO: 'virtual-stdio',
+    interactiveStdin: true, outputSnapshots: 'cumulative-per-progress',
     automaticObjectPublication: 'declaration-execution',
     objectOrigins: Object.freeze(['variable', 'parameter', 'compound-literal', 'heap', 'string-literal']),
     values: Object.freeze({
@@ -398,7 +414,7 @@ export const CAPABILITIES = Object.freeze({
     }),
     history: false, reverseExecution: false,
   }),
-  stdioFormatLimitations: Object.freeze(['printf %a/%A', 'wide-character %lc/%ls', 'long-double conversions']),
+  stdioFormatLimitations: Object.freeze(['scanf wide scanset %l[', 'printf floating precision cap: 100 decimal / 100000 hexadecimal digits']),
   stringFunctions: Object.freeze(['memcpy', 'memmove', 'memset', 'memcmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp', 'strchr', 'strrchr', 'strspn', 'strcspn', 'strpbrk', 'strstr', 'strtok', 'strlen', 'strerror']),
   ctypeFunctions: Object.freeze(['isalnum', 'isalpha', 'isblank', 'iscntrl', 'isdigit', 'isgraph', 'islower', 'isprint', 'ispunct', 'isspace', 'isupper', 'isxdigit', 'tolower', 'toupper']),
   inttypesFunctions: Object.freeze(['imaxabs', 'imaxdiv', 'strtoimax', 'strtoumax']),

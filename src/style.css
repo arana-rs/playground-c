@@ -671,6 +671,7 @@ body,
 }
 
 .console-eof-button,
+.console-stop-button,
 .console-diagnostics-copy-button {
   --foreground: var(--dim);
   --text-secondary: var(--dim);
@@ -695,6 +696,13 @@ body,
 }
 
 .console-diagnostics-copy-button {
+  min-width: 0;
+  font-family: var(--ui);
+  font-weight: 400;
+  font-size: 10px;
+}
+
+.console-stop-button {
   min-width: 0;
   font-family: var(--ui);
   font-weight: 400;
@@ -935,6 +943,38 @@ body,
   cursor: pointer;
 }
 
+.memory-viewer-io-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 22px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  color: var(--dim);
+  font-family: var(--ui);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.memory-viewer-io-toggle[data-disabled="true"] {
+  color: var(--faint);
+  cursor: default;
+}
+
+.memory-viewer-io-toggle input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: inherit;
+}
+
+.memory-viewer-io-toggle input:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .memory-viewer-mode-select:hover {
   background-color: var(--bg3);
 }
@@ -1076,6 +1116,12 @@ body,
   border-top: 1px solid var(--line);
   background: var(--bg);
   scrollbar-gutter: stable;
+}
+
+.memory-viewer-console {
+  flex: 0 1 148px;
+  min-height: 84px;
+  max-height: 22dvh;
 }
 
 .memory-viewer-region + .memory-viewer-region {

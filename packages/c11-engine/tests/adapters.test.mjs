@@ -104,19 +104,16 @@ test('a browser read error is distinct from a preparation failure', async () => 
     assertMetrics(result);
 });
 
-test('unsupported language features preserve preparation diagnostics and location', async (t) => {
-    const source = 'int main(void) {\n    long double value = 1.0L;\n    return 0;\n}';
-    const path = await temporaryFile(t, source, 'unsupported.c');
+test('browser and Node adapters execute binary80 long-double programs', async (t) => {
+    const source = 'int main(void) {\n    long double value = 1.0L + 0x1p-63L;\n    return value > 1.0L;\n}';
+    const path = await temporaryFile(t, source, 'long-double.c');
     for (const result of await Promise.all([
-        runBrowserFile(new File([source], 'unsupported.c')),
+        runBrowserFile(new File([source], 'long-double.c')),
         runNodeFile(path),
     ])) {
-        assert.equal(result.kind, 'prepare-error');
-        assert.ok(result.diagnostics.length > 0);
-        assert.equal(result.diagnostics[0].file, 'unsupported.c');
-        assert.equal(result.diagnostics[0].line, 2);
-        assert.equal(result.metrics.executeMs, 0);
-        assert.equal('exitCode' in result, false);
+        assert.equal(result.kind, 'terminated');
+        assert.equal(result.mainReturn, 1);
+        assert.equal(result.exitCode, 1);
         assertMetrics(result);
     }
 });

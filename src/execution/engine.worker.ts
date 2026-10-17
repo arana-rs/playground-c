@@ -4,6 +4,7 @@ import type { RunMetrics, RunResult } from '@playground/c11-engine/browser';
 import { RUN_DIAGNOSTIC_STAGE } from './diagnostics.ts';
 import type { RunDiagnosticMetrics, RunDiagnosticStage, RunWorkerProgress } from './diagnostics.ts';
 import type { RunRequest, RunResponse, WorkerCommand } from './protocol.ts';
+import { OutputSnapshotDeltas } from './outputSnapshotDeltas.ts';
 
 interface WorkerRun {
   jobId: number;
@@ -12,9 +13,7 @@ interface WorkerRun {
   session: ReturnType<typeof createExecutionSession> | null;
   waitingRequestId: number | null;
   nextRequestId: number;
-  nextOutputSequence: number;
-  stdoutOffset: number;
-  stderrOffset: number;
+  outputDeltas: OutputSnapshotDeltas;
   inputEnded: boolean;
   sourceLineCount: number | null;
   prepareMs: number | null;
@@ -112,13 +111,8 @@ function reportStartupFailure(jobId: number, error: unknown) {
 }
 
 function emitOutput(run: WorkerRun, stream: 'stdout' | 'stderr', snapshot: Uint8Array) {
-  const offsetKey = stream === 'stdout' ? 'stdoutOffset' : 'stderrOffset';
-  const offset = run[offsetKey];
-  if (snapshot.length < offset) throw new Error(`El snapshot de ${stream} se redujo durante la ejecución.`);
-  if (snapshot.length === offset) return;
-  const chunk = snapshot.slice(offset);
-  run[offsetKey] = snapshot.length;
-  post({ type: 'output', jobId: run.jobId, sequence: ++run.nextOutputSequence, stream, chunk });
+  const delta = run.outputDeltas.fromSnapshot(stream, snapshot);
+  if (delta) post({ type: 'output', jobId: run.jobId, ...delta });
 }
 
 function resume(run: WorkerRun) {
@@ -167,9 +161,7 @@ async function start(request: RunRequest) {
     session: null,
     waitingRequestId: null,
     nextRequestId: 0,
-    nextOutputSequence: 0,
-    stdoutOffset: 0,
-    stderrOffset: 0,
+    outputDeltas: new OutputSnapshotDeltas(),
     inputEnded: false,
     sourceLineCount: null,
     prepareMs: null,

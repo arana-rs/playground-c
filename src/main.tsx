@@ -1,8 +1,9 @@
 import { StrictMode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, UIEvent as ReactUIEvent } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { Button, ButtonSpinner } from './components/arc/button/button.tsx';
+import { ConsolePanel } from './components/ConsolePanel.tsx';
 import { ThemeSwitch } from './components/arc/theme-switch/theme-switch.tsx';
 import { SelectedFileTab } from './components/SelectedFileTab.tsx';
 import { CodeEditor } from './editor/CodeEditor.tsx';
@@ -155,12 +156,7 @@ function Playground() {
   const consoleResizerRef = useRef<HTMLDivElement>(null);
   const consolePanelRef = useRef<HTMLElement>(null);
   const shouldFocusConsoleAfterRun = useRef(false);
-  const consoleOutputRef = useRef<HTMLPreElement>(null);
-  const stdinRef = useRef<HTMLInputElement>(null);
-  const previousInputRequest = useRef<number | null>(null);
-  const previousConsoleVisible = useRef(consoleVisible);
-  const shouldAutoScrollConsole = useRef(true);
-  const [stdinDraft, setStdinDraft] = useState('');
+  const runConsoleResetKey = useRef(0);
   const consoleHeightBounds = getConsoleHeightBounds(viewportRect.height, keyboardViewportActive, consoleVisible);
   const consoleHeight = getEffectiveConsoleHeight(
     preferredConsoleHeight,
@@ -173,7 +169,6 @@ function Playground() {
   const consoleStatus = getConsoleStatus(state);
   const inputRequestId = state.status === 'running' ? state.inputRequestId : null;
   const consoleSegments = useMemo(() => formatConsoleSegments(state), [state]);
-  const consoleText = useMemo(() => consoleSegments.map(segment => segment.text).join(''), [consoleSegments]);
 
   useLayoutEffect(() => {
     requestedColorTheme.current = colorTheme;
@@ -311,7 +306,8 @@ function Playground() {
       referenceWidth: baseline.width,
       referenceHeight: baseline.height,
       scale: nextViewport.scale,
-      stdinFocused: document.activeElement === stdinRef.current,
+      stdinFocused: document.activeElement instanceof HTMLElement
+        && document.activeElement.classList.contains('console-stdin'),
     };
 
     if (keyboardViewportActiveRef.current) {
@@ -353,10 +349,9 @@ function Playground() {
   }, [cancelPendingConsoleResize]);
 
   const onRun = useCallback(() => {
-    setStdinDraft('');
-    shouldAutoScrollConsole.current = true;
     if (isRunning) stop();
     else {
+      runConsoleResetKey.current++;
       shouldFocusConsoleAfterRun.current = true;
       setConsoleVisible(true);
       run(new File([ref.current?.value ?? ''], 'main.c', { type: 'text/x-c' }));
@@ -373,35 +368,6 @@ function Playground() {
       memoryViewerButtonRef.current?.focus({ preventScroll: true });
     });
   }, []);
-
-  function onStdinKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
-    const nativeEvent = event.nativeEvent;
-    if (event.key !== 'Enter' || event.repeat || nativeEvent.isComposing || nativeEvent.keyCode === 229) return;
-    if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
-    event.preventDefault();
-    if (sendStdinLine(stdinDraft)) setStdinDraft('');
-  }
-
-  function onConsoleOutputScroll(event: ReactUIEvent<HTMLPreElement>) {
-    const output = event.currentTarget;
-    shouldAutoScrollConsole.current = output.scrollHeight - output.clientHeight - output.scrollTop <= 16;
-  }
-
-  useLayoutEffect(() => {
-    const newRequest = inputRequestId !== null && inputRequestId !== previousInputRequest.current;
-    const reopenedWhileWaiting = consoleVisible && !previousConsoleVisible.current && inputRequestId !== null;
-    if (consoleVisible && (newRequest || reopenedWhileWaiting)) {
-      stdinRef.current?.focus({ preventScroll: true });
-    }
-    previousInputRequest.current = inputRequestId;
-    previousConsoleVisible.current = consoleVisible;
-  }, [consoleVisible, inputRequestId]);
-
-  useLayoutEffect(() => {
-    const output = consoleOutputRef.current;
-    if (!output || !shouldAutoScrollConsole.current) return;
-    output.scrollTop = output.scrollHeight;
-  }, [consoleText, inputRequestId, stdinDraft, consoleVisible, consoleHeight, viewportRect.height]);
 
   useLayoutEffect(() => {
     if (!shouldFocusConsoleAfterRun.current || !consoleVisible || !isRunning) return;
@@ -613,82 +579,45 @@ function Playground() {
         onLostPointerCapture={event => finishConsoleResize(event, false)}
         onKeyDown={onConsoleResizeKeyDown}
       />
-      <section
+      <ConsolePanel
         ref={consolePanelRef}
         id="console-panel"
-        className={`console${inputRequestId !== null ? ' console-waiting' : ''}`}
-        aria-label="Consola"
-        aria-keyshortcuts="Control+Backquote"
-        aria-hidden={!consoleVisible}
+        ariaKeyshortcuts="Control+Backquote"
         hidden={!consoleVisible}
-        tabIndex={-1}
-      >
-        <div className="console-label">
-          <span>console</span>
-          <div className="console-actions">
-            {inputRequestId !== null && (
-              <Button
-                className="console-eof-button"
-                variant="ghost"
-                size="sm"
-                type="button"
-                aria-label="Enviar fin de entrada (EOF)"
-                onClick={sendStdinEOF}
-              >
-                EOF
-              </Button>
-            )}
-            {timeoutReport && (
-              <Button
-                className={`console-diagnostics-copy-button${copyFeedback ? ` is-${copyFeedback}` : ''}`}
-                variant="ghost"
-                size="sm"
-                type="button"
-                aria-label="Copiar diagnóstico de timeout"
-                title={copyFeedback === 'failed'
-                  ? 'No se pudo copiar. Pulsa para volver a intentarlo.'
-                  : copyFeedback === 'copied' ? 'Diagnóstico copiado al portapapeles.' : 'Copiar diagnóstico de timeout'}
-                onClick={copyTimeoutReport}
-              >
-                {copyFeedback === 'copied' ? 'Copiado' : copyFeedback === 'failed' ? 'Falló' : 'Copiar diagnóstico'}
-              </Button>
-            )}
-            {timeoutReport && (
-              <span className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
-                {copyFeedback === 'copied'
-                  ? 'Diagnóstico copiado al portapapeles.'
-                  : copyFeedback === 'failed' ? 'No se pudo copiar el diagnóstico. Pulsa el botón para volver a intentarlo.' : ''}
-              </span>
-            )}
-            <span className={`console-status console-status-${consoleStatus.tone}`} role="status" aria-live="polite" aria-atomic="true">
-              {consoleStatus.label}
+        visible={consoleVisible}
+        inputResetKey={runConsoleResetKey.current}
+        statusLabel={consoleStatus.label}
+        statusTone={consoleStatus.tone}
+        segments={consoleSegments}
+        inputRequestId={inputRequestId}
+        onSendStdinLine={sendStdinLine}
+        onSendStdinEOF={sendStdinEOF}
+        actions={timeoutReport && (
+          <>
+            <Button
+              className={`console-diagnostics-copy-button${copyFeedback ? ` is-${copyFeedback}` : ''}`}
+              variant="ghost"
+              size="sm"
+              type="button"
+              aria-label="Copiar diagnóstico de timeout"
+              title={copyFeedback === 'failed'
+                ? 'No se pudo copiar. Pulsa para volver a intentarlo.'
+                : copyFeedback === 'copied' ? 'Diagnóstico copiado al portapapeles.' : 'Copiar diagnóstico de timeout'}
+              onClick={copyTimeoutReport}
+            >
+              {copyFeedback === 'copied' ? 'Copiado' : copyFeedback === 'failed' ? 'Falló' : 'Copiar diagnóstico'}
+            </Button>
+            <span className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+              {copyFeedback === 'copied'
+                ? 'Diagnóstico copiado al portapapeles.'
+                : copyFeedback === 'failed' ? 'No se pudo copiar el diagnóstico. Pulsa el botón para volver a intentarlo.' : ''}
             </span>
-          </div>
-        </div>
-        <pre ref={consoleOutputRef} className="console-output" role="log" aria-live="off" aria-atomic="true" onScroll={onConsoleOutputScroll}>
-          {consoleSegments.map((segment, index) => (
-            <span key={index} className={`console-output-${segment.tone}`}>{segment.text}</span>
-          ))}
-          {inputRequestId !== null && (
-            <input
-              ref={stdinRef}
-              className="console-stdin"
-              aria-label="Entrada para el programa C"
-              aria-description="Escribe una línea y pulsa Enter para enviarla."
-              aria-keyshortcuts="Enter"
-              autoComplete="off"
-              autoCapitalize="off"
-              spellCheck={false}
-              placeholder="..."
-              value={stdinDraft}
-              onChange={event => setStdinDraft(event.currentTarget.value)}
-              onKeyDown={onStdinKeyDown}
-              onFocus={() => measureVisibleViewport()}
-              onBlur={() => measureVisibleViewport()}
-            />
-          )}
-        </pre>
-      </section>
+          </>
+        )}
+        scrollKey={`${consoleHeight}:${viewportRect.height}`}
+        onInputFocus={measureVisibleViewport}
+        onInputBlur={measureVisibleViewport}
+      />
       <footer className="footer">
         <div className="footer-links">
           <a
