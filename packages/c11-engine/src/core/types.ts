@@ -1,4 +1,6 @@
-import { HEAP_ALLOCATOR_BUILTINS } from './allocator-builtins.ts';
+import { STDIO_FUNCTIONS, STDIO_MACROS } from './stdio-metadata.ts';
+import { ERRNO_MACROS } from './errno-metadata.ts';
+import { STDLIB_FUNCTIONS, STDLIB_MACROS, TIME_FUNCTIONS, TIME_MACROS } from './stdlib-time-metadata.ts';
 
 export interface SourceFile { readonly name: string; readonly source: string }
 /** A virtual project. `files` contains translation units and headers; only names
@@ -24,6 +26,11 @@ export interface ExecuteIOOptions {
   readonly files?: readonly VirtualInputFile[];
 }
 export interface ExecuteOptions { limits?: Partial<ExecuteLimits>; io?: ExecuteIOOptions }
+/** Host services that vary per VM session and must stay outside structured-clone options. */
+export interface ExecutionRuntimeServices {
+  /** Epoch milliseconds as an integer; queried once by each `time()` or `timespec_get()` call. */
+  readonly wallClock?: { readonly nowEpochMilliseconds: () => bigint };
+}
 export interface EngineMetrics { prepareMs: number; executeMs: number; sourceChars: number; tokenCount: number; preprocessSteps: number; instructionCount: number; peakMemoryBytes: number }
 export interface PreparedProgram {
   readonly version: string;
@@ -383,9 +390,10 @@ export const CAPABILITIES = Object.freeze({
   floatingTypes: Object.freeze(['float', 'double', 'long double']),
   pointerTypes: Object.freeze(['object-pointers', 'function-pointers', 'void-pointer-conversions', 'null-pointer-constants']),
   objectTypes: Object.freeze(['arrays', 'structs', 'unions', 'compound-literals', 'file-scope-objects']),
-  enumerations: 'int-compatible-constants-with-integer-constant-expressions-in-int-range',
+  enumerations: 'distinct-enum-types-with-int-compatible-representation-int-promotions-int-enumerators-and-integer-constant-expressions-in-int-range',
   aggregateMembers: Object.freeze(['named', 'anonymous-struct', 'anonymous-union', 'bit-fields', 'flexible-array-members']),
   qualifiers: Object.freeze(['const', 'volatile', 'restrict']),
+  restrictProfile: 'observed dynamic diagnostics cover independent restrict bases and modified restrict/plain overlaps; same-chain derivations, read-only/no-access cases and disjoint subobjects are accepted; bytewise/library overlap is not analyzed and unknown provenance is conservative',
   operators: Object.freeze(['+', '-', '*', '/', '%', '<<', '>>', '&', '^', '|', '~', '!', '<', '<=', '>', '>=', '==', '!=', '&&', '||', '?:', ',', '=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '^=', '|=', '++', '--', 'cast', 'sizeof', '[]', '.', '->', '&address', 'pointer-difference', '_Generic', '_Alignas', '_Alignof', '_Static_assert', 'offsetof']),
   statements: Object.freeze(['block', 'declaration', 'expression', 'return', 'empty', 'if', 'switch', 'while', 'do', 'for', 'break', 'continue', 'goto', 'label', 'static-assert']),
   genericSelection: true,
@@ -396,15 +404,20 @@ export const CAPABILITIES = Object.freeze({
   blockExternDeclarations: true,
   externalInlineSemantics: 'c11',
   functions: 'typed-prototypes-variadic-functions-recursion-and-function-pointers', library: 'partial', preprocessor: 'c11-translation-phases-and-macros-with-virtual-project-includes',
-  virtualHeaders: Object.freeze(['assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h', 'limits.h', 'math.h', 'stdarg.h', 'stdalign.h', 'stdbool.h', 'stddef.h', 'stdint.h', 'stdio.h', 'stdlib.h', 'string.h', 'wchar.h']),
+  virtualHeaders: Object.freeze(['assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h', 'limits.h', 'math.h', 'stdarg.h', 'stdalign.h', 'stdbool.h', 'stddef.h', 'stdint.h', 'stdio.h', 'stdlib.h', 'string.h', 'time.h']),
   multipleFiles: true,
   translationUnits: true,
   standardMacros: Object.freeze(['__FILE__', '__LINE__', '__STDC__', '__STDC_VERSION__', '__STDC_HOSTED__']),
   stdalignMacros: Object.freeze(['alignas', 'alignof', '__alignas_is_defined', '__alignof_is_defined']),
   stddefMacros: Object.freeze(['NULL', 'offsetof']),
-  stddefTypes: Object.freeze(['size_t', 'ptrdiff_t', 'wchar_t', 'max_align_t']),
-  wideCharacterTypes: Object.freeze(['wchar_t', 'wint_t']),
-  stdlibFunctions: Object.freeze([...HEAP_ALLOCATOR_BUILTINS, 'free']),
+  stddefTypes: Object.freeze(['size_t', 'ptrdiff_t', 'max_align_t']),
+  errnoMacros: Object.freeze(Object.keys(ERRNO_MACROS)),
+  stdlibFunctions: STDLIB_FUNCTIONS,
+  stdlibMacros: STDLIB_MACROS,
+  stdlibProfile: 'C locale; MB_CUR_MAX=1; virtual environment is empty; system(NULL)=0 and system(nonnull) returns ENOSYS; rand is deterministic per execution',
+  timeFunctions: TIME_FUNCTIONS,
+  timeMacros: TIME_MACROS,
+  timeProfile: 'UTC only; deterministic core default with optional per-call host wall clock; localtime equals gmtime; clock ticks are VM instructions × 1000',
   preparedProgram: Object.freeze({ heapAllocationHint: 'hasHeapAllocationCalls: resolved built-in calls across all function bodies' }),
   virtualMemory: Object.freeze({
     alignmentBytes: VIRTUAL_MEMORY_LAYOUT.alignmentBytes,
@@ -430,7 +443,10 @@ export const CAPABILITIES = Object.freeze({
       randomization: 'non-cryptographic per allocation',
     }),
   }),
-  stdioFunctions: Object.freeze(['printf', 'fprintf', 'sprintf', 'snprintf', 'scanf', 'fscanf', 'sscanf', 'fopen', 'fclose', 'fflush', 'fgetc', 'getc', 'getchar', 'fgets', 'fputc', 'putc', 'putchar', 'fputs', 'puts', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'ungetc', 'feof', 'ferror', 'clearerr', 'perror']),
+  stdioFunctions: STDIO_FUNCTIONS,
+  stdioMacros: STDIO_MACROS,
+  stdioBufferingProfile: 'synchronous-output; setvbuf accepts _IONBF and rejects _IOFBF/_IOLBF; setbuf is a no-op',
+  stdioFileProfile: 'virtual files only; tmpfile is deleted on close or termination; tmpnam uses a per-execution reusable buffer; fpos_t is long byte offset',
   interactiveStdinFunctions: Object.freeze(['scanf', 'fscanf', 'getchar', 'getc', 'fgetc', 'fgets', 'fread']),
   debugSession: Object.freeze({
     lifecycleEvents: true, stepGranularity: 'source-line-visits', externalIO: 'virtual-stdio',
@@ -448,7 +464,7 @@ export const CAPABILITIES = Object.freeze({
     }),
     history: false, reverseExecution: false,
   }),
-  stdioFormatLimitations: Object.freeze(['scanf wide scanset %l[', 'printf floating precision cap: 100 decimal / 100000 hexadecimal digits']),
+  stdioFormatLimitations: Object.freeze(['printf floating precision cap: 100 decimal / 100000 hexadecimal digits']),
   stringFunctions: Object.freeze(['memcpy', 'memmove', 'memset', 'memcmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp', 'strchr', 'strrchr', 'strspn', 'strcspn', 'strpbrk', 'strstr', 'strtok', 'strlen', 'strerror']),
   ctypeFunctions: Object.freeze(['isalnum', 'isalpha', 'isblank', 'iscntrl', 'isdigit', 'isgraph', 'islower', 'isprint', 'ispunct', 'isspace', 'isupper', 'isxdigit', 'tolower', 'toupper']),
   inttypesFunctions: Object.freeze(['imaxabs', 'imaxdiv', 'strtoimax', 'strtoumax']),

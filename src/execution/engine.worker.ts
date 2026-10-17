@@ -5,6 +5,7 @@ import { RUN_DIAGNOSTIC_STAGE } from './diagnostics.ts';
 import type { RunDiagnosticMetrics, RunDiagnosticStage, RunWorkerProgress } from './diagnostics.ts';
 import type { RunRequest, RunResponse, WorkerCommand } from './protocol.ts';
 import { OutputSnapshotDeltas } from './outputSnapshotDeltas.ts';
+import { createWorkerRuntimeServices } from './workerRuntimeServices.ts';
 
 interface WorkerRun {
   jobId: number;
@@ -229,7 +230,11 @@ async function start(request: RunRequest) {
       peakMemoryBytes: null,
     };
     reportProgress(run, RUN_DIAGNOSTIC_STAGE.execute);
-    run.session = createExecutionSession(preparation.program, request.options.execute);
+    run.session = createExecutionSession(
+      preparation.program,
+      request.options.execute,
+      createWorkerRuntimeServices(),
+    );
     resume(run);
   } catch (error) {
     fail(

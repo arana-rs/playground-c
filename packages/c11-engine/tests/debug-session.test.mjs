@@ -1608,7 +1608,7 @@ test('la sesión debug inspecciona escalares automáticos vivos sin leer los no 
   assert.ok(hasValue('decimal', 'float', '3.5'));
   assert.ok(hasValue('precision', 'double', '2.718281828459045'));
   assert.ok(hasValue('cero_negativo', 'double', '-0'));
-  assert.ok(hasValue('estado', 'int', '4'), 'enum conserva la representación int del perfil');
+  assert.ok(hasValue('estado', 'enum Estado', '4'), 'el snapshot conserva el tipo enum y su representación int');
   assert.ok(all.filter((scalar) => scalar.name === 'pendiente').every((scalar) => !scalar.initialized && scalar.displayValue === '?'));
   assert.ok(all.some((scalar) => scalar.name === 'mutable' && scalar.displayValue === '1'));
   assert.ok(all.some((scalar) => scalar.name === 'mutable' && scalar.displayValue === '2'), 'la asignación posterior se refleja sin evento de escritura');

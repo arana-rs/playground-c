@@ -4,14 +4,15 @@ import {
   INT_MAX, INT_MIN,
 } from './internal.ts';
 import type {
-  AggregateDefinition, AggregateMember, Binding, CType, CValue, Expression, FunctionIR, GlobalObject,
+  AggregateDefinition, AggregateMember, Binding, CType, CValue, EnumDefinition, Expression, FunctionIR, GlobalObject,
   GenericAssociation, Initializer, InitializerDesignator, Location, Parameter, ParsedProgram, ScalarCType, Statement, Token, TypeQualifiers, StaticAssertion,
 } from './internal.ts';
 import { BUILTINS, binary, commonType, convert, parseLiteral, promote, truth, unary } from './numeric.ts';
 import {
-  aggregateRef, aggregateType, arrayOf, arrayType, canConvertPointerType, compatibleType, containsFlexibleAggregate, decayType, functionOf,
+  aggregateRef, aggregateType, arrayOf, arrayType, canConvertPointerType, compatibleType, containsFlexibleAggregate, decayType, enumRef, functionOf,
   functionType, isAggregate, isArray, isArithmetic, isComplete, isFunction, isInteger, isModifiableObject, isObject, isPointer,
   isScalar, layoutAggregate, pointerTo, pointerType, pointedToType, qualifyType, qualifiersOf, sameType, sizeOfType, typeName,
+  conditionalPointerCompositeType,
   unqualifiedType, alignOfType,
 } from './type-system.ts';
 import { C_KEYWORDS } from '../syntax.ts';
@@ -20,6 +21,7 @@ import { LIBRARY_FUNCTIONS } from './headers.ts';
 const reserved = new Set(C_KEYWORDS);
 const scalarWords = new Set(['char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double', 'void', '_Bool']);
 const declarationWords = new Set([...scalarWords, 'struct', 'union', 'enum', 'static', 'extern', 'typedef', 'auto', 'register', 'inline', '_Noreturn', 'const', 'volatile', 'restrict', '_Thread_local', '_Alignas']);
+const declarationOnlySpecifiers = new Set(['static', 'extern', 'typedef', 'auto', 'register', 'inline', '_Noreturn', '_Thread_local', '_Alignas']);
 const unsupportedWords = new Set(['_Atomic', '_Complex', '_Imaginary']);
 const operators: Record<string, number> = {
   ',': 1, '=': 2, '+=': 2, '-=': 2, '*=': 2, '/=': 2, '%=': 2, '&=': 2, '|=': 2, '^=': 2, '<<=': 2, '>>=': 2,
@@ -33,13 +35,35 @@ type Block = Extract<Statement, { kind: 'block' }>;
 type Declarator = {
   name: string; location: Location; apply: (base: CType) => CType; parameters?: Parameter[];
   prototype?: boolean; variadic?: boolean; oldStyle?: boolean; pointerQualifiers?: TypeQualifiers[];
-  parameterArrayQualifiers?: TypeQualifiers; minimumArrayBound?: number;
+  parameterArrayQualifiers?: TypeQualifiers; minimumArrayBound?: number; parameterScope?: ParserScopeFrame;
 };
 type TagScope = Map<string, AggregateDefinition>;
 type Scope = { names: Map<string, Binding>; owner?: Block | Extract<Statement, { kind: 'for' }> };
 type TypedefBinding = { type: CType; isConst?: boolean };
+type ParserScopeFrame = {
+  tags: TagScope;
+  enumTags: Map<string, EnumDefinition>;
+  ordinary: Map<string, bigint | null>;
+  ordinaryTypes: Map<string, CType>;
+  typedefs: Map<string, TypedefBinding>;
+};
+type ParameterScopeContext = { retainFirst: boolean; frame?: ParserScopeFrame };
+type DeclarationSpecifiers = {
+  static: boolean;
+  extern: boolean;
+  typedef: boolean;
+  threadLocal: boolean;
+  auto: boolean;
+  register: boolean;
+  inline: boolean;
+  noreturn: boolean;
+  alignments: number[];
+  storageClasses: Set<string>;
+};
+type DeclarationSpecifierConsumer = (token: Token) => void;
 
 let nextAggregateIdForParser = 0;
+let nextEnumIdForParser = 0;
 
 const isNullPointerConstant = (node: Expression, aggregates: readonly AggregateDefinition[] = []): boolean => {
   if (node.kind === 'cast' && isPointer(node.targetType) && pointedToType(node.targetType) === 'void') {
@@ -211,18 +235,35 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     return consume();
   };
   const typedefScopes: Map<string, TypedefBinding>[] = [new Map()];
-  const startsType = (token = peek()) => scalarWords.has(token.text) || token.text === 'struct' || token.text === 'union' || token.text === 'enum' || ['const', 'volatile', 'restrict'].includes(token.text) ||
-    typedefScopes.some((scope) => scope.has(token.text));
   const aggregates: AggregateDefinition[] = [];
+  const enums: EnumDefinition[] = [];
   const staticAssertions: StaticAssertion[] = [];
   let parseStaticAssert: () => StaticAssertion;
   const tagScopes: TagScope[] = [new Map()];
-  const enumTagScopes: Map<string, Location>[] = [new Map()];
+  const enumTagScopes: Map<string, EnumDefinition>[] = [new Map()];
   const ordinaryScopes: Map<string, bigint | null>[] = [new Map()];
   const ordinaryTypeScopes: Map<string, CType>[] = [new Map()];
   let lastSpecifierDefinesTag = false;
-  const pushTags = () => { tagScopes.push(new Map()); enumTagScopes.push(new Map()); ordinaryScopes.push(new Map()); ordinaryTypeScopes.push(new Map()); typedefScopes.push(new Map()); };
-  const popTags = () => { if (tagScopes.length > 1) { tagScopes.pop(); enumTagScopes.pop(); ordinaryScopes.pop(); ordinaryTypeScopes.pop(); typedefScopes.pop(); } };
+  const pushTags = (): ParserScopeFrame => {
+    const frame: ParserScopeFrame = {
+      tags: new Map(), enumTags: new Map(), ordinary: new Map(), ordinaryTypes: new Map(), typedefs: new Map(),
+    };
+    tagScopes.push(frame.tags); enumTagScopes.push(frame.enumTags); ordinaryScopes.push(frame.ordinary);
+    ordinaryTypeScopes.push(frame.ordinaryTypes); typedefScopes.push(frame.typedefs);
+    return frame;
+  };
+  const popTags = (): ParserScopeFrame | undefined => {
+    if (tagScopes.length <= 1) return undefined;
+    const frame: ParserScopeFrame = {
+      tags: tagScopes.pop()!, enumTags: enumTagScopes.pop()!, ordinary: ordinaryScopes.pop()!,
+      ordinaryTypes: ordinaryTypeScopes.pop()!, typedefs: typedefScopes.pop()!,
+    };
+    return frame;
+  };
+  const restoreTags = (frame: ParserScopeFrame): void => {
+    tagScopes.push(frame.tags); enumTagScopes.push(frame.enumTags); ordinaryScopes.push(frame.ordinary);
+    ordinaryTypeScopes.push(frame.ordinaryTypes); typedefScopes.push(frame.typedefs);
+  };
   const lookupTypedef = (name: string): TypedefBinding | undefined => {
     for (let index = typedefScopes.length - 1; index >= 0; index--) {
       if (ordinaryScopes[index]?.has(name)) return undefined;
@@ -231,23 +272,25 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     }
     return undefined;
   };
+  const startsType = (token = peek()) => scalarWords.has(token.text) || token.text === 'struct' || token.text === 'union' || token.text === 'enum' || ['const', 'volatile', 'restrict'].includes(token.text) ||
+    !!lookupTypedef(token.text);
   let lastSpecifierConst = false;
   let lastSpecifierVolatile = false;
   let lastSpecifierRestrict = false;
   let lastSpecifierQualifiers: TypeQualifiers = {};
-  const lookupEnumTag = (tag: string): { index: number; location: Location } | undefined => {
+  const lookupEnumTag = (tag: string): { index: number; definition: EnumDefinition; location: Location } | undefined => {
     for (let index = enumTagScopes.length - 1; index >= 0; index--) {
-      const location = enumTagScopes[index].get(tag); if (location) return { index, location };
+      const definition = enumTagScopes[index].get(tag); if (definition) return { index, definition, location: definition.location };
     }
     return undefined;
   };
-  const nearestTagKind = (tag: string): { kind: 'aggregate' | 'enum'; index: number; aggregate?: AggregateDefinition; location: Location } | undefined => {
+  const nearestTagKind = (tag: string): { kind: 'aggregate' | 'enum'; index: number; aggregate?: AggregateDefinition; enumeration?: EnumDefinition; location: Location } | undefined => {
     const aggregateIndex = tagScopes.map(scope => scope.has(tag)).lastIndexOf(true);
     const enumTag = lookupEnumTag(tag);
-    if (enumTag && enumTag.index > aggregateIndex) return { kind: 'enum', index: enumTag.index, location: enumTag.location };
+    if (enumTag && enumTag.index > aggregateIndex) return { kind: 'enum', index: enumTag.index, enumeration: enumTag.definition, location: enumTag.location };
     const aggregate = lookupTag(tag);
     if (aggregate) return { kind: 'aggregate', index: aggregateIndex, aggregate, location: aggregate.location };
-    if (enumTag) return { kind: 'enum', index: enumTag.index, location: enumTag.location };
+    if (enumTag) return { kind: 'enum', index: enumTag.index, enumeration: enumTag.definition, location: enumTag.location };
     return undefined;
   };
   const lookupEnumerator = (name: string): bigint | undefined => {
@@ -288,6 +331,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   };
   const currentTag = (tag: string) => tagScopes[tagScopes.length - 1].get(tag);
   let nextAggregateId = nextAggregateIdForParser;
+  let nextEnumId = nextEnumIdForParser;
 
   const parseAggregateSpecifier = (): CType => {
     const kindToken = consume();
@@ -321,8 +365,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       if (peek().text === ';') failure('SYNTAX_ERROR', 'Un agregado necesita declaraciones de miembros.', peek());
       if (peek().text === '_Static_assert') { staticAssertions.push(parseStaticAssert()); continue; }
       const alignmentSpecifiers: number[] = [];
-      while (peek().text === '_Alignas') alignmentSpecifiers.push(parseAlignmentSpecifier());
-      const memberBase = parseTypeSpecifier();
+      const memberBase = parseTypeSpecifier((token) => {
+        if (token.text !== '_Alignas') {
+          failure('SYNTAX_ERROR', `«${token.text}» no es válido en la lista de especificadores de un miembro.`, token);
+        }
+        alignmentSpecifiers.push(parseAlignmentSpecifier());
+      });
       const memberQualifiers = { ...lastSpecifierQualifiers };
       const memberConst = lastSpecifierConst;
       if (peek().text === ';') {
@@ -393,11 +441,16 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const nearest = nearestTagKind(tag);
       if (!nearest) failure('INCOMPLETE_TYPE', `El enum «${tag}» no está definido.`, enumToken);
       if (nearest.kind !== 'enum') failure('CONFLICTING_TYPES', `La etiqueta «${tag}» ya declara un tipo agregado.`, enumToken);
-      return 'int';
+      if (!nearest.enumeration!.complete) failure('INCOMPLETE_TYPE', `El enum «${tag}» todavía está incompleto.`, enumToken);
+      return enumRef(nearest.enumeration!);
     }
     if (tag !== null && tagScopes[tagScopes.length - 1].has(tag)) failure('CONFLICTING_TYPES', `La etiqueta «${tag}» ya declara un agregado en este ámbito.`, enumToken);
     if (tag !== null && enumTagScopes[enumTagScopes.length - 1].has(tag)) failure('REDEFINITION', `El enum «${tag}» ya está definido en este ámbito.`, enumToken);
-    if (tag !== null) enumTagScopes[enumTagScopes.length - 1].set(tag, enumToken);
+    const definition: EnumDefinition = {
+      id: nextEnumId++, tag, complete: false, integerType: 'int', enumerators: [], translationUnit, location: enumToken,
+    };
+    enums.push(definition);
+    if (tag !== null) enumTagScopes[enumTagScopes.length - 1].set(tag, definition);
     consume();
     let nextValue = 0n;
     let count = 0;
@@ -415,6 +468,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       }
       if (value < INT_MIN || value > INT_MAX) failure('TYPE_SIZE_RANGE', 'El valor de un enumerador debe caber en int.', enumerator);
       declareEnumerator(enumerator.text, value, enumerator);
+      definition.enumerators.push({ name: enumerator.text, value, location: enumerator });
       nextValue = value + 1n;
       count++;
       if (peek().text !== ',') break;
@@ -423,22 +477,62 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     }
     if (!count) failure('SYNTAX_ERROR', 'Un enum necesita al menos un enumerador.', enumToken);
     expect('}');
+    definition.complete = true;
     lastSpecifierDefinesTag = true;
-    return 'int';
+    return enumRef(definition);
   };
   const declareEnumerator = (name: string, value: bigint, location: Location): void => {
     const scope = ordinaryScopes[ordinaryScopes.length - 1];
+    if (typedefScopes.at(-1)?.has(name)) failure('REDECLARATION', `El enumerador «${name}» ya es un nombre typedef en este ámbito.`, location);
     if (scope.has(name)) failure('REDECLARATION', `El identificador «${name}» ya está declarado en este ámbito.`, location);
     scope.set(name, value);
   };
 
-  function parseTypeSpecifier(): CType {
+  const newDeclarationSpecifiers = (): DeclarationSpecifiers => ({
+    static: false, extern: false, typedef: false, threadLocal: false, auto: false, register: false,
+    inline: false, noreturn: false, alignments: [], storageClasses: new Set(),
+  });
+  const consumeDeclarationSpecifier = (state: DeclarationSpecifiers, token: Token): void => {
+    if (token.text === '_Alignas') {
+      state.alignments.push(parseAlignmentSpecifier());
+      return;
+    }
+    if (token.text === '_Thread_local') {
+      if (state.storageClasses.has(token.text)) failure('TYPE_ERROR', 'Un especificador de clase de almacenamiento no puede repetirse.', token);
+      state.storageClasses.add(token.text);
+      consume();
+      state.threadLocal = true;
+      return;
+    }
+    if (['static', 'extern', 'typedef', 'auto', 'register'].includes(token.text)) {
+      if (state.storageClasses.has(token.text)) failure('TYPE_ERROR', 'Un especificador de clase de almacenamiento no puede repetirse.', token);
+      state.storageClasses.add(token.text);
+      consume();
+      if (token.text === 'static') state.static = true;
+      else if (token.text === 'extern') state.extern = true;
+      else if (token.text === 'typedef') state.typedef = true;
+      else if (token.text === 'auto') state.auto = true;
+      else state.register = true;
+      return;
+    }
+    if (token.text === 'inline') { consume(); state.inline = true; return; }
+    if (token.text === '_Noreturn') { consume(); state.noreturn = true; return; }
+    failure('ENGINE_INTERNAL_ERROR', `El especificador «${token.text}» no se puede recopilar aquí.`, token);
+  };
+
+  function parseTypeSpecifier(consumeDeclarationSpecifier?: DeclarationSpecifierConsumer): CType {
     lastSpecifierDefinesTag = false;
     lastSpecifierConst = false;
     lastSpecifierVolatile = false;
     lastSpecifierRestrict = false;
     lastSpecifierQualifiers = {};
     const at = peek();
+    const collectDeclarationSpecifier = (): boolean => {
+      const token = peek();
+      if (!consumeDeclarationSpecifier || !declarationOnlySpecifiers.has(token.text)) return false;
+      consumeDeclarationSpecifier(token);
+      return true;
+    };
     const consumeQualifier = (): boolean => {
       const qualifier = peek();
       if (!['const', 'volatile', 'restrict'].includes(qualifier.text)) return false;
@@ -450,13 +544,13 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       lastSpecifierRestrict = !!next.restrict;
       return true;
     };
-    while (consumeQualifier()) { /* qualifiers may appear among declaration specifiers */ }
+    while (collectDeclarationSpecifier() || consumeQualifier()) { /* declaration specifiers may appear in any order */ }
     if (peek().text === 'struct' || peek().text === 'union') {
       const qualifiers = { ...lastSpecifierQualifiers };
       const type = parseAggregateSpecifier();
       lastSpecifierQualifiers = qualifiers;
       lastSpecifierConst = !!qualifiers.const; lastSpecifierVolatile = !!qualifiers.volatile; lastSpecifierRestrict = !!qualifiers.restrict;
-      while (consumeQualifier()) { /* qualifiers may follow an aggregate specifier */ }
+      while (collectDeclarationSpecifier() || consumeQualifier()) { /* qualifiers and declaration specifiers may follow an aggregate specifier */ }
       return type;
     }
     if (peek().text === 'enum') {
@@ -464,7 +558,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const type = parseEnumSpecifier();
       lastSpecifierQualifiers = qualifiers;
       lastSpecifierConst = !!qualifiers.const; lastSpecifierVolatile = !!qualifiers.volatile; lastSpecifierRestrict = !!qualifiers.restrict;
-      while (consumeQualifier()) { /* qualifiers may follow an enum specifier */ }
+      while (collectDeclarationSpecifier() || consumeQualifier()) { /* qualifiers and declaration specifiers may follow an enum specifier */ }
       return type;
     }
     if (unsupportedWords.has(peek().text)) unsupported(peek());
@@ -475,13 +569,13 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         lastSpecifierVolatile = lastSpecifierVolatile || !!qualifiersOf(alias.type).volatile;
         lastSpecifierRestrict = lastSpecifierRestrict || !!qualifiersOf(alias.type).restrict;
         consume();
-        while (consumeQualifier()) { /* qualifiers may follow a typedef name */ }
+        while (collectDeclarationSpecifier() || consumeQualifier()) { /* qualifiers and declaration specifiers may follow a typedef name */ }
         return alias.type;
       }
     }
     const words: string[] = [];
     while (true) {
-      if (consumeQualifier()) continue;
+      if (collectDeclarationSpecifier() || consumeQualifier()) continue;
       if (scalarWords.has(peek().text)) { words.push(consume().text); continue; }
       break;
     }
@@ -520,7 +614,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     return Number(length);
   };
 
-  const parseDeclarator = (abstractAllowed: boolean, parameterDeclarator = false): Declarator => {
+  const parseDeclarator = (abstractAllowed: boolean, parameterDeclarator = false, parameterScopeContext?: ParameterScopeContext): Declarator => {
     const start = peek();
     const pointerQualifiers: TypeQualifiers[] = [];
     while (peek().text === '*') {
@@ -545,7 +639,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     let direct: (base: CType) => CType;
     if (peek().text === '(' && (peek(1).text === '*' || peek(1).text === '(' || peek(1).kind === 'identifier')) {
       consume();
-      const nested = parseDeclarator(abstractAllowed, parameterDeclarator);
+      const nested = parseDeclarator(abstractAllowed, parameterDeclarator, parameterScopeContext);
       expect(')');
       name = nested.name; location = nested.location; direct = nested.apply; declaredParameters = nested.parameters;
       declaredPrototype = nested.prototype; declaredVariadic = !!nested.variadic; declaredOldStyle = !!nested.oldStyle;
@@ -593,6 +687,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       }
       if (peek().text === '(') {
         consume();
+        const parameterScope = pushTags();
         const parameters: Parameter[] = [];
         const parameterTypes: CType[] = [];
         let prototype = true;
@@ -606,7 +701,9 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           prototype = false;
           const names: Token[] = [];
           do {
-            names.push(identifier());
+            const parameter = identifier();
+            names.push(parameter);
+            declareOrdinary(parameter.text, parameter, 'int');
             if (peek().text !== ',') break;
             consume();
             if (peek().text === ')') failure('SYNTAX_ERROR', 'Falta un identificador en la lista antigua de parámetros.', peek());
@@ -622,9 +719,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
               if (!parameters.length) failure('SYNTAX_ERROR', 'Una función variádica requiere al menos un parámetro con tipo.', peek());
               consume(); variadic = true; break;
             }
-            const registerParameter = peek().text === 'register';
-            if (registerParameter) consume();
-            const parameterBase = parseTypeSpecifier();
+            const parameterSpecifiers = newDeclarationSpecifiers();
+            const parameterBase = parseTypeSpecifier((token) => {
+              if (token.text !== 'register') failure('TYPE_ERROR', 'register es la única clase de almacenamiento permitida en un parámetro.', token);
+              consumeDeclarationSpecifier(parameterSpecifiers, token);
+            });
+            const registerParameter = parameterSpecifiers.register;
             const parameterQualifiers = { ...lastSpecifierQualifiers };
             const parameterDeclarator = parseDeclarator(true, true);
             let parameterType = declaredType(parameterDeclarator, parameterBase, parameterQualifiers);
@@ -642,11 +742,14 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
             parameters.push({ name: parameterDeclarator.name, type: parameterType, isConst, qualifiers: qualifiersOf(parameterType), register: registerParameter,
               ...(minimumArrayBound !== undefined ? { minimumArrayBound } : {}), location: parameterDeclarator.location });
             parameterTypes.push(parameterType);
+            if (parameterDeclarator.name) declareOrdinary(parameterDeclarator.name, parameterDeclarator.location, parameterType);
             if (peek().text !== ',') break;
             consume();
           }
         }
         expect(')');
+        if (parameterScopeContext?.retainFirst && !parameterScopeContext.frame) parameterScopeContext.frame = parameterScope;
+        else popTags();
         const previous = direct;
         direct = base => previous(functionOf(base, parameterTypes, variadic, prototype));
         declaredParameters = parameters;
@@ -660,6 +763,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     return {
       name, location, parameters: declaredParameters, prototype: declaredPrototype, variadic: declaredVariadic,
       oldStyle: declaredOldStyle, pointerQualifiers,
+      ...(parameterScopeContext?.frame ? { parameterScope: parameterScopeContext.frame } : {}),
       ...(parameterArrayQualifiers ? { parameterArrayQualifiers } : {}),
       ...(minimumArrayBound !== undefined ? { minimumArrayBound } : {}),
       apply: (base) => direct(applyPointers(base, pointerQualifiers)),
@@ -670,10 +774,37 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     qualifiers.forEach((qualifier) => { type = qualifyType(pointerTo(type), qualifier); });
     return type;
   };
+  const validateDeclaratorTypeConstraints = (type: CType, at: Location, visited = new Set<CType>()): void => {
+    const current = unqualifiedType(type);
+    if (typeof current === 'string' || visited.has(current)) return;
+    visited.add(current);
+    const array = arrayType(current);
+    if (array) {
+      if (!isComplete(array.element, aggregates)) {
+        failure('INCOMPLETE_TYPE', 'El elemento de un array debe tener un tipo completo.', at);
+      }
+      validateDeclaratorTypeConstraints(array.element, at, visited);
+      return;
+    }
+    const pointer = pointerType(current);
+    if (pointer) {
+      validateDeclaratorTypeConstraints(pointer.base, at, visited);
+      return;
+    }
+    const fn = functionType(current);
+    if (fn) {
+      if (isArray(fn.returnType) || isFunction(fn.returnType)) {
+        failure('TYPE_ERROR', 'Una función no puede devolver un array ni otra función.', at);
+      }
+      validateDeclaratorTypeConstraints(fn.returnType, at, visited);
+      for (const parameter of fn.parameters) validateDeclaratorTypeConstraints(parameter, at, visited);
+    }
+  };
   const declaredType = (declarator: Declarator, base: CType, specifiers: TypeQualifiers | boolean = {}): CType => {
     const qualifiers = typeof specifiers === 'boolean' ? specifiers ? { const: true } : {} : specifiers;
     if (qualifiers.restrict && !pointerType(base)) failure('TYPE_ERROR', 'restrict sólo puede calificar un tipo puntero.', declarator.location);
     const type = declarator.apply(qualifyType(base, qualifiers));
+    validateDeclaratorTypeConstraints(type, declarator.location);
     validateRestrictType(type, declarator.location);
     return type;
   };
@@ -1210,7 +1341,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
             if (!left || !right) break;
             if (isArithmetic(left) && isArithmetic(right)) type = commonType(left, right);
             else if (isAggregate(left) && compatibleType(left, right)) type = left;
-            else if (isPointer(left) && isPointer(right)) type = compatibleType(left, right) ? left : pointerTo('void');
+            else if (isPointer(left) && isPointer(right)) type = conditionalPointerCompositeType(left, right);
             else if (isPointer(left) && isInteger(right)) type = left;
             else if (isInteger(left) && isPointer(right)) type = right;
             else if (left === 'void' && right === 'void') type = 'void';
@@ -1292,27 +1423,13 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   const parseDeclaration = (depth: number, local: boolean): Statement => {
     const at = peek();
     enforceLimit('maxDepth', depth, limits.maxDepth, at);
-    let isStatic = false;
-    let isExtern = false;
-    let isTypedef = false;
-    let isThreadLocal = false;
-    let isAuto = false;
-    let isRegister = false;
-    let isInline = false;
-    let isNoreturn = false;
-    const alignments: number[] = [];
-    while (['static', 'extern', 'typedef', 'auto', 'register', 'inline', '_Noreturn', '_Thread_local', '_Alignas'].includes(peek().text)) {
-      if (peek().text === '_Alignas') { alignments.push(parseAlignmentSpecifier()); continue; }
-      const storage = consume();
-      if (storage.text === 'static') isStatic = true;
-      else if (storage.text === 'extern') isExtern = true;
-      else if (storage.text === 'typedef') isTypedef = true;
-      else if (storage.text === 'auto') isAuto = true;
-      else if (storage.text === 'register') isRegister = true;
-      else if (storage.text === '_Thread_local') isThreadLocal = true;
-      else if (storage.text === 'inline') isInline = true;
-      else isNoreturn = true;
-    }
+    const specifiers = newDeclarationSpecifiers();
+    const base = parseTypeSpecifier((token) => consumeDeclarationSpecifier(specifiers, token));
+    const {
+      static: isStatic, extern: isExtern, typedef: isTypedef, threadLocal: isThreadLocal,
+      auto: isAuto, register: isRegister, inline: isInline, noreturn: isNoreturn,
+    } = specifiers;
+    const alignments = specifiers.alignments;
     const storageClassCount = Number(isStatic) + Number(isExtern) + Number(isTypedef) + Number(isAuto) + Number(isRegister);
     if (storageClassCount > 1 || isThreadLocal && (isTypedef || isAuto || isRegister) || !local && (isAuto || isRegister)) {
       failure('TYPE_ERROR', 'Clases de almacenamiento incompatibles o inválidas en este ámbito.', at);
@@ -1322,7 +1439,6 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     }
     if (isThreadLocal && local && !isStatic && !isExtern) failure('TYPE_ERROR', '_Thread_local en ámbito de bloque requiere static o extern.', at);
     if (!local && isThreadLocal && !isStatic && !isExtern) failure('TYPE_ERROR', '_Thread_local en ámbito de archivo requiere static o extern.', at);
-    const base = parseTypeSpecifier();
     const baseQualifiers = { ...lastSpecifierQualifiers };
     const standaloneTag = lastSpecifierDefinesTag;
     if (peek().text === ';' && (isAggregate(base) || standaloneTag)) {
@@ -1526,44 +1642,34 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   while (peek().kind !== 'eof') {
     const at = peek();
     if (peek().text === '_Static_assert') { staticAssertions.push(parseStaticAssert()); continue; }
-    let isStatic = false;
-    let isExtern = false;
-    let isTypedef = false;
-    let isInline = false;
-    let isNoreturn = false;
-    let isThreadLocal = false;
-    let isAuto = false;
-    let isRegister = false;
-    const alignments: number[] = [];
-    while (['static', 'extern', 'typedef', 'auto', 'register', 'inline', '_Noreturn', '_Thread_local', '_Alignas'].includes(peek().text)) {
-      if (peek().text === '_Alignas') { alignments.push(parseAlignmentSpecifier()); continue; }
-      const storage = consume();
-      if (storage.text === 'static') isStatic = true;
-      else if (storage.text === 'extern') isExtern = true;
-      else if (storage.text === 'typedef') isTypedef = true;
-      else if (storage.text === 'auto') isAuto = true;
-      else if (storage.text === 'register') isRegister = true;
-      else if (storage.text === 'inline') isInline = true;
-      else if (storage.text === '_Thread_local') isThreadLocal = true;
-      else isNoreturn = true;
-    }
+    const specifiers = newDeclarationSpecifiers();
+    const base = parseTypeSpecifier((token) => consumeDeclarationSpecifier(specifiers, token));
+    const {
+      static: isStatic, extern: isExtern, typedef: isTypedef, inline: isInline,
+      noreturn: isNoreturn, threadLocal: isThreadLocal, auto: isAuto, register: isRegister,
+    } = specifiers;
+    const alignments = specifiers.alignments;
     const storageClassCount = Number(isStatic) + Number(isExtern) + Number(isTypedef) + Number(isAuto) + Number(isRegister);
     if (storageClassCount > 1 || isTypedef && (isInline || isNoreturn || isThreadLocal || alignments.length) ||
         isAuto || isRegister) {
       failure('TYPE_ERROR', 'Clases de almacenamiento o especificadores de función incompatibles.', at);
     }
-    const typeStart = peek();
-    const base = parseTypeSpecifier();
     const baseQualifiers = { ...lastSpecifierQualifiers };
     const standaloneTag = lastSpecifierDefinesTag;
-    if (((typeStart.text === 'struct' || typeStart.text === 'union') && peek().text === ';' || standaloneTag && peek().text === ';')) {
+    if ((isAggregate(base) || standaloneTag) && peek().text === ';') {
       if (isStatic || isExtern || isTypedef || isAuto || isRegister || isInline || isNoreturn || isThreadLocal || alignments.length) failure('TYPE_ERROR', 'Los especificadores de almacenamiento/alineación requieren un declarador.', at);
       consume(); continue;
     }
     let first = true;
     while (true) {
-      const declarator = parseDeclarator(false);
+      const declarator = parseDeclarator(false, false, { retainFirst: true });
       const type = declaredType(declarator, base, baseQualifiers);
+      const parameterScope = declarator.parameterScope;
+      const detachedScope = parameterScope ? popTags() : undefined;
+      if (parameterScope && (!detachedScope || detachedScope.tags !== parameterScope.tags || detachedScope.enumTags !== parameterScope.enumTags ||
+          detachedScope.ordinary !== parameterScope.ordinary || detachedScope.ordinaryTypes !== parameterScope.ordinaryTypes || detachedScope.typedefs !== parameterScope.typedefs)) {
+        failure('ENGINE_INTERNAL_ERROR', 'El ámbito de parámetros no coincide con la pila de ámbitos del declarador.', declarator.location);
+      }
       if (isTypedef) {
         if (alignments.length || isThreadLocal) failure('TYPE_ERROR', 'typedef no admite _Alignas ni _Thread_local.', declarator.location);
         if (peek().text === '=') failure('SYNTAX_ERROR', 'Un typedef no admite inicializador.', peek());
@@ -1575,9 +1681,6 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         if (alignments.length || isThreadLocal) failure('TYPE_ERROR', '_Alignas y _Thread_local no pueden aplicarse a funciones.', declarator.location);
         declareOrdinary(declarator.name, declarator.location, type);
         const fnType = functionType(type)!;
-        if (unqualifiedType(fnType.returnType) !== 'void' && (isArray(fnType.returnType) || isFunction(fnType.returnType) || !isComplete(fnType.returnType, aggregates))) {
-          failure('TYPE_ERROR', 'Una función debe devolver void o un tipo de objeto completo que no sea array.', declarator.location);
-        }
         let linkage: 'internal' | 'external' = isStatic ? 'internal' : 'external';
         if (isExtern && fileLinkage.get(declarator.name) === 'internal') linkage = 'internal';
         const previousLinkage = fileLinkage.get(declarator.name);
@@ -1599,6 +1702,10 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         if (peek().text === '{' || declarator.oldStyle && isDeclarationStart()) {
           if (!first || peek(1).text === ';') failure('SYNTAX_ERROR', 'Una definición de función debe ser una declaración externa independiente.', peek());
           if (isNoreturn && declarator.name === 'main') failure('TYPE_ERROR', 'main no puede declararse _Noreturn.', declarator.location);
+          if (parameterScope) restoreTags(parameterScope);
+          if (unqualifiedType(fn.returnType) !== 'void' && !isComplete(fn.returnType, aggregates)) {
+            failure('INCOMPLETE_TYPE', 'La definición de una función requiere un tipo de retorno de objeto completo o void.', declarator.location);
+          }
           if (declarator.oldStyle) {
             const byName = new Map(parameters.map((parameter, index) => [parameter.name, index]));
             const declared = new Set<string>();
@@ -1607,9 +1714,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
               if (['static', 'extern', 'typedef', 'inline', '_Noreturn'].includes(peek().text)) {
                 failure('SYNTAX_ERROR', 'Una declaración de parámetro K&R debe especificar solo su tipo y declarador.', declarationAt);
               }
-              const registerParameter = peek().text === 'register';
-              if (registerParameter) consume();
-              const parameterBase = parseTypeSpecifier();
+              const parameterSpecifiers = newDeclarationSpecifiers();
+              const parameterBase = parseTypeSpecifier((token) => {
+                if (token.text !== 'register') failure('TYPE_ERROR', 'register es la única clase de almacenamiento permitida en un parámetro K&R.', token);
+                consumeDeclarationSpecifier(parameterSpecifiers, token);
+              });
+              const registerParameter = parameterSpecifiers.register;
               const parameterQualifiers = { ...lastSpecifierQualifiers };
               do {
                 const parameterDeclarator = parseDeclarator(false);
@@ -1630,8 +1740,13 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           }
           if (parameters.some(parameter => !parameter.name)) failure('SYNTAX_ERROR', 'Los parámetros de una definición necesitan un nombre.', fn.location);
           if (!declarator.prototype && !declarator.oldStyle && parameters.length) failure('TYPE_ERROR', 'Una definición sin prototipo no puede tener parámetros tipados.', fn.location);
+          if (parameters.some(parameter => !isComplete(parameter.type, aggregates))) {
+            const incompleteParameter = parameters.find(parameter => !isComplete(parameter.type, aggregates))!;
+            failure('INCOMPLETE_TYPE', 'Un parámetro de una definición debe tener un tipo completo después de los ajustes.', incompleteParameter.location);
+          }
           fn.parameters = parameters;
           fn.body = parseBody(1, parameters);
+          if (parameterScope) popTags();
         } else if (peek().text !== ',') expect(';');
         functions.push(fn);
       } else {
@@ -1696,7 +1811,8 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     if (global.tentative && array?.length === null && isComplete(array.element, aggregates)) global.type = arrayOf(array.element, 1);
   }
   nextAggregateIdForParser = nextAggregateId;
-  return { functions, aggregates, globals, staticAssertions, translationUnit };
+  nextEnumIdForParser = nextEnumId;
+  return { functions, aggregates, enums, globals, staticAssertions, translationUnit };
 }
 
 const requireInteger = (type: CType, location: Location) => {
@@ -2149,7 +2265,11 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
             if (left === 'void' && right === 'void') node.type = 'void';
             else if (isArithmetic(left) && isArithmetic(right)) node.type = commonType(left, right);
             else if (isAggregate(left) && compatibleType(left, right)) node.type = left;
-            else if (isPointer(left) && isPointer(right) && (compatibleType(left, right) || canConvertPointerType(left, right))) node.type = compatibleType(left, right) ? left : pointerTo('void');
+            else if (isPointer(left) && isPointer(right)) {
+              const composite = conditionalPointerCompositeType(left, right);
+              if (!composite) failure('TYPE_ERROR', 'Las ramas de ?: requieren punteros a tipos compatibles o un puntero a void.', node.location);
+              node.type = composite;
+            }
             else if (isPointer(left) && isInteger(right) && isNullPointerConstant(node.else, aggregates)) node.type = left;
             else if (isPointer(right) && isInteger(left) && isNullPointerConstant(node.then, aggregates)) node.type = right;
             else failure('TYPE_ERROR', 'Las ramas de ?: deben tener tipos compatibles.', node.location);
@@ -2247,6 +2367,10 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
               signatureType = designated;
             }
             const signature = functionType(signatureType)!;
+            const returnType = unqualifiedType(signature.returnType);
+            if (returnType !== 'void' && !isComplete(signature.returnType, aggregates)) {
+              failure('INCOMPLETE_TYPE', 'La función llamada debe devolver void o un tipo de objeto completo.', node.location);
+            }
             if (signature.prototype !== false && (node.args.length < signature.parameters.length || !signature.variadic && node.args.length !== signature.parameters.length)) {
               failure('TYPE_ERROR', `La llamada requiere ${signature.variadic ? 'al menos ' : ''}${signature.parameters.length} argumentos.`, node.location);
             }

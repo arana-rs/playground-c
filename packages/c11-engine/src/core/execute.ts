@@ -5,7 +5,7 @@ import type {
   DebugPausedResult, DebugProgress, DebugSessionOptions, DebugSourceLocation, ExecuteOptions, ExecuteProgress,
   DebugArrayElementSnapshot, DebugArrayInspection, DebugArraySnapshot, DebugHeapObjectSnapshot, DebugPointerSnapshot,
   DebugScalarSnapshot, DebugStaticObjectInspectionOptions, DebugStaticObjectSnapshot,
-  ExecuteResult, ExecutionSession, PreparedProgram,
+  ExecuteResult, ExecutionRuntimeServices, ExecutionSession, PreparedProgram,
 } from './types.ts';
 import {
   EngineFailure, enforceLimit, failure, freshMetrics, normalizedLimits, now, programs,
@@ -19,17 +19,20 @@ import { compile } from './bytecode.ts';
 import type { CompiledFunction, Scope } from './bytecode.ts';
 import { binary, callBuiltin, convert, isFloatingClassificationBuiltin, promote, truth, unary } from './numeric.ts';
 import {
-  aggregateType, arrayOf, arrayType, compatibleType, functionType, isAggregate, isArithmetic, isArray, isFunction,
+  aggregateType, arrayOf, arrayType, compatibleType, enumType, functionType, isAggregate, isArithmetic, isArray, isFunction,
   isInteger, isPointer, isScalar, pointerTo, pointerType, pointedToType, qualifiersOf, sameType, sizeOfType,
   typeName, unqualifiedType,
 } from './type-system.ts';
 import { VirtualMemory } from './memory.ts';
 import { dispatchLibraryBuiltin } from './library.ts';
-import type { LibraryBuiltinResult, LibraryRuntimeContext, ResumableLibraryBuiltin } from './library.ts';
+import type { LibraryBuiltinResult, ResumableLibraryBuiltin } from './library.ts';
+import type { LibraryBuiltinRequest } from './library-requests.ts';
+import { calendarTimeFromEpochMilliseconds, DEFAULT_CALENDAR_TIME } from './stdlib-time-context.ts';
+import type { StdlibSessionState, StdlibTimeRuntimeContext } from './stdlib-time-context.ts';
 import { VirtualIO, VirtualIOError, VirtualStream } from './virtual-io.ts';
 
 interface Cell { binding: Binding; reference: ObjectReference }
-interface RuntimeScope { layout: Scope; token: object; scopeId: number; cells: number[] }
+interface RuntimeScope { layout: Scope; token: object; scopeId: number; cells: number[]; restrictBases: number[] }
 interface Frame {
   compiled: CompiledFunction;
   frameId: number | null;
@@ -39,11 +42,13 @@ interface Frame {
   fullExpressionToken?: object;
   cells: Map<number, Cell>;
   args: CValue[];
+  argumentPointerBases?: readonly ReadonlySet<number>[];
   variadicArgs: CValue[];
   vaCursorIds: Set<number>;
   temporaryObjects: ObjectReference[];
   returned: boolean;
   result?: CValue;
+  resultPointerBases?: Set<number>;
 }
 interface DebugObjectMetadata {
   readonly duration: DebugObjectDuration;
@@ -81,12 +86,15 @@ type RuntimeSession = {
   inspectAggregates?: () => DebugAggregateInspection;
   inspectHeapObjects?: () => readonly DebugHeapObjectSnapshot[];
 };
-interface VaCursor { frame: Frame; args: readonly CValue[]; index: number; active: boolean; marker: ObjectReference }
+interface VaCursor { frame: Frame; args: readonly CValue[]; index: number; active: boolean; indeterminate: boolean; marker: ObjectReference }
 interface Access { read: boolean; write: boolean; name: string }
+interface RestrictObservation { accessedViaBase: boolean; independentAccess: boolean; modified: boolean }
 interface Evaluation {
   value?: CValue;
   reference?: ObjectReference;
   label?: string;
+  pointerBases?: Set<number>;
+  addressBases?: Set<number>;
   accesses: Map<number, Access>;
   pendingWrites: Set<number>;
 }
@@ -185,6 +193,8 @@ function debugTypeSummary(type: CValue['type'], aggregates: readonly AggregateDe
   if (pointer) return `${debugTypeSummary(pointedToType(unqualified)!, aggregates)} *${qualifierText ? ` ${qualifierText}` : ''}`;
   const array = arrayType(unqualified);
   if (array) return `${debugTypeSummary(array.element, aggregates)}[${array.length ?? ''}]`;
+  const enumeration = enumType(unqualified);
+  if (enumeration) return `${qualifierText ? `${qualifierText} ` : ''}enum ${enumeration.tag ?? `<anonymous ${enumeration.id}>`}`;
   const aggregateTypeValue = aggregateType(unqualified);
   if (aggregateTypeValue) {
     const aggregate = aggregates.find((candidate) => candidate.id === aggregateTypeValue.id);
@@ -234,8 +244,8 @@ function debugStringLiteral(bytes: readonly number[]): string {
   return '"' + bytes.map((byte) => debugEscapedByte(byte, 'string')).join('') + '"';
 }
 
-export function execute(program: PreparedProgram, options?: ExecuteOptions): ExecuteResult {
-  const session = createRuntimeSession(program, options, false) as ExecutionSession;
+export function execute(program: PreparedProgram, options?: ExecuteOptions, runtimeServices?: ExecutionRuntimeServices): ExecuteResult {
+  const session = createRuntimeSession(program, options, false, undefined, runtimeServices) as ExecutionSession;
   const result = session.resume();
   // Batch stdin is closed from the start, so this path cannot suspend.
   if (result.kind === 'input-needed') {
@@ -251,8 +261,12 @@ export function execute(program: PreparedProgram, options?: ExecuteOptions): Exe
 }
 
 /** Create a live VM session whose stdin remains open until endStdin(). */
-export function createExecutionSession(program: PreparedProgram, options?: ExecuteOptions): ExecutionSession {
-  return createRuntimeSession(program, options, true) as ExecutionSession;
+export function createExecutionSession(
+  program: PreparedProgram,
+  options?: ExecuteOptions,
+  runtimeServices?: ExecutionRuntimeServices,
+): ExecutionSession {
+  return createRuntimeSession(program, options, true, undefined, runtimeServices) as ExecutionSession;
 }
 
 /** Create a live VM session that reports object and scope lifecycle events. */
@@ -260,8 +274,9 @@ export function createDebugSession(
   program: PreparedProgram,
   options?: ExecuteOptions,
   debugOptions?: DebugSessionOptions,
+  runtimeServices?: ExecutionRuntimeServices,
 ): DebugExecutionSession {
-  return createRuntimeSession(program, options, true, debugOptions === undefined ? {} : debugOptions) as DebugExecutionSession;
+  return createRuntimeSession(program, options, true, debugOptions === undefined ? {} : debugOptions, runtimeServices) as DebugExecutionSession;
 }
 
 function createRuntimeSession(
@@ -269,6 +284,7 @@ function createRuntimeSession(
   options: ExecuteOptions | undefined,
   interactiveStdin: boolean,
   debugOptions?: DebugSessionOptions,
+  runtimeServices?: ExecutionRuntimeServices,
 ): RuntimeSession {
   const started = now();
   const metrics = freshMetrics();
@@ -382,6 +398,7 @@ function createRuntimeSession(
           if (terminalResult) {
             debugLocation = null;
             debugInputSuspended = false;
+            io?.closeTemporaryFiles();
           }
           metrics.executeMs += now() - resumeStarted;
           if (terminalResult) return { ...terminalResult, metrics: { ...metrics } };
@@ -392,6 +409,7 @@ function createRuntimeSession(
         debugLocation = null;
         debugInputSuspended = false;
       }
+      if (terminalResult) io?.closeTemporaryFiles();
       metrics.executeMs += now() - resumeStarted;
       return { ...terminalResult!, metrics: { ...metrics }, ...output() };
     },
@@ -980,11 +998,14 @@ function createRuntimeSession(
         readOnly: binding.isConst === true,
       });
     };
-    const allocateDebugHeap = (bytes: number, at: Location): ObjectPointerValue | null => {
-      if (!debugEvents || bytes === 0) return memory.allocateRaw(bytes, at);
+    const allocateDebugHeap = (bytes: number, at: Location, alignment = 16): ObjectPointerValue | null => {
+      const allocate = () => alignment === 16
+        ? memory.allocateRaw(bytes, at)
+        : memory.allocateRawAligned(bytes, alignment, at);
+      if (!debugEvents || bytes === 0) return allocate();
       debugEvents.reserve(at);
       try {
-        const pointer = memory.allocateRaw(bytes, at);
+        const pointer = allocate();
         if (!pointer) {
           debugEvents.cancel();
           return null;
@@ -1072,6 +1093,21 @@ function createRuntimeSession(
     const vaCursors = new Map<number, VaCursor>();
     const filePointers = new Map<string, VirtualStream>();
     const filePointerValues = new Map<VirtualStream, CValue>();
+    const restrictBaseByPointerObject = new Map<number, number>();
+    const restrictPointerObjectByBase = new Map<number, number>();
+    const pointerOriginsByObject = new Map<number, Set<number>>();
+    const pointerValueBases = new WeakMap<ObjectPointerValue, Set<number>>();
+    const activeRestrictBases = new Map<number, object>();
+    // Restrict pointers initialized or assigned from another restricted pointer
+    // belong to one provenance chain. Accesses through either member of that
+    // chain must not be mistaken for independent aliases in a nested call.
+    const restrictBaseParents = new Map<number, Set<number>>();
+    const restrictObservations = new Map<number, Map<string, RestrictObservation>>();
+    let nextRestrictBaseId = 1;
+    const stdlibState: StdlibSessionState = { randState: 1, textBufferCapacity: 0, environmentBuffers: new Map() };
+    const normalTerminationHandlers: CValue[] = [];
+    const quickTerminationHandlers: CValue[] = [];
+    let termination: { mode: 'normal' | 'quick' | 'immediate' | 'abort'; status: bigint; pending: CValue[]; completed: boolean } | undefined;
     let errnoReference: ObjectReference | undefined;
     let errnoPointer: CValue | undefined;
     const getErrnoReference = (): ObjectReference => {
@@ -1206,9 +1242,56 @@ function createRuntimeSession(
       void at;
       return stream;
     };
-    const libraryContext: LibraryRuntimeContext = {
+    const libraryContext: StdlibTimeRuntimeContext = {
       get at() { return runtimeLocation; },
       get io() { return io!; },
+      stdlibState,
+      environment: {},
+      currentCalendarTime: () => runtimeServices?.wallClock
+        ? calendarTimeFromEpochMilliseconds(runtimeServices.wallClock.nowEpochMilliseconds())
+        : DEFAULT_CALENDAR_TIME,
+      clockTicks: () => BigInt(metrics.instructionCount) * 1000n,
+      allocateHeap: (size, at) => allocateDebugHeap(size, at),
+      allocateHeapAligned: (size, alignment, at) => allocateDebugHeap(size, at, alignment),
+      allocateStaticObject: (type, at) => {
+        const reference = allocateDebugObject(() => memory.allocate(type, 'static', at), {
+          duration: 'static', origin: 'variable', typeSummary: debugTypeSummary(type, ir.aggregates),
+          location: at, frameId: null, scopeId: null,
+        });
+        memory.zeroInitialize(reference, at);
+        return isArray(type) ? memory.decay(reference) : memory.addressOf(reference, pointerTo(type));
+      },
+      zeroHeap: (pointer, size, at) => {
+        const reference = memory.rootReference(pointer.allocationId);
+        if (!reference || memory.describeObjectView(reference, at).size !== size) {
+          failure('INVALID_MEMORY_SIZE', 'calloc debe inicializar el tamaño completo de su asignación.', at);
+        }
+        memory.zeroInitialize(reference, at);
+      },
+      swapObjectBytes: (left, right, size, at) => {
+        if (!Number.isSafeInteger(size) || size < 0) failure('INVALID_MEMORY_SIZE', 'El intercambio solicita un tamaño no representable.', at);
+        if (size === 0 || left.allocationId === right.allocationId && left.byteOffset === right.byteOffset) return;
+        const leftValue: CValue = { type: pointerTo('unsigned char'), value: left };
+        const rightValue: CValue = { type: pointerTo('unsigned char'), value: right };
+        const snapshot = (pointer: CValue) => {
+          const address = asBytePointer(pointer, at).value as ObjectPointerValue;
+          return {
+            bytes: readBytes(pointer, size, at),
+            pointers: memory.copyablePointerValues(address, size, at),
+            effectiveTypes: memory.copyableEffectiveTypes(address, size, at),
+          };
+        };
+        const leftSnapshot = snapshot(leftValue);
+        const rightSnapshot = snapshot(rightValue);
+        const restore = (destination: CValue, source: ReturnType<typeof snapshot>): void => {
+          const address = asBytePointer(destination, at).value as ObjectPointerValue;
+          writeBytes(destination, source.bytes, at);
+          memory.restoreCopiedPointerValues(address, size, source.pointers, at);
+          memory.restoreCopiedEffectiveTypes(address, size, source.effectiveTypes, at);
+        };
+        restore(leftValue, rightSnapshot);
+        restore(rightValue, leftSnapshot);
+      },
       readBytes,
       writeBytes,
       readCString,
@@ -1225,13 +1308,42 @@ function createRuntimeSession(
       makeFilePointer,
       closeFilePointer: (file, at) => {
         const key = pointerKey(file);
-        if (!key || standardFileKeys.has(key)) return -1;
+        if (!key) return -1;
         const stream = filePointers.get(key);
         if (!stream || !stream.close()) return -1;
-        filePointers.delete(key);
+        if (!standardFileKeys.has(key)) filePointers.delete(key);
         filePointerValues.delete(stream);
         void at;
         return 0;
+      },
+      consumeVaList: (list, at) => {
+        const { cursor } = cursorFromHandle(list, at);
+        if (cursor.indeterminate) failure('INVALID_VA_LIST', 'La va_list quedó indeterminada después de una rutina v*.', at);
+        const remaining = cursor.args.slice(cursor.index);
+        cursor.index = cursor.args.length;
+        cursor.indeterminate = true;
+        return remaining;
+      },
+      reopenFilePointer: (file, path, mode, at) => {
+        const key = pointerKey(file);
+        if (!key) return null;
+        const previous = filePointers.get(key);
+        const isStandard = standardFileKeys.has(key);
+        if (!previous || previous.isClosed && !isStandard || !previous.isClosed && !previous.close()) return null;
+        filePointerValues.delete(previous);
+        if (path === null) return null;
+        const replacement = io!.open(path, mode, at);
+        if (!replacement) {
+          if (!isStandard) filePointers.delete(key);
+          return null;
+        }
+        filePointers.set(key, replacement);
+        filePointerValues.set(replacement, file);
+        if (isStandard) {
+          const kind = [...standardFiles].find(([, standard]) => pointerKey(standard) === key)?.[0];
+          if (kind) io!.replaceStandardStream(kind, replacement);
+        }
+        return file;
       },
       errno: {
         get: () => {
@@ -1254,7 +1366,13 @@ function createRuntimeSession(
       offsetPointer: (pointer, byteOffset, at) => {
         if (!Number.isSafeInteger(byteOffset)) failure('INVALID_POINTER_ARITHMETIC', 'El desplazamiento en bytes no es representable.', at);
         const bytes = asBytePointer(pointer, at);
-        return { type: pointer.type, value: { ...(bytes.value as ObjectPointerValue), byteOffset: (bytes.value as ObjectPointerValue).byteOffset + byteOffset } };
+        const original = bytes.value as ObjectPointerValue;
+        const result: CValue = {
+          type: pointer.type,
+          value: { ...original, byteOffset: original.byteOffset + byteOffset },
+        };
+        rememberPointerBases(result, pointerValueBases.get(original));
+        return result;
       },
       makeString: (bytes, at) => {
         const reference = memory.allocate(arrayOf('char', bytes.length + 1), 'static', at);
@@ -1321,6 +1439,91 @@ function createRuntimeSession(
       return convert(value, targetType, at, ir.aggregates);
     };
     const truthValue = (value: CValue): boolean => truth(value, runtimeLocation);
+    const activePointerBases = (bases?: Iterable<number>): Set<number> => new Set(
+      [...(bases ?? [])].filter((base) => activeRestrictBases.has(base)),
+    );
+    const unionPointerBases = (...sources: Array<Iterable<number> | undefined>): Set<number> =>
+      activePointerBases(sources.flatMap((source) => [...(source ?? [])]));
+    const rememberPointerBases = (value: CValue, bases?: Iterable<number>): void => {
+      if (!isPointer(value.type) || typeof value.value !== 'object' || value.value === null || value.value.kind !== 'object-pointer') return;
+      const filtered = activePointerBases(bases);
+      if (filtered.size) pointerValueBases.set(value.value, filtered);
+      else pointerValueBases.delete(value.value);
+    };
+    const pointerBasesForObject = (reference: ObjectReference): Set<number> => {
+      const bases = activePointerBases(pointerOriginsByObject.get(reference.objectId));
+      const ownBase = restrictBaseByPointerObject.get(reference.objectId);
+      if (ownBase !== undefined && activeRestrictBases.has(ownBase)) bases.add(ownBase);
+      return bases;
+    };
+    const setPointerBasesForObject = (reference: ObjectReference, bases?: Iterable<number>): void => {
+      if (!isPointer(reference.type)) {
+        pointerOriginsByObject.delete(reference.objectId);
+        return;
+      }
+      const filtered = activePointerBases(bases);
+      if (filtered.size) pointerOriginsByObject.set(reference.objectId, filtered);
+      else pointerOriginsByObject.delete(reference.objectId);
+      const ownBase = restrictBaseByPointerObject.get(reference.objectId);
+      if (ownBase !== undefined && activeRestrictBases.has(ownBase)) {
+        const parents = new Set([...filtered].filter((base) => base !== ownBase));
+        if (parents.size) restrictBaseParents.set(ownBase, parents);
+        else restrictBaseParents.delete(ownBase);
+      }
+    };
+    const registerRestrictPointer = (scope: RuntimeScope, binding: Binding, reference: ObjectReference): void => {
+      if (!isPointer(binding.type) || !qualifiersOf(binding.type).restrict) return;
+      const base = nextRestrictBaseId++;
+      activeRestrictBases.set(base, scope.token);
+      restrictBaseByPointerObject.set(reference.objectId, base);
+      restrictPointerObjectByBase.set(base, reference.objectId);
+      scope.restrictBases.push(base);
+    };
+    const relatedRestrictBases = (base: number): Set<number> => {
+      const related = new Set<number>([base]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const [child, parents] of restrictBaseParents) {
+          if (!activeRestrictBases.has(child)) continue;
+          if (related.has(child) || [...parents].some((parent) => related.has(parent))) {
+            if (!related.has(child)) { related.add(child); changed = true; }
+            for (const parent of parents) {
+              if (activeRestrictBases.has(parent) && !related.has(parent)) {
+                related.add(parent);
+                changed = true;
+              }
+            }
+          }
+        }
+      }
+      return related;
+    };
+    const observeRestrictAccess = (
+      reference: ObjectReference, addressBases: Iterable<number> | undefined, write: boolean, at: Location,
+    ): void => {
+      const bases = activePointerBases(addressBases);
+      const view = memory.describeObjectView(reference, at);
+      // objectId identifies the typed subobject independently of qualifiers;
+      // allocation and byte range distinguish equal-looking subobjects in an
+      // array or aggregate and keep adjacent elements/members disjoint.
+      const objectKey = `${view.allocationId}:${view.objectId}:${reference.byteOffset}:${view.size}`;
+      for (const base of activeRestrictBases.keys()) {
+        let objects = restrictObservations.get(base);
+        if (!objects) restrictObservations.set(base, objects = new Map());
+        let observation = objects.get(objectKey);
+        if (!observation) objects.set(objectKey, observation = {
+          accessedViaBase: false, independentAccess: false, modified: false,
+        });
+        const related = relatedRestrictBases(base);
+        if ([...bases].some((candidate) => related.has(candidate))) observation.accessedViaBase = true;
+        else observation.independentAccess = true;
+        if (write) observation.modified = true;
+        if (observation.accessedViaBase && observation.independentAccess && observation.modified) {
+          failure('RESTRICT_ALIAS', `El objeto «${reference.objectId}» se accedió mediante punteros no basados en el mismo restrict y se modificó dentro de su ámbito.`, at);
+        }
+      }
+    };
     const addAccess = (evaluation: Evaluation, objectId: number, access: Access): void => {
       const previous = evaluation.accesses.get(objectId);
       evaluation.accesses.set(objectId, {
@@ -1348,32 +1551,46 @@ function createRuntimeSession(
         pendingWrites: sequenced ? new Set(right.pendingWrites) : new Set([...left.pendingWrites, ...right.pendingWrites]),
       };
     };
-    const referenceEvaluation = (reference: ObjectReference, label: string, effects?: Evaluation): Evaluation => ({
+    const referenceEvaluation = (
+      reference: ObjectReference, label: string, effects?: Evaluation, addressBases?: Iterable<number>,
+    ): Evaluation => ({
       reference,
       label,
       accesses: effects ? new Map(effects.accesses) : new Map(),
       pendingWrites: effects ? new Set(effects.pendingWrites) : new Set(),
+      ...(addressBases === undefined ? {} : { addressBases: activePointerBases(addressBases) }),
     });
     const markRead = (evaluation: Evaluation, reference: ObjectReference, label: string): void => {
       addAccess(evaluation, reference.objectId, { read: true, write: false, name: label });
+      observeRestrictAccess(reference, evaluation.addressBases, false, runtimeLocation);
     };
     const markWrite = (evaluation: Evaluation, reference: ObjectReference, label: string): void => {
       addAccess(evaluation, reference.objectId, { read: false, write: true, name: label });
+      observeRestrictAccess(reference, evaluation.addressBases, true, runtimeLocation);
       evaluation.pendingWrites.add(reference.objectId);
     };
     const materialize = (evaluation: Evaluation, at: Location): CValue => {
-      if (evaluation.value) return evaluation.value;
+      if (evaluation.value) {
+        rememberPointerBases(evaluation.value, evaluation.pointerBases);
+        return evaluation.value;
+      }
       const reference = evaluation.reference;
       if (!reference) failure('INVALID_LVALUE', 'La expresión no designa un valor ni un objeto.', at);
       if (isArray(reference.type)) {
         evaluation.value = memory.decay(reference);
+        evaluation.pointerBases = activePointerBases(evaluation.addressBases);
       } else if (isFunction(reference.type)) {
         failure('INVALID_OBJECT', 'Una función no se puede leer como un objeto.', at);
       } else {
         evaluation.value = memory.read(reference, at);
         markRead(evaluation, reference, evaluation.label ?? 'objeto');
+        if (isPointer(reference.type)) {
+          evaluation.pointerBases = pointerBasesForObject(reference);
+          rememberPointerBases(evaluation.value, evaluation.pointerBases);
+        }
       }
       evaluation.reference = undefined;
+      rememberPointerBases(evaluation.value, evaluation.pointerBases);
       return evaluation.value;
     };
     const aggregateDefinition = (type: CValue['type'], at: Location): AggregateDefinition => {
@@ -1473,6 +1690,7 @@ function createRuntimeSession(
           if (!result) failure('ENGINE_STACK_ERROR', 'Falta el valor del inicializador.', initializer.location);
           const value = materialize(result, initializer.location);
           memory.write(reference, valueForType(value, type, initializer.location), initializer.location, true);
+          if (isPointer(type)) setPointerBasesForObject(reference, result.pointerBases);
         }, depth + 1);
         return;
       }
@@ -1648,6 +1866,7 @@ function createRuntimeSession(
               const effects = mergeEffects(baseResult, indexResult, at);
               result.type = node.type && isPointer(node.type) ? node.type : result.type;
               effects.value = result;
+              effects.pointerBases = activePointerBases(baseResult.pointerBases);
               operands.push(effects);
             });
             evaluate(subscript.index, frame, depth + 1);
@@ -1662,7 +1881,9 @@ function createRuntimeSession(
               const pointer = materialize(operand, at);
               if (!isPointer(pointer.type)) failure('INVALID_OPERAND_TYPE', 'El operador * requiere un puntero.', at);
               if (node.type && isPointer(node.type)) pointer.type = node.type;
-              operands.push(plain(pointer));
+              const result = plain(pointer);
+              result.pointerBases = activePointerBases(operand.pointerBases);
+              operands.push(result);
             });
             evaluate(dereference.operand, frame, depth + 1);
             return;
@@ -1672,11 +1893,17 @@ function createRuntimeSession(
             if (!operand) failure('ENGINE_STACK_ERROR', 'Falta el operando de &.', at);
             if (operand.reference) {
               const requestedPointer = node.type ? pointerType(node.type) : undefined;
-              operands.push(plain(memory.addressOf(operand.reference, requestedPointer ?? pointerTo(operand.reference.type))));
+              const result = plain(memory.addressOf(operand.reference, requestedPointer ?? pointerTo(operand.reference.type)));
+              result.pointerBases = activePointerBases(operand.addressBases);
+              operands.push(result);
             } else {
               const value = materialize(operand, at);
               if (typeof value.value === 'object' && value.value !== null &&
-                  (value.value as { kind?: string }).kind === 'function-pointer') operands.push(plain(value));
+                  (value.value as { kind?: string }).kind === 'function-pointer') {
+                const result = plain(value);
+                result.pointerBases = activePointerBases(operand.pointerBases);
+                operands.push(result);
+              }
               else failure('INVALID_LVALUE', 'El operador & requiere un objeto o función.', at);
             }
           });
@@ -1688,7 +1915,7 @@ function createRuntimeSession(
             const pointer = materialize(operand, at);
             if (!isPointer(pointer.type)) failure('INVALID_OPERAND_TYPE', 'El operador * requiere un puntero.', at);
             if (isFunction(pointedToType(pointer.type) ?? 'void')) operands.push(plain(pointer));
-            else operands.push(referenceEvaluation(memory.dereference(pointer, at), 'objeto apuntado', operand));
+            else operands.push(referenceEvaluation(memory.dereference(pointer, at), 'objeto apuntado', operand, operand.pointerBases));
           });
           evaluate(node.operand, frame, depth + 1);
         } else if (node.kind === 'unary') {
@@ -1704,7 +1931,10 @@ function createRuntimeSession(
           work.push(() => {
             const result = operands.pop();
             if (!result) failure('ENGINE_STACK_ERROR', 'Falta el operando del cast.', at);
-            result.value = valueForType(materialize(result, at), node.targetType, at);
+            const sourceValue = materialize(result, at);
+            result.value = valueForType(sourceValue, node.targetType, at);
+            if (isPointer(node.targetType) && isPointer(sourceValue.type)) result.pointerBases = activePointerBases(result.pointerBases);
+            else result.pointerBases = undefined;
             result.reference = undefined;
             operands.push(result);
           });
@@ -1717,6 +1947,7 @@ function createRuntimeSession(
             if (!result) failure('ENGINE_STACK_ERROR', 'Falta el operando de la conversión de array.', at);
             if (result.reference && isArray(result.reference.type)) {
               result.value = memory.decay(result.reference);
+              result.pointerBases = activePointerBases(result.addressBases);
               result.reference = undefined;
             } else result.value = materialize(result, at);
             operands.push(result);
@@ -1732,15 +1963,20 @@ function createRuntimeSession(
             }
             const old = memory.read(reference, at);
             const readEvaluation = plain(old);
+            readEvaluation.addressBases = activePointerBases(target.addressBases);
             markRead(readEvaluation, reference, target.label ?? 'objeto');
             const combined = mergeEffects(target, readEvaluation, at);
+            combined.addressBases = activePointerBases(target.addressBases);
+            const oldPointerBases = isPointer(old.type) ? pointerBasesForObject(reference) : undefined;
             let next: CValue;
             if (isPointer(old.type)) next = memory.pointerAdd(old, node.operator === '++' ? 1n : -1n, at);
             else next = binary(node.operator === '++' ? '+' : '-', old, integer(1), at);
             next = valueForType(next, reference.type, at);
             next = memory.write(reference, next, at);
+            if (isPointer(reference.type)) setPointerBasesForObject(reference, oldPointerBases);
             markWrite(combined, reference, target.label ?? 'objeto');
             combined.value = node.prefix ? next : old;
+            if (isPointer(next.type)) combined.pointerBases = oldPointerBases;
             operands.push(combined);
           });
           evaluate(node.operand, frame, depth + 1, true, true);
@@ -1754,14 +1990,22 @@ function createRuntimeSession(
             }
             const name = target.label ?? 'objeto';
             let old: CValue | undefined;
+            let oldPointerBases: Set<number> | undefined;
             if (node.operator !== '=') {
               old = memory.read(reference, at);
-              markRead(target, reference, name);
+              oldPointerBases = isPointer(old.type) ? pointerBasesForObject(reference) : undefined;
+              const oldEvaluation = plain(old);
+              oldEvaluation.addressBases = activePointerBases(target.addressBases);
+              markRead(oldEvaluation, reference, name);
             }
             work.push(() => {
               const right = operands.pop();
               if (!right) failure('ENGINE_STACK_ERROR', 'Falta el valor derecho de la asignación.', at);
               let effects = mergeEffects(target, right, at);
+              // The write belongs to the lvalue's storage path. mergeEffects
+              // deliberately does not merge address provenance from unrelated
+              // value operands, so restore the target's provenance explicitly.
+              effects.addressBases = activePointerBases(target.addressBases);
               let value = materialize(right, at);
               if (old) value = operateBinary(node.operator.slice(0, -1), old, value, at);
               if (right.pendingWrites.has(reference.objectId)) {
@@ -1769,8 +2013,13 @@ function createRuntimeSession(
               }
               value = valueForType(value, reference.type, at);
               value = memory.write(reference, value, at);
+              const storedPointerBases = isPointer(reference.type)
+                ? node.operator === '=' ? right.pointerBases : unionPointerBases(oldPointerBases, right.pointerBases)
+                : undefined;
+              setPointerBasesForObject(reference, storedPointerBases);
               markWrite(effects, reference, name);
               effects.value = value;
+              if (isPointer(value.type)) effects.pointerBases = storedPointerBases;
               operands.push(effects);
             });
             evaluate(node.value, frame, depth + 1);
@@ -1794,7 +2043,9 @@ function createRuntimeSession(
               reference = memory.dereference(memory.pointerAdd(base, indexValue.value, at), at);
             }
             const effects = mergeEffects(baseResult, indexResult, at);
-            operands.push(referenceEvaluation(reference, 'elemento', effects));
+            const addressBases = baseResult.reference && isArray(baseResult.reference.type)
+              ? baseResult.addressBases : baseResult.pointerBases;
+            operands.push(referenceEvaluation(reference, 'elemento', effects, addressBases));
           });
           evaluate(node.index, frame, depth + 1);
           evaluate(node.base, frame, depth + 1, true, true);
@@ -1804,11 +2055,14 @@ function createRuntimeSession(
             if (!baseResult) failure('ENGINE_STACK_ERROR', 'Falta el objeto del miembro.', at);
             let baseReference: ObjectReference;
             let effects = baseResult;
+            let addressBases: Iterable<number> | undefined;
             if (node.arrow) {
               const pointer = materialize(baseResult, at);
               baseReference = memory.dereference(pointer, at);
+              addressBases = baseResult.pointerBases;
             } else if (baseResult.reference) {
               baseReference = baseResult.reference;
+              addressBases = baseResult.addressBases;
             } else {
               const value = materialize(baseResult, at);
               if (!isAggregate(value.type)) failure('INVALID_MEMBER', 'El operador . requiere un valor agregado.', at);
@@ -1819,12 +2073,13 @@ function createRuntimeSession(
               memory.write(temporary, value, at, true);
               baseReference = temporary;
               effects = plain(value);
+              addressBases = undefined;
             }
             const definition = aggregateDefinition(baseReference.type, at);
             const memberIndex = node.memberIndex ?? definition.members.findIndex((member) => member.name === node.name);
             if (memberIndex < 0 || !definition.members[memberIndex]) failure('UNKNOWN_MEMBER', 'El agregado no tiene un miembro llamado «' + node.name + '».', at);
             const memberReference = memory.member(baseReference, memberIndex, at);
-            operands.push(referenceEvaluation(memberReference, node.name, effects));
+            operands.push(referenceEvaluation(memberReference, node.name, effects, addressBases));
           });
           evaluate(node.base, frame, depth + 1, true, !node.arrow);
         } else if (node.kind === 'conditional') {
@@ -1838,6 +2093,7 @@ function createRuntimeSession(
               const value = valueForType(materialize(result, at), node.type ?? result.value!.type, at);
               const combined = mergeEffects(condition, result, at, true);
               combined.value = value;
+              if (isPointer(value.type)) combined.pointerBases = activePointerBases(result.pointerBases);
               operands.push(combined);
             });
             evaluate(conditionValue ? node.then : node.else, frame, depth + 1, used);
@@ -1866,6 +2122,11 @@ function createRuntimeSession(
                   : operateBinary(node.operator, leftValue, rightValue, at);
               const combined = mergeEffects(left, right, at, sequenced);
               combined.value = result;
+              if (node.operator === ',') combined.pointerBases = activePointerBases(right.pointerBases);
+              else if (isPointer(result.type) && (node.operator === '+' || node.operator === '-')) {
+                combined.pointerBases = isPointer(leftValue.type)
+                  ? activePointerBases(left.pointerBases) : activePointerBases(right.pointerBases);
+              }
               operands.push(combined);
             });
             evaluate(node.right, frame, depth + 1, node.operator === ',' ? used : true);
@@ -1912,7 +2173,7 @@ function createRuntimeSession(
             const handle = materialize(handleResult, at);
             const id = markerId(handle);
             const cursor = id === undefined ? undefined : vaCursors.get(id);
-            if (!cursor?.active || cursor.frame.returned || !cursor.frame.vaCursorIds.has(id!)) {
+            if (!cursor?.active || cursor.indeterminate || cursor.frame.returned || !cursor.frame.vaCursorIds.has(id!)) {
               failure('INVALID_VA_LIST', 'va_arg requiere una lista activa dentro de la vida de su llamada.', at);
             }
             const argument = cursor.args[cursor.index];
@@ -1938,10 +2199,13 @@ function createRuntimeSession(
               effects = mergeEffects(effects, callee, at);
             }
             const args: CValue[] = [];
+            const argumentPointerBases: ReadonlySet<number>[] = [];
             for (const item of evaluated) {
               const argument = materialize(item, at);
               effects = mergeEffects(effects, item, at);
               args.push(argument);
+              argumentPointerBases.push(isPointer(argument.type)
+                ? activePointerBases(item.pointerBases) : new Set<number>());
             }
             effects.pendingWrites.clear();
             let functionIndex = node.functionIndex;
@@ -1974,21 +2238,13 @@ function createRuntimeSession(
               }
               return defaultArgumentPromotion(argument, at);
             });
+            const callArgumentPointerBases = callArgs.map((argument, index) =>
+              isPointer(argument.type) ? argumentPointerBases[index] ?? new Set<number>() : new Set<number>());
             if (builtinTarget && functionName) {
               const runtimeArgs = isFloatingClassificationBuiltin(functionName) ? args : callArgs;
               const result = invokeBuiltin(functionName, runtimeArgs, node.type, at, frame);
               if (isBuiltinContinuation(result)) {
-                const continuation = (): void => {
-                  const next = result.next();
-                  if (next.done) {
-                    effects.value = next.value;
-                    operands.push(effects);
-                  } else {
-                    awaitingInput = true;
-                    work.push(continuation);
-                  }
-                };
-                continuation();
+                continueLibraryGenerator(result, effects, at);
               } else {
                 effects.value = result;
                 operands.push(effects);
@@ -2000,9 +2256,10 @@ function createRuntimeSession(
                 const result = operands.pop();
                 if (!result) failure('ENGINE_STACK_ERROR', 'La llamada no produjo un resultado.', at);
                 effects.value = result.value;
+                effects.pointerBases = activePointerBases(result.pointerBases);
                 operands.push(effects);
               });
-              invoke(functions[functionIndex], callArgs, at, used);
+              invoke(functions[functionIndex], callArgs, at, used, callArgumentPointerBases);
             }
           });
           for (let index = node.args.length - 1; index >= 0; index--) evaluate(node.args[index], frame, depth + 1);
@@ -2011,11 +2268,14 @@ function createRuntimeSession(
       });
     }
 
-    function cursorFromHandle(handle: CValue, at: Location): { id: number; cursor: VaCursor } {
+    function cursorFromHandle(handle: CValue, at: Location, allowIndeterminate = false): { id: number; cursor: VaCursor } {
       const id = markerId(handle);
       const cursor = id === undefined ? undefined : vaCursors.get(id);
       if (!cursor?.active || cursor.frame.returned || !cursor.frame.vaCursorIds.has(id!)) {
         failure('INVALID_VA_LIST', 'La lista de argumentos no está activa o su función terminó.', at);
+      }
+      if (cursor.indeterminate && !allowIndeterminate) {
+        failure('INVALID_VA_LIST', 'La va_list quedó indeterminada después de una rutina v*.', at);
       }
       memory.assertAlive(handle, at);
       return { id: id!, cursor };
@@ -2028,7 +2288,7 @@ function createRuntimeSession(
       const value = memory.addressOf(marker, pointerTo('char'));
       const handle = valueForType(value, pointerTo('void'), at);
       memory.write(target, handle, at);
-      const cursor: VaCursor = { frame: owner, args, index, active: true, marker };
+      const cursor: VaCursor = { frame: owner, args, index, active: true, indeterminate: false, marker };
       const id = marker.allocationId;
       vaCursors.set(id, cursor);
       owner.vaCursorIds.add(id);
@@ -2069,7 +2329,7 @@ function createRuntimeSession(
         if (args.length !== 1) failure('ARGUMENT_COUNT', 'va_end requiere la dirección de la lista.', at);
         const target = memory.dereference(args[0], at);
         const handle = memory.read(target, at);
-        const { id, cursor } = cursorFromHandle(handle, at);
+        const { id, cursor } = cursorFromHandle(handle, at, true);
         endVaCursor(id, cursor, at);
         memory.write(target, { type: target.type, value: null }, at);
         return { type: 'void', value: 0n };
@@ -2126,7 +2386,7 @@ function createRuntimeSession(
       enforceLimit('maxDepth', scopeDepth + 1, limits.maxDepth, layout.location);
       const scopeId = debugEvents ? nextDebugScopeId++ : 0;
       debugEvents?.reserve(layout.location);
-      const runtimeScope: RuntimeScope = { layout, token: {}, scopeId, cells: [] };
+      const runtimeScope: RuntimeScope = { layout, token: {}, scopeId, cells: [], restrictBases: [] };
       frame.scopes.push(runtimeScope);
       scopeDepth++;
       debugEvents?.commit({
@@ -2164,6 +2424,7 @@ function createRuntimeSession(
         }
         frame.cells.set(binding.id, { binding, reference });
         runtimeScope.cells.push(binding.id);
+        registerRestrictPointer(runtimeScope, binding, reference);
       }
       if (frame.scopes.length === 1) {
         frame.compiled.fn.parameters.forEach((parameter, index) => {
@@ -2172,12 +2433,27 @@ function createRuntimeSession(
           if (!argument) failure('ARGUMENT_COUNT', 'Falta un argumento de función para «' + parameter.name + '».', parameter.location);
           if (debugEvents) publishAutomaticBinding(frame, runtimeScope, target.binding, target.reference);
           memory.write(target.reference, valueForType(argument, parameter.type, parameter.location), parameter.location, true);
+          if (isPointer(parameter.type)) setPointerBasesForObject(target.reference, frame.argumentPointerBases?.[index]);
         });
       }
     }
     function leave(frame: Frame, eventLocation: Location = runtimeLocation): void {
       const scope = frame.scopes.at(-1);
       if (!scope) failure('INVALID_SCOPE', 'No hay un ámbito activo para cerrar.', runtimeLocation);
+      for (const base of scope.restrictBases) {
+        activeRestrictBases.delete(base);
+        restrictObservations.delete(base);
+        restrictBaseParents.delete(base);
+        for (const [child, parents] of restrictBaseParents) {
+          parents.delete(base);
+          if (!parents.size) restrictBaseParents.delete(child);
+        }
+        const objectId = restrictPointerObjectByBase.get(base);
+        if (objectId !== undefined && restrictBaseByPointerObject.get(objectId) === base) {
+          restrictBaseByPointerObject.delete(objectId);
+        }
+        restrictPointerObjectByBase.delete(base);
+      }
       if (!debugEvents || !debugObjects) {
         frame.scopes.pop();
         scopeDepth--;
@@ -2316,6 +2592,8 @@ function createRuntimeSession(
             const value = result ? valueForType(materialize(result, node.location), frame.compiled.fn.returnType, node.location)
               : { type: 'void', value: 0n } as CValue;
             frame.result = value;
+            frame.resultPointerBases = result && isPointer(value.type)
+              ? activePointerBases(result.pointerBases) : undefined;
             frame.returned = true;
           };
           if (node.value) evaluateFullExpression(node.value, frame, consume);
@@ -2337,7 +2615,13 @@ function createRuntimeSession(
         }
       });
     }
-    function invoke(compiled: CompiledFunction, args: CValue[], at: Location, used = true): void {
+    function invoke(
+      compiled: CompiledFunction,
+      args: CValue[],
+      at: Location,
+      used = true,
+      argumentPointerBases?: readonly ReadonlySet<number>[],
+    ): void {
       if (!compiled?.fn.body) failure('UNDEFINED_FUNCTION', 'La función llamada no tiene definición en este archivo.', at);
       const parameterCount = compiled.fn.parameters.length;
       if (args.length < parameterCount || !compiled.fn.variadic && args.length !== parameterCount) {
@@ -2349,6 +2633,7 @@ function createRuntimeSession(
       callDepth++;
       const frame: Frame = {
         compiled, frameId, args, variadicArgs: args.slice(parameterCount), vaCursorIds: new Set(), temporaryObjects: [],
+        ...(argumentPointerBases === undefined ? {} : { argumentPointerBases }),
         pc: 0, cells: new Map(), scopes: [], returned: false,
       };
       activeDebugFrames?.push(frame);
@@ -2393,9 +2678,116 @@ function createRuntimeSession(
           else if (!used) value = defaultReturn(compiled.fn.returnType, at);
           else failure('MISSING_RETURN', 'La función «' + compiled.fn.name + '» termina sin devolver un valor.', compiled.fn.location);
         }
-        operands.push(plain(value));
+        const result = plain(value);
+        if (isPointer(value.type)) result.pointerBases = activePointerBases(frame.resultPointerBases);
+        operands.push(result);
       });
       step(frame);
+    }
+    function callbackTarget(callee: CValue, label: string, at: Location): CompiledFunction {
+      if (!isPointer(callee.type) || !isFunction(pointedToType(callee.type) ?? 'void') ||
+          typeof callee.value !== 'object' || callee.value === null || callee.value.kind !== 'function-pointer' ||
+          callee.value.functionIndex === null) {
+        failure('INVALID_LIBRARY_CALLBACK', `${label} requiere un puntero a función C ejecutable.`, at);
+      }
+      const target = functions[callee.value.functionIndex];
+      if (!target?.fn.body) failure('UNDEFINED_FUNCTION', `${label} apunta a una función sin definición ejecutable.`, at);
+      return target;
+    }
+    function scheduleTerminationHandler(at: Location): void {
+      if (!termination || termination.completed) return;
+      const handler = termination.pending.pop();
+      if (!handler) {
+        termination.completed = true;
+        return;
+      }
+      const target = callbackTarget(handler, 'El manejador de terminación', at);
+      if (target.fn.parameters.length !== 0 || unqualifiedType(target.fn.returnType) !== 'void') {
+        failure('INVALID_TERMINATION_HANDLER', 'El manejador debe tener tipo compatible con void(void).', target.fn.location);
+      }
+      work.push(() => {
+        const result = operands.pop();
+        if (!result) failure('ENGINE_STACK_ERROR', 'El manejador de terminación no produjo un resultado.', at);
+        scheduleTerminationHandler(at);
+      });
+      invoke(target, [], at, false);
+    }
+    function startTermination(
+      mode: 'normal' | 'quick' | 'immediate' | 'abort', status: bigint, at: Location,
+    ): void {
+      const skipsHandlers = mode === 'immediate' || mode === 'abort';
+      if (termination && !termination.completed && !skipsHandlers) {
+        failure('INVALID_TERMINATION', 'No se puede iniciar exit o quick_exit durante la ejecución de manejadores de terminación.', at);
+      }
+      work.length = 0;
+      operands.length = 0;
+      awaitingInput = false;
+      debugPause = undefined;
+      const pending = skipsHandlers
+        ? [] : [...(mode === 'normal' ? normalTerminationHandlers : quickTerminationHandlers)];
+      termination = { mode, status, pending, completed: skipsHandlers };
+      if (!skipsHandlers) scheduleTerminationHandler(at);
+    }
+    function continueLibraryGenerator(
+      generator: ResumableLibraryBuiltin,
+      effects: Evaluation,
+      at: Location,
+      response?: CValue,
+    ): void {
+      const next = generator.next(response);
+      if (next.done) {
+        effects.value = next.value;
+        if (isPointer(next.value.type)) effects.pointerBases = activePointerBases(
+          typeof next.value.value === 'object' && next.value.value !== null && next.value.value.kind === 'object-pointer'
+            ? pointerValueBases.get(next.value.value) : undefined,
+        );
+        operands.push(effects);
+        return;
+      }
+      const request: LibraryBuiltinRequest = next.value;
+      if (request.kind === 'input-needed') {
+        awaitingInput = true;
+        work.push(() => continueLibraryGenerator(generator, effects, at));
+        return;
+      }
+      if (request.kind === 'call-user') {
+        const target = callbackTarget(request.callee, 'El callback de una rutina de biblioteca', at);
+        if (request.args.length < target.fn.parameters.length ||
+            !target.fn.variadic && request.args.length !== target.fn.parameters.length) {
+          failure('ARGUMENT_COUNT', `El callback «${target.fn.name}» recibió una cantidad de argumentos no válida.`, at);
+        }
+        const callbackArgs = request.args.map((argument, index) => {
+          const parameter = target.fn.parameters[index];
+          return parameter ? valueForType(argument, parameter.type, at) : defaultArgumentPromotion(argument, at);
+        });
+        const argumentBases = request.args.map((argument) =>
+          typeof argument.value === 'object' && argument.value !== null && argument.value.kind === 'object-pointer'
+            ? activePointerBases(pointerValueBases.get(argument.value)) : new Set<number>());
+        work.push(() => {
+          const callbackResult = operands.pop();
+          if (!callbackResult) failure('ENGINE_STACK_ERROR', 'El callback C no produjo un resultado.', at);
+          continueLibraryGenerator(generator, effects, at, callbackResult.value);
+        });
+        invoke(target, callbackArgs, at, true, argumentBases);
+        return;
+      }
+      if (request.kind === 'register-termination-handler') {
+        const target = callbackTarget(request.callee, 'El manejador de terminación', at);
+        if (target.fn.parameters.length !== 0 || unqualifiedType(target.fn.returnType) !== 'void') {
+          failure('INVALID_TERMINATION_HANDLER', 'El manejador debe tener tipo compatible con void(void).', target.fn.location);
+        }
+        const handlers = request.mode === 'normal' ? normalTerminationHandlers : quickTerminationHandlers;
+        const accepted = handlers.length < 32;
+        if (accepted) {
+          handlers.push(request.callee);
+          if (termination && !termination.completed && termination.mode === request.mode) {
+            termination.pending.push(request.callee);
+          }
+        }
+        continueLibraryGenerator(generator, effects, at, libraryContext.makeInt(accepted ? 0 : 1, 'int'));
+        return;
+      }
+      startTermination(request.mode, request.status, at);
     }
     function defaultReturn(type: CValue['type'], at: Location): CValue {
       if (isAggregate(type)) return { type: unqualifiedType(type), value: { kind: 'aggregate-value', snapshot: { initialized: true, zeroInitialized: true } } };
@@ -2472,13 +2864,26 @@ function createRuntimeSession(
         return debugPause;
       }
       if (awaitingInput) return { kind: 'input-needed', metrics, ...output() };
-
-      const mainReturn = Number(valueForType(operands.pop()!.value!, 'int', location).value);
+      if (!termination) {
+        const result = operands.pop();
+        if (!result) failure('ENGINE_STACK_ERROR', 'main no produjo un estado de terminación.', entryFunction.fn.location);
+        const status = valueForType(materialize(result, entryFunction.fn.location), 'int', entryFunction.fn.location).value;
+        if (typeof status !== 'bigint') failure('ENGINE_INTERNAL_ERROR', 'El estado de main no es entero.', entryFunction.fn.location);
+        startTermination('normal', status, entryFunction.fn.location);
+        while (work.length && !awaitingInput && !debugPause) work.pop()!();
+        if (debugPause) {
+          debugStepActive = false;
+          return debugPause;
+        }
+        if (awaitingInput) return { kind: 'input-needed', metrics, ...output() };
+      }
+      if (!termination?.completed) failure('ENGINE_INTERNAL_ERROR', 'La terminación no completó su secuencia de manejadores.', runtimeLocation);
+      const rawExitStatus = Number(BigInt.asIntN(32, termination.status));
       return {
         kind: 'terminated',
-        exitCode: ((mainReturn % 256) + 256) % 256,
-        rawExitStatus: mainReturn,
-        mainReturn,
+        exitCode: Number(BigInt.asUintN(8, termination.status)),
+        rawExitStatus,
+        mainReturn: rawExitStatus,
         metrics,
         ...output(),
       };

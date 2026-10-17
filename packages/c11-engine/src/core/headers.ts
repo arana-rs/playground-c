@@ -1,4 +1,6 @@
-import { HEAP_ALLOCATOR_BUILTINS, HEAP_ALLOCATOR_SIGNATURES } from './allocator-builtins.ts';
+import { STDIO_FUNCTIONS, STDIO_HEADER_BODY } from './stdio-metadata.ts';
+import { ERRNO_MACROS } from './errno-metadata.ts';
+import { STDLIB_FUNCTIONS, STDLIB_HEADER_BODY, TIME_FUNCTIONS, TIME_HEADER_BODY } from './stdlib-time-metadata.ts';
 
 const guarded = (name: string, body: string): string => {
   const guard = `__C11_VIRTUAL_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
@@ -54,10 +56,7 @@ const ctypeFunctions = [
 const stringFunctions = [
   'memcpy', 'memmove', 'memset', 'memcmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp', 'strchr', 'strrchr', 'strspn', 'strcspn', 'strpbrk', 'strstr', 'strtok', 'strlen', 'strerror',
 ];
-const stdioFunctions = [
-  'printf', 'fprintf', 'sprintf', 'snprintf', 'scanf', 'fscanf', 'sscanf', 'fopen', 'fclose', 'fflush', 'fgetc', 'getc', 'getchar', 'fgets', 'fputc', 'putc', 'putchar', 'fputs', 'puts',
-  'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'ungetc', 'feof', 'ferror', 'clearerr', 'perror',
-];
+const stdioFunctions = STDIO_FUNCTIONS;
 const inttypesFunctions = ['imaxabs', 'imaxdiv', 'strtoimax', 'strtoumax'];
 const inttypesFormatFamilies = [
   ...[8, 16, 32, 64].flatMap((width) => [
@@ -101,9 +100,9 @@ export const LIBRARY_DECLARATIONS: Readonly<Record<string, readonly string[]>> =
   'stddef.h': Object.freeze([]),
   'stdint.h': Object.freeze([]),
   'stdio.h': Object.freeze(stdioFunctions),
-  'wchar.h': Object.freeze([]),
-  'stdlib.h': Object.freeze([...HEAP_ALLOCATOR_BUILTINS, 'free']),
+  'stdlib.h': STDLIB_FUNCTIONS,
   'string.h': Object.freeze(stringFunctions),
+  'time.h': TIME_FUNCTIONS,
 });
 export const LIBRARY_FUNCTIONS: readonly string[] = Object.freeze([
   ...new Set(Object.values(LIBRARY_DECLARATIONS).flat()),
@@ -130,57 +129,7 @@ typedef __c11_va_list va_list;
 #define va_end(ap) __builtin_va_end(&(ap))
 `;
 
-const stdioBody = `
-#include <stddef.h>
-#include <stdarg.h>
-typedef struct __c11_FILE FILE;
-typedef long fpos_t;
-#define EOF (-1)
-#define BUFSIZ 4096
-#define FOPEN_MAX 16
-#define FILENAME_MAX 4096
-#define SEEK_SET 0
-#define SEEK_CUR 1
-#define SEEK_END 2
-#define _IOFBF 0
-#define _IOLBF 1
-#define _IONBF 2
-FILE *__c11_stdin(void);
-FILE *__c11_stdout(void);
-FILE *__c11_stderr(void);
-#define stdin (__c11_stdin())
-#define stdout (__c11_stdout())
-#define stderr (__c11_stderr())
-int printf(const char * restrict, ...);
-int fprintf(FILE * restrict, const char * restrict, ...);
-int sprintf(char * restrict, const char * restrict, ...);
-int snprintf(char * restrict, size_t, const char * restrict, ...);
-int scanf(const char * restrict, ...);
-int fscanf(FILE * restrict, const char * restrict, ...);
-int sscanf(const char * restrict, const char * restrict, ...);
-FILE *fopen(const char * restrict, const char * restrict);
-int fclose(FILE *);
-int fflush(FILE *);
-int fgetc(FILE *);
-int getc(FILE *);
-int getchar(void);
-char *fgets(char * restrict, int, FILE * restrict);
-int fputc(int, FILE *);
-int putc(int, FILE *);
-int putchar(int);
-int fputs(const char * restrict, FILE * restrict);
-int puts(const char *);
-size_t fread(void * restrict, size_t, size_t, FILE * restrict);
-size_t fwrite(const void * restrict, size_t, size_t, FILE * restrict);
-int fseek(FILE *, long, int);
-long ftell(FILE *);
-void rewind(FILE *);
-int ungetc(int, FILE *);
-int feof(FILE *);
-int ferror(FILE *);
-void clearerr(FILE *);
-void perror(const char *);
-`;
+const stdioBody = STDIO_HEADER_BODY;
 
 const stringBody = `
 #include <stddef.h>
@@ -217,9 +166,7 @@ void __c11_assert_fail(const char *, const char *, unsigned long);
   'errno.h': guarded('errno.h', `
 extern int *__c11_errno_location(void);
 #define errno (*__c11_errno_location())
-#define EDOM 33
-#define EILSEQ 84
-#define ERANGE 34`),
+${Object.entries(ERRNO_MACROS).map(([name, value]) => `#define ${name} ${value}`).join('\n')}`),
   'float.h': guarded('float.h', Object.entries(floatMacros).map(([name, value]) => `#define ${name} ${value}`).join('\n')),
   'inttypes.h': guarded('inttypes.h', `
 #include <stdint.h>
@@ -280,21 +227,14 @@ int fpclassify(double);`),
   'stddef.h': guarded('stddef.h', `
 typedef unsigned long size_t;
 typedef long ptrdiff_t;
-typedef int wchar_t;
 typedef struct { long long __c11_max_align_ll; long double __c11_max_align_ld; } max_align_t;
 #define offsetof(type, member) __builtin_offsetof(type, member)
 #define NULL ((void *)0)`),
   'stdint.h': guarded('stdint.h', stdintBody),
   'stdio.h': guarded('stdio.h', stdioBody),
-  'wchar.h': guarded('wchar.h', `
-#include <stddef.h>
-typedef unsigned int wint_t;
-#define WEOF ((wint_t)-1)`),
-  'stdlib.h': guarded('stdlib.h', `
-#include <stddef.h>
-${HEAP_ALLOCATOR_BUILTINS.map((name) => HEAP_ALLOCATOR_SIGNATURES[name].prototype).join('\n')}
-void free(void *);`),
+  'stdlib.h': guarded('stdlib.h', STDLIB_HEADER_BODY),
   'string.h': guarded('string.h', stringBody),
+  'time.h': guarded('time.h', TIME_HEADER_BODY),
 };
 
 export const STANDARD_HEADERS: Readonly<Record<string, string>> = Object.freeze(standardHeaders);

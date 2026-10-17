@@ -1,18 +1,23 @@
 import type { AggregateValue, CType, CValue, Location, ObjectPointerValue } from './internal.ts';
 import { binary80FromNumber, binary80ToRational, formatBinary80Hex, parseBinary80 } from './binary80.ts';
 import type { Binary80Value } from './binary80.ts';
+import { ERRNO_CODES, ERRNO_MESSAGES } from './errno-metadata.ts';
+import { dispatchStdlibConversionBuiltin, digitForBase } from './stdlib-conversions.ts';
+import { dispatchStdlibBuiltin } from './stdlib-library.ts';
+import { dispatchTimeBuiltin } from './time-library.ts';
+import type { StdlibTimeRuntimeContext } from './stdlib-time-context.ts';
 import { isValidVirtualOpenMode } from './virtual-io.ts';
 import { normalizeVirtualPath } from './virtual-path.ts';
 import type { VirtualByteRead, VirtualIO, VirtualStream } from './virtual-io.ts';
+import type { LibraryBuiltinGenerator, LibraryBuiltinRequest } from './library-requests.ts';
 
 const EOF_VALUE = -1;
-const INPUT_NEEDED = 'input-needed' as const;
 const STREAM_READ_CHUNK_BYTES = 4096;
-const ERRNO = Object.freeze({ EIO: 5, ENOENT: 2, EBADF: 9, EINVAL: 22, ERANGE: 34, EILSEQ: 84 });
+const ERRNO = ERRNO_CODES;
 const intTypes = new Set(['_Bool', 'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'long', 'unsigned long', 'long long', 'unsigned long long']);
 const decodeUtf8 = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 
-export type ResumableLibraryBuiltin = Generator<typeof INPUT_NEEDED, CValue, void>;
+export type ResumableLibraryBuiltin = LibraryBuiltinGenerator;
 export type LibraryBuiltinResult = CValue | ResumableLibraryBuiltin;
 
 function invalid(context: LibraryRuntimeContext, message: string, at: Location): never {
@@ -129,6 +134,7 @@ function strtokBuiltin(args: readonly CValue[], resultType: CType | undefined, c
 }
 
 const strtokState = new WeakMap<VirtualIO, CValue>();
+const tmpnamBuffers = new WeakMap<VirtualIO, CValue>();
 
 /** Runtime services supplied by execute.ts; no host I/O or DOM APIs cross this boundary. */
 export interface LibraryRuntimeContext {
@@ -147,6 +153,10 @@ export interface LibraryRuntimeContext {
   standardFile(kind: 'stdin' | 'stdout' | 'stderr', at: Location): CValue;
   makeFilePointer(stream: VirtualStream, at: Location): CValue;
   closeFilePointer(file: CValue, at: Location): number;
+  /** Fetch and consume a live va_list for a standard v* routine. */
+  consumeVaList(list: CValue, at: Location): readonly CValue[];
+  /** Reopen a stream in place, preserving the FILE* value and standard-stream binding. */
+  reopenFilePointer(file: CValue, path: string | null, mode: string, at: Location): CValue | null;
   errno: { get(): number; set(value: number): void };
   makeErrnoPointer(): CValue;
   makeInt(value: bigint | number, type?: CType): CValue;
@@ -168,9 +178,15 @@ export function dispatchLibraryBuiltin(
   name: string,
   args: readonly CValue[],
   resultType: CType | undefined,
-  context: LibraryRuntimeContext,
+  context: StdlibTimeRuntimeContext,
 ): LibraryBuiltinResult | undefined {
   const at = context.at;
+  const conversion = dispatchStdlibConversionBuiltin(name, args, resultType, context);
+  if (conversion !== undefined) return conversion;
+  const stdlib = dispatchStdlibBuiltin(name, args, resultType, context);
+  if (stdlib !== undefined) return stdlib;
+  const time = dispatchTimeBuiltin(name, args, resultType, context);
+  if (time !== undefined) return time;
   if (name === '__c11_nan' || name === '__c11_inf') {
     argCount(args, 0, 0, name, context, at);
     return { type: resultType ?? 'float', value: name === '__c11_nan' ? NaN : Infinity };
@@ -306,7 +322,7 @@ export function dispatchLibraryBuiltin(
   if (name === 'strerror') {
     argCount(args, 1, 1, name, context, at);
     const code = Number(integerValue(args[0], at, context));
-    const message = code === 0 ? 'Success' : code === ERRNO.ENOENT ? 'No such file or directory' : code === ERRNO.EBADF ? 'Bad file descriptor' : code === ERRNO.EINVAL ? 'Invalid argument' : code === ERRNO.ERANGE ? 'Result out of range' : code === ERRNO.EIO ? 'Input/output error' : 'Unknown error';
+    const message = errorMessage(code);
     return returnPointer(context.makeString(new TextEncoder().encode(message), at), resultType);
   }
   if (name === 'imaxabs') {
@@ -337,16 +353,34 @@ export function dispatchLibraryBuiltin(
     };
     return { type: resultType, value };
   }
-  if (name === 'strtoimax' || name === 'strtoumax') return parseMaximumInteger(args, name, resultType, context, at);
+  if (name === 'remove' || name === 'rename') return fileOperationBuiltin(name, args, resultType, context, at);
+  if (name === 'tmpfile') {
+    argCount(args, 0, 0, name, context, at);
+    return returnPointer(context.makeFilePointer(context.io.openTemporaryFile(at), at), resultType);
+  }
+  if (name === 'tmpnam') return tmpnamBuiltin(args, resultType, context, at);
   if (name === 'fopen') return fopenBuiltin(args, resultType, context, at);
-  if (name.startsWith('printf') || name === 'fprintf' || name === 'sprintf' || name === 'snprintf') {
-    return printfBuiltin(name, args, resultType, context, at);
+  if (name === 'freopen') return freopenBuiltin(args, resultType, context, at);
+  const outputVBase = ({ vprintf: 'printf', vfprintf: 'fprintf', vsprintf: 'sprintf', vsnprintf: 'snprintf' } as const)[name as 'vprintf' | 'vfprintf' | 'vsprintf' | 'vsnprintf'];
+  if (outputVBase) {
+    const fixedCount = outputVBase === 'printf' ? 1 : outputVBase === 'snprintf' ? 3 : 2;
+    argCount(args, fixedCount + 1, fixedCount + 1, name, context, at);
+    const varargs = context.consumeVaList(args[fixedCount], at);
+    return printfBuiltin(outputVBase, [...args.slice(0, fixedCount), ...varargs], resultType, context, at);
+  }
+  if (['printf', 'fprintf', 'sprintf', 'snprintf'].includes(name)) return printfBuiltin(name, args, resultType, context, at);
+  const inputVBase = ({ vscanf: 'scanf', vfscanf: 'fscanf', vsscanf: 'sscanf' } as const)[name as 'vscanf' | 'vfscanf' | 'vsscanf'];
+  if (inputVBase) {
+    const fixedCount = inputVBase === 'scanf' ? 1 : 2;
+    argCount(args, fixedCount + 1, fixedCount + 1, name, context, at);
+    const varargs = context.consumeVaList(args[fixedCount], at);
+    return scanfBuiltin(inputVBase, [...args.slice(0, fixedCount), ...varargs], resultType, context, at);
   }
   if (['scanf', 'fscanf', 'sscanf'].includes(name)) return scanfBuiltin(name, args, resultType, context, at);
   if (['fgetc', 'getc', 'getchar', 'fgets', 'fread'].includes(name)) {
     return streamInputBuiltin(name, args, resultType, context, at);
   }
-  if (['fclose', 'fflush', 'fputc', 'putc', 'putchar', 'fputs', 'puts', 'fwrite', 'fseek', 'ftell', 'rewind', 'ungetc', 'feof', 'ferror', 'clearerr', 'perror'].includes(name)) {
+  if (['fclose', 'fflush', 'fputc', 'putc', 'putchar', 'fputs', 'puts', 'fwrite', 'fseek', 'ftell', 'fgetpos', 'fsetpos', 'rewind', 'ungetc', 'feof', 'ferror', 'clearerr', 'perror', 'setbuf', 'setvbuf'].includes(name)) {
     return streamBuiltin(name, args, resultType, context, at);
   }
   return undefined;
@@ -367,57 +401,6 @@ function compareCStringBytes(left: Uint8Array, right: Uint8Array, count: number)
   return 0;
 }
 
-function parseMaximumInteger(args: readonly CValue[], name: string, resultType: CType | undefined, context: LibraryRuntimeContext, at: Location): CValue {
-  argCount(args, 3, 3, name, context, at);
-  const source = cString(args[0], at, context);
-  let base = Number(integerValue(args[2], at, context));
-  if (base !== 0 && (base < 2 || base > 36)) {
-    context.errno.set(ERRNO.EINVAL);
-    return context.makeInt(0n, resultType);
-  }
-  context.chargeWork(source.length, at);
-  let index = 0;
-  while (index < source.length && asciiWhitespace.has(source[index])) index++;
-  let negative = false;
-  if (source[index] === 43 || source[index] === 45) negative = source[index++] === 45;
-  if ((base === 0 || base === 16) && source[index] === 48 && (source[index + 1] === 120 || source[index + 1] === 88) && digitForBase(source[index + 2] ?? -1, 16) >= 0) {
-    base = 16; index += 2;
-  } else if (base === 0) base = source[index] === 48 ? 8 : 10;
-  const firstDigit = index;
-  let magnitude = 0n;
-  const maximum = name === 'strtoumax' ? (1n << 64n) - 1n : negative ? 1n << 63n : (1n << 63n) - 1n;
-  let overflow = false;
-  while (index < source.length) {
-    const digit = digitForBase(source[index], base);
-    if (digit < 0) break;
-    const next = magnitude * BigInt(base) + BigInt(digit);
-    if (next > maximum) { overflow = true; magnitude = maximum; }
-    else if (!overflow) magnitude = next;
-    index++;
-  }
-  // C requires endptr to retain the original nptr when no conversion occurs,
-  // including when leading whitespace or a sign was consumed while probing.
-  let end = firstDigit === index ? 0 : index;
-  if (firstDigit === index) magnitude = 0n;
-  let value = negative ? -magnitude : magnitude;
-  if (name === 'strtoumax') value = BigInt.asUintN(64, value);
-  else value = BigInt.asIntN(64, value);
-  if (overflow) {
-    context.errno.set(ERRNO.ERANGE);
-    value = name === 'strtoumax' ? (1n << 64n) - 1n : negative ? -(1n << 63n) : (1n << 63n) - 1n;
-  }
-  if (args[1].value !== null) {
-    const endPointer = context.offsetPointer(args[0], end, at);
-    context.writeScalar(args[1], endPointer, at);
-  }
-  return context.makeInt(value, resultType);
-}
-
-function digitForBase(byte: number, base: number): number {
-  const digit = byte >= 48 && byte <= 57 ? byte - 48 : byte >= 65 && byte <= 90 ? byte - 55 : byte >= 97 && byte <= 122 ? byte - 87 : -1;
-  return digit >= 0 && digit < base ? digit : -1;
-}
-
 function fopenBuiltin(args: readonly CValue[], resultType: CType | undefined, context: LibraryRuntimeContext, at: Location): CValue {
   argCount(args, 2, 2, 'fopen', context, at);
   const path = decodeUtf8(cString(args[0], at, context));
@@ -427,8 +410,57 @@ function fopenBuiltin(args: readonly CValue[], resultType: CType | undefined, co
     return { type: resultType ?? args[0].type, value: null };
   }
   const file = context.openFile(path, mode, at);
-  if (!file) context.errno.set(ERRNO.ENOENT);
+  if (!file) context.errno.set(mode.endsWith('x') && context.io.hasFile(path) ? ERRNO.EEXIST : ERRNO.ENOENT);
   return file ? returnPointer(file, resultType) : { type: resultType ?? args[0].type, value: null };
+}
+
+function freopenBuiltin(args: readonly CValue[], resultType: CType | undefined, context: LibraryRuntimeContext, at: Location): CValue {
+  argCount(args, 3, 3, 'freopen', context, at);
+  const path = args[0].value === null ? null : decodeUtf8(cString(args[0], at, context));
+  const mode = decodeUtf8(cString(args[1], at, context));
+  if (!isValidVirtualOpenMode(mode)) {
+    context.errno.set(ERRNO.EINVAL);
+    return { type: resultType ?? args[2].type, value: null };
+  }
+  const existed = path !== null && context.io.hasFile(path);
+  const file = context.reopenFilePointer(args[2], path, mode, at);
+  if (!file) context.errno.set(mode.endsWith('x') && existed ? ERRNO.EEXIST : path === null ? ERRNO.EINVAL : ERRNO.ENOENT);
+  return file ? returnPointer(file, resultType) : { type: resultType ?? args[2].type, value: null };
+}
+
+function fileOperationBuiltin(name: 'remove' | 'rename', args: readonly CValue[], resultType: CType | undefined, context: LibraryRuntimeContext, at: Location): CValue {
+  if (name === 'remove') {
+    argCount(args, 1, 1, name, context, at);
+    const path = decodeUtf8(cString(args[0], at, context));
+    const existed = context.io.hasFile(path);
+    const success = context.io.removeFile(path, at);
+    if (!success) context.errno.set(existed ? ERRNO.EBUSY : ERRNO.ENOENT);
+    return returnInteger(success ? 0 : -1, resultType, context);
+  }
+  argCount(args, 2, 2, name, context, at);
+  const oldPath = decodeUtf8(cString(args[0], at, context));
+  const newPath = decodeUtf8(cString(args[1], at, context));
+  const sourceExists = context.io.hasFile(oldPath), destinationExists = context.io.hasFile(newPath);
+  const success = context.io.renameFile(oldPath, newPath);
+  if (!success) context.errno.set(!sourceExists ? ERRNO.ENOENT : destinationExists ? ERRNO.EEXIST : ERRNO.EBUSY);
+  return returnInteger(success ? 0 : -1, resultType, context);
+}
+
+function tmpnamBuiltin(args: readonly CValue[], resultType: CType | undefined, context: LibraryRuntimeContext, at: Location): CValue {
+  argCount(args, 1, 1, 'tmpnam', context, at);
+  const name = context.io.nextTemporaryName();
+  if (!name) return { type: resultType ?? args[0].type, value: null };
+  const bytes = new TextEncoder().encode(`${name}\0`);
+  if (args[0].value === null) {
+    let buffer = tmpnamBuffers.get(context.io);
+    if (!buffer) {
+      buffer = context.makeString(bytes.subarray(0, -1), at);
+      tmpnamBuffers.set(context.io, buffer);
+    } else writeBytes(buffer, bytes, at, context);
+    return returnPointer(buffer, resultType);
+  }
+  writeBytes(args[0], bytes, at, context);
+  return returnPointer(args[0], resultType);
 }
 
 function printfBuiltin(name: string, args: readonly CValue[], resultType: CType | undefined, context: LibraryRuntimeContext, at: Location): CValue {
@@ -529,6 +561,9 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
       context.writeScalar(pointer, context.makeInt(total, printfCountType(length)), at);
       continue;
     }
+    if (length === 'l' && (specifier === 'c' || specifier === 's')) {
+      return context.fail('UNSUPPORTED_FEATURE', `La conversión wide printf «%l${specifier}» está fuera del alcance implementado.`, at);
+    }
     const value = take();
     const longDouble = length === 'L' && 'fFeEgGaA'.includes(specifier) ? asBinary80(value) : undefined;
     if (length === 'L' && 'fFeEgGaA'.includes(specifier) && !longDouble) {
@@ -596,20 +631,11 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
       reserve(Math.max(width ?? 0, sign.length + digits.length));
       core = encodePadded(sign, digits, width ?? 0, flags, true, context, at);
     } else if (specifier === 's') {
-      let bytes = length === 'l'
-        ? wideStringToBytes(value, precision, total, context, at)
-        : cString(value, at, context);
+      let bytes = cString(value, at, context);
       if (bytes === null) return null;
       if (precision !== undefined) bytes = bytes.subarray(0, precision);
       core = padBytes(bytes, width ?? 0, flags.includes('-'), context, at, total);
     } else if (specifier === 'c') {
-      if (length === 'l') {
-        const byte = wideCharacterToByte(integerValue(value, at, context), context, at);
-        if (byte === null) return null;
-        core = padBytes(new Uint8Array([byte]), width ?? 0, flags.includes('-'), context, at, total);
-        append(core);
-        continue;
-      }
       const byte = Number(BigInt.asUintN(8, integerValue(value, at, context)));
       core = padBytes(new Uint8Array([byte]), width ?? 0, flags.includes('-'), context, at, total);
     } else if (specifier === 'p') {
@@ -627,40 +653,6 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
   let offset = 0;
   for (const part of pieces) { result.set(part, offset); offset += part.length; }
   return result;
-}
-
-function wideCharacterToByte(value: bigint, context: LibraryRuntimeContext, at: Location): number | null {
-  const scalar = Number(BigInt.asUintN(32, value));
-  context.chargeWork(1, at);
-  if (scalar > 0x7f) {
-    context.errno.set(ERRNO.EILSEQ);
-    return null;
-  }
-  return scalar;
-}
-
-function wideStringToBytes(
-  value: CValue,
-  precision: number | undefined,
-  total: number,
-  context: LibraryRuntimeContext,
-  at: Location,
-): Uint8Array | null {
-  if (value.value === null) invalid(context, 'No se puede leer una cadena wide desde un puntero nulo.', at);
-  const bytes: number[] = [];
-  while (precision === undefined || bytes.length < precision) {
-    const scalarBytes = context.readBytes(context.offsetPointer(value, bytes.length * 4, at), 4, at);
-    const scalar = new DataView(scalarBytes.buffer, scalarBytes.byteOffset, scalarBytes.byteLength).getUint32(0, true);
-    if (scalar === 0) break;
-    context.chargeWork(1, at);
-    if (scalar > 0x7f) {
-      context.errno.set(ERRNO.EILSEQ);
-      return null;
-    }
-    bytes.push(scalar);
-    context.preflightOutputBytes(total + bytes.length, at);
-  }
-  return Uint8Array.from(bytes);
 }
 
 function asBinary80(value: CValue): Binary80Value | undefined {
@@ -882,11 +874,11 @@ function formatGeneralFloat(value: number, precision: number, alternate: boolean
     : fixed.includes('.') ? fixed.replace(/0+$/, '').replace(/\.$/, '') : fixed;
 }
 
-function* readStreamByte(stream: VirtualStream, at: Location): Generator<typeof INPUT_NEEDED, number, void> {
+function* readStreamByte(stream: VirtualStream, at: Location): Generator<LibraryBuiltinRequest, number, CValue | void> {
   while (true) {
     const result = stream.readByteResult(at);
     if (result.kind === 'pending') {
-      yield INPUT_NEEDED;
+      yield { kind: 'input-needed' };
       continue;
     }
     return result.kind === 'byte' ? result.value : EOF_VALUE;
@@ -956,7 +948,7 @@ function* streamInputBuiltin(
       }
       const next = stream.readByteResult(at);
       if (next.kind === 'pending') {
-        yield INPUT_NEEDED;
+        yield { kind: 'input-needed' };
         continue;
       }
       if (next.kind === 'eof') break;
@@ -992,7 +984,9 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
   const eof = (): CValue => returnInteger(EOF_VALUE, resultType, context);
   if (name === 'fclose') {
     argCount(args, 1, 1, name, context, at);
-    return returnInteger(context.closeFilePointer(args[0], at), resultType, context);
+    const result = context.closeFilePointer(args[0], at);
+    if (result < 0) context.errno.set(ERRNO.EBADF);
+    return returnInteger(result, resultType, context);
   }
   if (name === 'fflush') {
     argCount(args, 0, 1, name, context, at);
@@ -1057,6 +1051,46 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
     else stream.clearError();
     return returnVoid();
   }
+  if (name === 'fgetpos') {
+    argCount(args, 2, 2, name, context, at);
+    const stream = context.streamFor(args[0], at);
+    if (!stream) { context.errno.set(ERRNO.EBADF); return returnInteger(1, resultType, context); }
+    const position = stream.tell();
+    if (position < 0) { context.errno.set(ERRNO.EIO); return returnInteger(1, resultType, context); }
+    context.writeScalar(args[1], context.makeInt(position, 'long'), at);
+    return returnInteger(0, resultType, context);
+  }
+  if (name === 'fsetpos') {
+    argCount(args, 2, 2, name, context, at);
+    const stream = context.streamFor(args[0], at);
+    if (!stream) { context.errno.set(ERRNO.EBADF); return returnInteger(1, resultType, context); }
+    const bytes = context.readBytes(args[1], 8, at);
+    let encoded = 0n;
+    for (let index = bytes.length - 1; index >= 0; index--) encoded = encoded << 8n | BigInt(bytes[index]);
+    const position = BigInt.asIntN(64, encoded);
+    if (position < 0n || !stream.seek(position, 0, at)) {
+      context.errno.set(ERRNO.EINVAL);
+      return returnInteger(1, resultType, context);
+    }
+    return returnInteger(0, resultType, context);
+  }
+  if (name === 'setbuf') {
+    argCount(args, 2, 2, name, context, at);
+    requireStream(args[0]);
+    // Virtual streams expose writes immediately so interactive prompts remain visible.
+    return returnVoid();
+  }
+  if (name === 'setvbuf') {
+    argCount(args, 4, 4, name, context, at);
+    requireStream(args[0]);
+    const mode = Number(integerValue(args[2], at, context));
+    if (![0, 1, 2].includes(mode)) {
+      context.errno.set(ERRNO.EINVAL);
+      return returnInteger(1, resultType, context);
+    }
+    // The virtual profile keeps every stream synchronous; only _IONBF is honored.
+    return returnInteger(mode === 2 ? 0 : 1, resultType, context);
+  }
   if (name === 'ungetc') {
     argCount(args, 2, 2, name, context, at);
     const byte = Number(integerValue(args[0], at, context));
@@ -1076,10 +1110,10 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
   }
   if (name === 'perror') {
     argCount(args, 1, 1, name, context, at);
-    const prefix = cString(args[0], at, context);
+    const prefix = args[0].value === null ? new Uint8Array() : cString(args[0], at, context);
     const code = context.errno.get();
-    const message = code === 0 ? 'Success' : code === ERRNO.ENOENT ? 'No such file or directory' : code === ERRNO.EBADF ? 'Bad file descriptor' : code === ERRNO.EINVAL ? 'Invalid argument' : code === ERRNO.ERANGE ? 'Result out of range' : code === ERRNO.EIO ? 'Input/output error' : 'Unknown error';
-    const text = new TextEncoder().encode(`${prefix.length ? `${decodeUtf8(prefix)}: ` : ''}${message}\n`);
+    const message = errorMessage(code);
+    const text = new TextEncoder().encode(`${args[0].value === null ? '' : `${decodeUtf8(prefix)}: `}${message}\n`);
     context.preflightOutputBytes(text.length, at);
     context.io.stderr.writeBytes(text, at);
     return returnVoid();
@@ -1088,6 +1122,8 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
 }
 
 function eofMinusOne(resultType: CType | undefined, context: LibraryRuntimeContext): CValue { return returnInteger(-1, resultType, context); }
+
+function errorMessage(code: number): string { return ERRNO_MESSAGES[code] ?? 'Unknown error'; }
 
 interface ScanInput {
   peek(): VirtualByteRead;
@@ -1127,18 +1163,18 @@ function makeScanInput(stream: VirtualStream | undefined, source: Uint8Array | u
   };
 }
 
-function* scanPeek(input: ScanInput): Generator<typeof INPUT_NEEDED, number, void> {
+function* scanPeek(input: ScanInput): Generator<LibraryBuiltinRequest, number, CValue | void> {
   while (true) {
     const result = input.peek();
     if (result.kind === 'pending') {
-      yield INPUT_NEEDED;
+      yield { kind: 'input-needed' };
       continue;
     }
     return result.kind === 'byte' ? result.value : EOF_VALUE;
   }
 }
 
-function* scanTake(input: ScanInput): Generator<typeof INPUT_NEEDED, number, void> {
+function* scanTake(input: ScanInput): Generator<LibraryBuiltinRequest, number, CValue | void> {
   const value = yield* scanPeek(input);
   if (value < 0) {
     input.take();
@@ -1174,7 +1210,7 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     if (!pointer) invalid(context, 'La cadena de formato scanf requiere más punteros destino.', at);
     return pointerValue(pointer, at, context);
   };
-  const skipSpace = function* (): Generator<typeof INPUT_NEEDED, void, void> {
+  const skipSpace = function* (): Generator<LibraryBuiltinRequest, void, CValue | void> {
     while (asciiWhitespace.has(yield* scanPeek(input))) { yield* scanTake(input); context.chargeWork(1, at); }
   };
   const mismatch = (eof: boolean): void => { inputFailure = eof; };
@@ -1206,6 +1242,10 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     let length = '';
     for (const candidate of ['hh', 'll', 'h', 'l', 'j', 'z', 't', 'L']) if (format.startsWith(candidate, index)) { length = candidate; index += candidate.length; break; }
     let specifier = format[index++];
+    if (!specifier) invalid(context, 'La cadena de formato scanf termina dentro de una conversión.', at);
+    if (length === 'l' && (specifier === 'c' || specifier === 's' || specifier === '[')) {
+      return context.fail('UNSUPPORTED_FEATURE', `La conversión wide scanf «%l${specifier}» está fuera del alcance implementado.`, at);
+    }
     let scanset: Set<number> | undefined;
     let scansetInvert = false;
     if (specifier === '[') {
@@ -1224,45 +1264,18 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
       }
       if (!closed) invalid(context, 'La lista de conversión %[ no tiene cierre ].', at);
     }
-    if (!specifier) invalid(context, 'La cadena de formato scanf termina dentro de una conversión.', at);
     if (specifier === 'n') {
       if (!suppress) context.writeScalar(takeDestination(), context.makeInt(input.consumed, scanIntegerType('d', length)), at);
       continue;
     }
     const isCharacter = specifier === 'c';
     const isString = specifier === 's' || specifier === '[';
-    if (length === 'l' && specifier === '[') {
-      return context.fail('UNSUPPORTED_FEATURE', 'La conversión wide scanf «%l[» aún no está implementada.', at);
-    }
     // C's scanf skips leading whitespace for %s and numeric conversions, but
     // not for %c or %[]. This also lets a later %s cross a pending line break.
     if (!isCharacter && specifier !== '[') yield* skipSpace();
     const bytes: number[] = [];
     if (isCharacter) {
       const wanted = widthText ? width : 1;
-      if (length === 'l') {
-        const scalars: number[] = [];
-        let encodingError = false;
-        while (scalars.length < wanted) {
-          const byte = yield* scanPeek(input);
-          if (byte < 0) break;
-          if (byte > 0x7f) {
-            yield* scanTake(input);
-            context.errno.set(ERRNO.EILSEQ);
-            input.markError();
-            encodingError = true;
-            break;
-          }
-          scalars.push(yield* scanTake(input)); context.chargeWork(1, at);
-        }
-        if (encodingError) break;
-        if (scalars.length < wanted) { mismatch(true); break; }
-        if (!suppress) {
-          writeBytes(takeDestination(), encodeWideScalars(scalars), at, context);
-          assigned++;
-        }
-        continue;
-      }
       while (bytes.length < wanted) {
         const byte = yield* scanPeek(input);
         if (byte < 0) break;
@@ -1277,30 +1290,6 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
       continue;
     }
     if (isString) {
-      if (length === 'l') {
-        const scalars: number[] = [];
-        let encodingError = false;
-        while (scalars.length < width) {
-          const byte = yield* scanPeek(input);
-          if (byte < 0 || asciiWhitespace.has(byte)) break;
-          if (byte > 0x7f) {
-            yield* scanTake(input);
-            context.errno.set(ERRNO.EILSEQ);
-            input.markError();
-            encodingError = true;
-            break;
-          }
-          scalars.push(yield* scanTake(input)); context.chargeWork(1, at);
-        }
-        if (encodingError) break;
-        if (!scalars.length) { mismatch((yield* scanPeek(input)) < 0); break; }
-        if (!suppress) {
-          scalars.push(0);
-          writeBytes(takeDestination(), encodeWideScalars(scalars), at, context);
-          assigned++;
-        }
-        continue;
-      }
       while (bytes.length < width) {
         const byte = yield* scanPeek(input);
         if (byte < 0 || (specifier === 's' ? asciiWhitespace.has(byte) : scansetInvert ? scanset!.has(byte) : !scanset!.has(byte))) break;
@@ -1374,13 +1363,6 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
 function parseScannedBinary80(text: string): Binary80Value | undefined {
   try { return parseBinary80(text); }
   catch { return undefined; }
-}
-
-function encodeWideScalars(scalars: readonly number[]): Uint8Array {
-  const bytes = new Uint8Array(scalars.length * 4);
-  const view = new DataView(bytes.buffer);
-  scalars.forEach((scalar, index) => view.setUint32(index * 4, scalar, true));
-  return bytes;
 }
 
 function scanIntegerType(specifier: string, length: string): CType {

@@ -294,11 +294,16 @@ export class VirtualMemory {
   }
 
   allocateRaw(bytes: number, at: Location): ObjectPointerValue | null {
+    return this.allocateRawAligned(bytes, Number(ALLOCATION_ALIGNMENT), at);
+  }
+
+  allocateRawAligned(bytes: number, alignment: number, at: Location): ObjectPointerValue | null {
     if (!Number.isSafeInteger(bytes) || bytes < 0) failure('INVALID_ALLOCATION_SIZE', 'malloc requiere un tamaño entero seguro no negativo.', at);
+    this.validateAlignment(alignment, at);
     // This profile chooses the permitted C11 behavior that malloc(0) returns null.
     if (bytes === 0) return null;
     const nextBytes = this.nextAllocationByteCount(bytes, at);
-    const heapAddress = this.chooseHeapAddress(bytes, at);
+    const heapAddress = this.chooseHeapAddress(bytes, at, undefined, alignment);
     if (!heapAddress) return null;
     const root = this.allocateRoot(
       arrayOf('unsigned char', bytes), bytes, 'heap', at, true,
@@ -1242,19 +1247,28 @@ export class VirtualMemory {
     };
   }
 
-  private chooseHeapAddress(size: number, at: Location, ignoredFirstSlot?: bigint): AddressReservation | undefined {
+  private chooseHeapAddress(
+    size: number, at: Location, ignoredFirstSlot?: bigint, alignment = Number(ALLOCATION_ALIGNMENT),
+  ): AddressReservation | undefined {
     const heapRange = VIRTUAL_MEMORY_LAYOUT.heapAddressRange;
     const totalSlots = (heapRange.endExclusive - heapRange.start) / ALLOCATION_ALIGNMENT;
     const slotCount = this.reservationSlotCount(size);
     if (slotCount > totalSlots) return undefined;
     const latestStart = totalSlots - slotCount;
+    const alignmentBytes = BigInt(alignment);
+    const alignSlot = (slot: bigint): bigint => {
+      if (alignment <= Number(ALLOCATION_ALIGNMENT)) return slot;
+      const address = heapRange.start + slot * ALLOCATION_ALIGNMENT;
+      const remainder = address % alignmentBytes;
+      return remainder === 0n ? slot : slot + (alignmentBytes - remainder) / ALLOCATION_ALIGNMENT;
+    };
     const randomStart = (): bigint => {
       const random = this.heapAddressRandom();
       if (!Number.isFinite(random) || random < 0 || random >= 1) {
         failure('ENGINE_INTERNAL_ERROR', 'El generador de direcciones heap produjo un valor inválido.', at);
       }
       // Slot counts in the configured heap region stay exactly representable as Number.
-      return BigInt(Math.floor(random * Number(latestStart + 1n)));
+      return alignSlot(BigInt(Math.floor(random * Number(latestStart + 1n))));
     };
     const occupiedExtents = [...this.heapExtents.entries()]
       .filter(([start]) => start !== ignoredFirstSlot);
@@ -1277,15 +1291,15 @@ export class VirtualMemory {
     // rather than searching the enormous virtual address interval one slot at a time.
     const occupied = occupiedExtents
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-    let candidate = 0n;
+    let candidate = alignSlot(0n);
     for (const [start, end] of occupied) {
-      if (start - candidate >= slotCount) {
+      if (candidate <= latestStart && candidate + slotCount <= start) {
         const virtualBase = heapRange.start + candidate * ALLOCATION_ALIGNMENT;
         return { virtualBase, endExclusive: heapRange.start + (candidate + slotCount) * ALLOCATION_ALIGNMENT, heapSlotCount: slotCount };
       }
-      if (end > candidate) candidate = end;
+      if (end > candidate) candidate = alignSlot(end);
     }
-    if (totalSlots - candidate >= slotCount) {
+    if (candidate <= latestStart) {
       const virtualBase = heapRange.start + candidate * ALLOCATION_ALIGNMENT;
       return { virtualBase, endExclusive: heapRange.start + (candidate + slotCount) * ALLOCATION_ALIGNMENT, heapSlotCount: slotCount };
     }
@@ -1721,6 +1735,7 @@ export class VirtualMemory {
     left = unqualifiedType(left);
     right = unqualifiedType(right);
     if (sameType(left, right)) return true;
+    if (compatibleType(left, right)) return true;
     if (isCharacterType(right)) return true;
     const leftName = typeof left === 'string' ? left : undefined;
     const rightName = typeof right === 'string' ? right : undefined;
@@ -2159,11 +2174,11 @@ export class VirtualMemory {
       const view = new DataView(Uint8Array.from(bytes).buffer);
       return type === 'float' ? view.getFloat32(0, true) : view.getFloat64(0, true);
     }
-    if (typeof type !== 'string' || !isInteger(type)) failure('TYPE_ERROR', `No existe una representación entera para ${String(type)}.`, at);
+    const info = integerInfo(type);
+    if (!info || !isInteger(type)) failure('TYPE_ERROR', `No existe una representación entera para ${String(type)}.`, at);
     const raw = this.fromBytes(bytes), bits = bytes.length * 8;
     if (type === '_Bool') return raw === 0n ? 0n : 1n;
-    const unsigned = type.startsWith('unsigned ');
-    return unsigned ? BigInt.asUintN(bits, raw) : BigInt.asIntN(bits, raw);
+    return info.unsigned ? BigInt.asUintN(bits, raw) : BigInt.asIntN(bits, raw);
   }
 
   private toBytes(value: bigint, size: number): number[] {
@@ -2192,6 +2207,7 @@ export class VirtualMemory {
     if (array) return `a${array.length ?? '?'}(${this.typeKey(array.element)})`;
     const aggregate = aggregateType(type);
     if (aggregate) return `g${aggregate.id}`;
+    if (typeof type !== 'string' && type.kind === 'enum') return `e${type.id}`;
     const fn = functionType(type);
     return fn ? `f(${this.typeKey(fn.returnType)}:${fn.parameters.map((item) => this.typeKey(item)).join(',')})` : 'unknown';
   }

@@ -17,11 +17,12 @@ export class VirtualIOError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
 
-interface FileState { data: Uint8Array }
+interface FileState { data: Uint8Array; openCount: number }
 type StreamKind = 'stdin' | 'stdout' | 'stderr' | 'file';
 export type VirtualStreamKind = StreamKind;
 export type VirtualSeekOrigin = 0 | 1 | 2;
 export type VirtualByteRead = { readonly kind: 'byte'; readonly value: number } | { readonly kind: 'eof' } | { readonly kind: 'pending' };
+export const VIRTUAL_TMP_MAX = 10_000;
 
 /** Byte-oriented C stream backed only by session-local virtual memory. */
 export class VirtualStream {
@@ -40,6 +41,7 @@ export class VirtualStream {
     readonly canWrite: boolean,
     private readonly append = false,
     initialAtEnd = false,
+    private readonly onClose?: () => void,
   ) {
     if (initialAtEnd) this.cursor = state.data.length;
   }
@@ -202,6 +204,7 @@ export class VirtualStream {
     this.closed = true;
     this.pushedByte = undefined;
     this.pushedConsumesPosition = false;
+    this.onClose?.();
     return true;
   }
 
@@ -223,10 +226,13 @@ export class VirtualStream {
 /** One fresh virtual stdin/stdout/stderr and file namespace per execute call. */
 export class VirtualIO {
   readonly argv: readonly string[];
-  readonly stdin: VirtualStream;
-  readonly stdout: VirtualStream;
-  readonly stderr: VirtualStream;
+  stdin: VirtualStream;
+  stdout: VirtualStream;
+  stderr: VirtualStream;
   private readonly files = new Map<string, FileState>();
+  private readonly issuedTemporaryNames = new Set<string>();
+  private readonly temporaryStreams = new Set<VirtualStream>();
+  private temporaryNameSequence = 0;
   private readonly output = { stdout: new Uint8Array(), stderr: new Uint8Array() };
   private readonly stdinState: FileState;
   private stdinIsOpen: boolean;
@@ -252,12 +258,12 @@ export class VirtualIO {
     this.argv = Object.freeze(argv.slice());
 
     const stdin = this.seed(options.stdin === undefined ? '' : options.stdin);
-    const stdinState: FileState = { data: new Uint8Array() };
+    const stdinState: FileState = { data: new Uint8Array(), openCount: 1 };
     this.stdinState = stdinState;
     this.stdinIsOpen = config.interactiveStdin ?? false;
     this.stdin = new VirtualStream('stdin', this, stdinState, true, false);
-    this.stdout = new VirtualStream('stdout', this, { data: new Uint8Array() }, false, true);
-    this.stderr = new VirtualStream('stderr', this, { data: new Uint8Array() }, false, true);
+    this.stdout = new VirtualStream('stdout', this, { data: new Uint8Array(), openCount: 1 }, false, true);
+    this.stderr = new VirtualStream('stderr', this, { data: new Uint8Array(), openCount: 1 }, false, true);
     this.resizeFile(stdinState, stdin.length, this.currentLocation);
     stdinState.data = stdin;
 
@@ -271,8 +277,8 @@ export class VirtualIO {
       if (!name) throw new VirtualIOError('INVALID_IO_PATH', `La ruta virtual «${file.name}» no es válida.`);
       if (this.files.has(name)) throw new VirtualIOError('INVALID_IO_PATH', `La ruta virtual «${name}» está duplicada.`);
       const data = this.seed(file.data);
-      this.resizeFile({ data: new Uint8Array() }, data.length, this.currentLocation);
-      this.files.set(name, { data });
+      this.resizeFile({ data: new Uint8Array(), openCount: 0 }, data.length, this.currentLocation);
+      this.files.set(name, { data, openCount: 0 });
     }
   }
 
@@ -302,8 +308,9 @@ export class VirtualIO {
     const parsed = parseMode(mode);
     if (!name || !parsed) return null;
     let state = this.files.get(name);
+    if (state && parsed.exclusive) return null;
     if (!state && parsed.create) {
-      state = { data: new Uint8Array() };
+      state = { data: new Uint8Array(), openCount: 0 };
       this.files.set(name, state);
     }
     if (!state) return null;
@@ -311,7 +318,76 @@ export class VirtualIO {
       this.resizeFile(state, 0, at);
       state.data = new Uint8Array();
     }
-    return new VirtualStream('file', this, state, parsed.read, parsed.write, parsed.append, parsed.append && !parsed.read);
+    state.openCount++;
+    return new VirtualStream(
+      'file', this, state, parsed.read, parsed.write, parsed.append, parsed.append && !parsed.read,
+      () => { state.openCount = Math.max(0, state.openCount - 1); },
+    );
+  }
+
+  /** Create an anonymous, update-mode file that disappears when its stream closes. */
+  openTemporaryFile(at: VirtualLocation = this.currentLocation): VirtualStream {
+    const state: FileState = { data: new Uint8Array(), openCount: 1 };
+    let stream: VirtualStream;
+    stream = new VirtualStream('file', this, state, true, true, false, false, () => {
+      this.temporaryStreams.delete(stream);
+      state.openCount = 0;
+      this.resizeFile(state, 0, at);
+      state.data = new Uint8Array();
+    });
+    this.temporaryStreams.add(stream);
+    return stream;
+  }
+
+  /** Release anonymous temporary files at VM session termination. */
+  closeTemporaryFiles(): void {
+    for (const stream of [...this.temporaryStreams]) stream.close();
+  }
+
+  /** Generate a new name in the virtual namespace without creating the file. */
+  nextTemporaryName(): string | undefined {
+    while (this.temporaryNameSequence < VIRTUAL_TMP_MAX) {
+      const candidate = `c11tmp${(this.temporaryNameSequence++).toString(36).padStart(4, '0')}`;
+      if (!this.files.has(candidate) && !this.issuedTemporaryNames.has(candidate)) {
+        this.issuedTemporaryNames.add(candidate);
+        return candidate;
+      }
+    }
+    return undefined;
+  }
+
+  hasFile(path: string): boolean {
+    const name = normalizeVirtualPath(path);
+    return name !== undefined && this.files.has(name);
+  }
+
+  /** The profile chooses failure if a file is open when remove is requested. */
+  removeFile(path: string, at: VirtualLocation = this.currentLocation): boolean {
+    const name = normalizeVirtualPath(path);
+    if (!name) return false;
+    const state = this.files.get(name);
+    if (!state || state.openCount > 0) return false;
+    this.files.delete(name);
+    this.resizeFile(state, 0, at);
+    return true;
+  }
+
+  /** The profile fails when the source is open or the destination already exists. */
+  renameFile(oldPath: string, newPath: string): boolean {
+    const oldName = normalizeVirtualPath(oldPath), newName = normalizeVirtualPath(newPath);
+    if (!oldName || !newName) return false;
+    const state = this.files.get(oldName);
+    if (!state) return false;
+    if (oldName === newName) return true;
+    if (state.openCount > 0 || this.files.has(newName)) return false;
+    this.files.delete(oldName);
+    this.files.set(newName, state);
+    return true;
+  }
+
+  /** Rebind a standard stream after freopen while preserving its FILE identity. */
+  replaceStandardStream(kind: 'stdin' | 'stdout' | 'stderr', stream: VirtualStream): void {
+    this[kind] = stream;
   }
 
   appendOutput(kind: 'stdout' | 'stderr', bytes: Uint8Array, at: VirtualLocation = this.currentLocation): void {
@@ -403,18 +479,23 @@ function utf8ByteLength(text: string): number {
   return length;
 }
 
-function parseMode(mode: string): { read: boolean; write: boolean; append: boolean; create: boolean; truncate: boolean } | undefined {
+function parseMode(mode: string): { read: boolean; write: boolean; append: boolean; create: boolean; truncate: boolean; exclusive: boolean } | undefined {
   if (typeof mode !== 'string') return undefined;
-  const match = /^(r|w|a)(b\+?|\+b?)?$/.exec(mode);
+  const match = /^(r|w|a)((?:b\+?|\+b?)?x?)$/.exec(mode);
   if (!match) return undefined;
   const lead = match[1];
-  const plus = match[2]?.includes('+') ?? false;
+  const suffix = match[2];
+  const exclusive = suffix.endsWith('x');
+  if (exclusive && lead !== 'w') return undefined;
+  const flags = exclusive ? suffix.slice(0, -1) : suffix;
+  const plus = flags.includes('+');
   return {
     read: lead === 'r' || plus,
     write: lead !== 'r' || plus,
     append: lead === 'a',
     create: lead !== 'r',
     truncate: lead === 'w',
+    exclusive,
   };
 }
 

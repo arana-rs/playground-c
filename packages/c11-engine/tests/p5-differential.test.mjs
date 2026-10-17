@@ -25,6 +25,8 @@ const fixtures = [
   { name: 'alignment, offsetof and standard alignment macros', files: ['alignment-stddef.c'], expected: 1 },
   { name: 'object pointer integer roundtrip through uintptr_t', files: ['pointer-uintptr-roundtrip.c'], expected: 1 },
   { name: 'typedef aliases compose with arrays and function pointers', files: ['typedef-declarators.c'], expected: 1 },
+  { name: 'incomplete types remain valid behind pointers and function prototypes', files: ['incomplete-declarators.c'], expected: 1 },
+  { name: 'typedef, parameter and prototype tags obey declarator scopes', files: ['declarator-scopes.c'], expected: 1 },
   { name: 'qualifiers, prototype arguments and default argument promotions', files: ['qualifiers-promotions.c'], expected: 1 },
   { name: 'array parameter static bounds and adjusted pointer qualifiers', files: ['array-parameter-modifiers.c'], expected: 1 },
   {

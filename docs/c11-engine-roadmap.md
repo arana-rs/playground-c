@@ -1,24 +1,30 @@
 # Motor C11: matriz y hoja de ruta
 
-Estado del motor **0.1.0: entrega inicial de P5 implementada parcialmente** en `packages/c11-engine`, con Run/Stop y consola integrados en el editor. La matriz mantiene el alcance completo como hoja de ruta: de las 65 familias —35 del lenguaje, 29 headers y una extensión opcional—, **49 están iniciadas parcialmente, 15 pendientes y una implementada**. P1–P5 tienen capacidades parciales; P6 sigue pendiente. Esto no declara C11 completo ni una fase P5 completa.
+Estado del motor **0.1.0: alcance acordado de P5 implementado en el perfil publicado** en `packages/c11-engine`, con Run/Stop y consola integrados en el editor. El inventario basado en C11 contiene 65 familias —35 del lenguaje, 29 headers y una extensión opcional—: **49 están iniciadas parcialmente, 15 siguen sin implementar y una está implementada**. Estas cifras describen la cobertura C11, no un compromiso de implementar todas las familias: ocho bloques figuran como `Unplanned`. P6 conserva sus áreas propuestas. El alcance de P5 está cerrado; esto no declara C11 completo ni conformidad con todo el estándar.
 
-## Estado implementado: P5 parcial
+En esta hoja, «parcial» califica la cobertura de familias completas de C11. El alcance afirmado para P5 es el perfil finito descrito aquí y en las regresiones, bajo x86-64 Linux LP64; no representa una lista de APIs soportadas que falten por implementar. Las funciones publicadas por `CAPABILITIES.stdioFunctions`, `stdlibFunctions` y `timeFunctions` tienen implementación en el motor. Las variantes fuera de esos conjuntos se distinguen mediante límites del perfil, el inventario P6 o `Unplanned`. Esta auditoría no encontró pendientes concretos adicionales dentro del alcance acordado de P5, que está implementado; esto no implica conformidad completa con C11.
 
-P5 añade una primera entrega de nueve áreas de lenguaje: bit-fields y padding, miembros flexibles, `const`/`volatile`/`restrict`, selección `_Generic`, alineación y `_Static_assert`, almacenamiento/linkage/`inline`/`_Thread_local`, declaradores y compatibilidad `typedef`, promociones/conversiones/argumentos y duración/representación/tipo efectivo. La implementación y sus aceptaciones se limitan al perfil x86-64 Linux LP64 descrito abajo. El motor conserva `completeC11: false`; la biblioteca estándar sigue parcial y las áreas pendientes de cada familia no se consideran completas.
+## P5: implementado en el perfil acordado
+
+El alcance acordado de P5 cubre nueve áreas de lenguaje: bit-fields y padding, miembros flexibles, `const`/`volatile`/`restrict`, selección `_Generic`, alineación y `_Static_assert`, almacenamiento/linkage/`inline`/`_Thread_local`, declaradores y compatibilidad `typedef`, promociones/conversiones/argumentos y duración/representación/tipo efectivo. Ese alcance está implementado y probado bajo el perfil x86-64 Linux LP64 descrito abajo. El motor conserva `completeC11: false`: la cobertura incompleta de una familia C11 no significa que quede abierta una tarea del alcance P5.
+
+El alcance acordado también incluye cuatro ampliaciones de biblioteca: `<time.h>`, las APIs y formatos narrow publicados de `<stdio.h>`, `<stdlib.h>`, y declaradores/declaraciones y compatibilidad de tipos, con diagnósticos para las violaciones de `restrict` cubiertas por el perfil. Las capacidades fuera del perfil y los bloques retirados de esta planificación se distinguen en la matriz y en «Unplanned»; no son tareas abiertas de P5.
+
+Para L07/L11, la matriz acotada de P5 cubre declaradores de arrays, funciones, punteros, punteros a función y alias `typedef`; ajustes de parámetros array/función; composición de arrays y funciones entre declaraciones y unidades de traducción; visibilidad en los espacios de nombres separados de typedef, nombres ordinarios y etiquetas, incluida la de parámetros y etiquetas de prototipo; completitud de tipos según el contexto de declaración, definición y uso; y conversiones de argumentos con promociones por defecto. El perfil conserva identidad de cada tipo enum, usa constantes enumeradas de tipo `int` y elige `int` como tipo entero compatible de los enums; compartir ese tipo compatible no hace compatibles enums distintos. Sus promociones son a `int`. Esta matriz no completa L07/L11 ni implica diagnósticos para toda restricción de C11. Las regresiones se reparten entre `packages/c11-engine/tests/p5-language.test.mjs`, `p5-language-extension.test.mjs`, `p5-differential.test.mjs` y `p5-enum-types.test.mjs`.
 
 El ABI de bit-fields se contrasta con GCC y Clang para SysV x86-64: las unidades se comparten según el layout del perfil, los campos sin nombre de ancho cero actúan como barrera, y un campo `int` simple se trata como firmado según ambos compiladores. Estos detalles de orden, asignación y signedness son decisiones de implementación de este perfil, no reglas universales de C11. Los miembros flexibles ocupan la cola dinámica de la asignación; `sizeof` conserva el tamaño fijo del struct y la asignación de structs no copia la cola. `offsetof` admite rutas de miembros y subíndices constantes, y rechaza bit-fields.
 
 Los tipos calificados se conservan en la semántica y en los nombres de tipo de los DTO; los tipos internos del compilador no forman parte de la API pública. El target admite alineaciones explícitas de potencias de dos hasta 65536 bytes. `malloc` garantiza alineación de 16 bytes; `<stddef.h>` define `max_align_t` con tamaño 32 y alineación 16 en este perfil, cubriendo la alineación fundamental máxima elegida. `_Thread_local` tiene duración propia visible en eventos y snapshots, pero el motor crea una sola instancia por sesión y no implementa concurrencia. Los casts entre puntero y `uintptr_t` pueden recuperar la identidad de direcciones virtuales conocidas/vivas según el perfil.
 
-La evaluación de objetos `volatile` se mantiene en las operaciones del abstract machine del motor; no representa acceso a hardware. `restrict` se conserva y valida en las conversiones cubiertas, pero el motor no promete detector dinámico completo de todas las violaciones de alias ni de UB. La cobertura de tipo efectivo, representación y union punning tampoco implica detección universal de UB. Las aceptaciones positivas y diagnósticos se contrastan con GCC/Clang cuando el perfil comparte su decisión de implementación.
+La evaluación de objetos `volatile` se mantiene en las operaciones del abstract machine del motor; no representa acceso a hardware. El detector dinámico de `restrict` cubre bases restrict independientes y solapamientos restrict/plain observados con modificación; permite derivados o copias de una misma cadena, solo lectura, falta de acceso y subobjetos disjuntos. No analiza solapamientos por operaciones byte a byte ni dentro de la biblioteca, y trata conservadoramente la procedencia desconocida. La cobertura de tipo efectivo, representación y union punning tampoco implica detección universal de UB. Las aceptaciones positivas y diagnósticos se contrastan con GCC/Clang cuando el perfil comparte su decisión de implementación.
 
 P4 conserva los escalares, expresiones, control, funciones, punteros y objetos de P1–P3. Añade fases de traducción C, trigraphs y continuaciones de línea, UCN, concatenación de literales, macros de objeto/función/variádicas, stringize, token paste, rescaneo, `#undef`, condicionales, includes de archivos virtuales, `#line`, `#error`, pragmas STDC y macros predefinidas publicadas. Cada unidad de traducción prepara su propio estado del preprocesador.
 
 Los proyectos admiten varias unidades de traducción. `static` limita el linkage al archivo y `extern` enlaza declaraciones entre unidades; funciones K&R, `inline`, `_Noreturn`, objetos globales y funciones variádicas se cubren dentro del perfil probado. `main` admite `int main(void)`, `int main()` sin parámetros y el formulario con `argc` y `argv`; la aplicación puede configurar el vector C completo, que termina con un puntero nulo. Las funciones variádicas admiten las promociones predeterminadas y `va_start`, `va_arg`, `va_copy` y `va_end`.
 
-Los 17 headers virtuales se interpretan como subconjuntos; no se leen del host. P4 suma `assert.h`, `ctype.h`, `errno.h`, `inttypes.h`, `iso646.h`, `stdarg.h`, `stdio.h`, `string.h` y un subconjunto de `wchar.h` a los headers numéricos y de memoria anteriores. P5 añade `stdalign.h` y amplía `<stddef.h>` con `offsetof` y `max_align_t`. Las pruebas cubren una selección de macros `PRI`/`SCN`, strings/memoria, clasificación C-locale, conversiones enteras, formatos `printf`/`scanf`, `stdin`/`stdout`/`stderr`, streams y archivos binarios virtuales, EOF, errores, seek y ungetc. `%a`/`%A`, `%L` y `%lc`/`%ls` están cubiertos en `printf`; wide conversions aceptan ASCII en el locale C. Sigue pendiente el scanset wide `scanf %l[` y hay un límite de precisión publicado. Ningún header se declara completo.
+Los 17 headers virtuales se interpretan como subconjuntos; no se leen del host. P4 suma `assert.h`, `ctype.h`, `errno.h`, `inttypes.h`, `iso646.h`, `stdarg.h`, `stdio.h` y `string.h` a los headers numéricos y de memoria anteriores. P5 añade `stdalign.h`, amplía `<stddef.h>` con `offsetof` y `max_align_t`, registra `<time.h>` y amplía `<stdio.h>`/`<stdlib.h>`. `stdio.h` publica las 45 funciones narrow del perfil, entre ellas la familia `v*`, posiciones de archivo y operaciones sobre archivos virtuales. El buffering sigue siendo síncrono y perfilado; `fpos_t` es `long` con offsets de bytes. `time.h` conserva el instante fijo UTC `2024-01-01T00:00:00Z` como default del core y admite un proveedor host de epoch milliseconds por sesión; Run y Memory Viewer lo crean dentro de sus Workers. `time()` tiene resolución de segundos, `timespec_get()` recibe la precisión de milisegundos de esos Workers, `localtime` equivale a `gmtime` y `clock()` escala el contador de instrucciones por 1000. `<stdlib.h>` usa locale C, entorno virtual vacío, RNG determinista y `system` virtual que falla con `ENOSYS`; `mblen` solo admite la representación ASCII de un byte. Las conversiones que requieren `wchar_t`, incluidas `%lc`, `%ls`, `%l[` y las funciones multibyte wide, quedan fuera de planificación. `%a`/`%A` y `%L` están cubiertos en `stdio`; `printf` conserva el límite de precisión publicado. Ningún header se declara completo.
 
-Son parciales **L01, L02, L03, L04, L05, L06, L07, L08, L09, L11, L12, L13, L14, L15, L16, L17, L18, L19, L20, L21, L22, L23, L24, L25, L26, L27, L28, L29, L30, L31, L32 y L33**; **L10 (long double binary80)** está implementada. Las 17 familias de biblioteca parciales son **B01, B03, B04, B06, B07, B08, B09, B11, B14, B15, B17, B18, B19, B20, B21, B23 y B28**. Permanecen pendientes 2 familias del lenguaje, 12 headers y Annex K. Las familias parciales retienen capacidades pendientes: entre ellas, compatibilidad y declaradores generales, aliasing/UB que no se detecta por completo, `_Noreturn`, librería matemática y de caracteres anchos completa, locales, `exit`/`atexit`, formatos menos comunes, atomics, threads, VLA, complejos y el resto de las APIs estándar.
+Son parciales **L01, L02, L03, L04, L05, L06, L07, L08, L09, L11, L12, L13, L14, L15, L16, L17, L18, L19, L20, L21, L22, L23, L24, L25, L26, L27, L28, L29, L30, L31, L32 y L33**; **L10 (long double binary80)** está implementada. Las 17 familias de biblioteca parciales son **B01, B03, B04, B06, B07, B08, B09, B11, B14, B15, B17, B18, B19, B20, B21, B23 y B26**. Permanecen sin implementar 2 familias del lenguaje, 12 headers y Annex K; cuatro headers pertenecen a P6 y ocho constan como `Unplanned`. Esta clasificación refleja que esas familias estándar no están completas. Los límites concretos del perfil incluyen, entre otros, diagnósticos acotados de `restrict`, ausencia de APIs matemáticas `long double`, formatos menos comunes y las áreas propuestas para P6 como atomics, threads, VLA y complejos. La matriz finita de declaradores/promociones P5 no tiene pendientes adicionales confirmados por esta auditoría. `_Noreturn` ya está implementado; el header `<stdnoreturn.h>` figura como `Unplanned`.
 
 La [API y cobertura concreta del paquete](../packages/c11-engine/README.md) están disponibles desde `core`, `browser` y `node`. El core prepara proyectos virtuales y nunca accede al filesystem del host. `runProject` y `runFile` adaptan entradas; cada ejecución reinicia argumentos, entrada, salida, streams y archivos virtuales. Run toma una copia del texto, prepara y ejecuta en un Worker. Stop lo termina; la consola decodifica stdout/stderr y conserva salida parcial en errores o límites.
 
@@ -31,7 +37,7 @@ La [API y cobertura concreta del paquete](../packages/c11-engine/README.md) est�
 - Run con límites y cancelación; API con límites configurables para benchmarks.
 - Consola: exit code al terminar; diagnóstico ante error de lectura, preparación o ejecución.
 
-El diseño siguiente combina el contrato implementado de P1/P2/P3/P4 con las fases futuras, indicadas como propuestas o pendientes. C11 estricto es el alcance objetivo. POSIX, extensiones GNU, syscalls, ELF, assembly y ejecución de instrucciones x86 requerirían otra hoja de ruta. El perfil Linux no activa esas funcionalidades.
+El inventario siguiente se basa en C11 y separa las capacidades implementadas, las ampliaciones planificadas y los bloques `Unplanned`; no implica un plan para completar todas las cláusulas o headers de C11. El motor conserva `completeC11: false` y no declara conformidad hosted/freestanding ni ausencia de omisiones. POSIX, extensiones GNU, syscalls, ELF, assembly y ejecución de instrucciones x86 requerirían otra hoja de ruta. El perfil Linux no activa esas funcionalidades.
 
 ## Perfil de datos implementado y objetivo
 
@@ -56,15 +62,15 @@ El UB que el motor detecte detendrá la ejecución con diagnóstico; no se prome
 
 ## Fases
 
-P1–P5 tienen entregas parciales; P6 sigue propuesto. Cada fila conserva capacidades pendientes.
+Las etiquetas de esta tabla describen el alcance de las entregas; la matriz posterior clasifica por separado la cobertura de las familias completas de C11. P4 incorpora subconjuntos del perfil y conserva límites frente a C11; P5 está implementado dentro de su alcance acordado. P6 sigue propuesto.
 
 | Fase | Entrega | Alcance |
 | --- | --- | --- |
 | P1 · Implementado | Primer Run | Archivo único; int main(void), variables int, aritmética, bloques, asignaciones y return; diagnósticos, límites, Worker y consola. |
 | P2 · Implementado | Cálculo y control | Enteros escalares LP64, promociones/conversiones, float/double básicos, expresiones, ramas, bucles, funciones tipadas, recursión y cinco headers parciales. |
-| P3 · Implementado parcialmente | Objetos y memoria | Punteros virtuales, arrays, structs/unions con miembros nombrados y anónimos, enums compatibles con `int`, inicialización, literales de cadena, compound literals, globals y malloc/realloc/free básicos; allocations heap con direcciones virtuales pseudoaleatorias y una vista debug de sus intervalos vivos. `realloc(NULL,n)` actúa como `malloc(n)`; `realloc(p,0)` libera y devuelve `NULL`; una reserva fallida no nula conserva el bloque anterior. P5 amplía parcialmente declarations/linkage, `offsetof` y `max_align_t`; headers completos siguen pendientes. |
-| P4 · Implementado parcialmente | Traducción y biblioteca base | Preprocesador y proyectos virtuales parciales, varias unidades, variádicas, stdio, conversiones binary80, formatos `%a`/`%A`, `%L`, `%lc`/`%ls` C-locale ASCII, strings y utilidades base. Las familias siguen parciales donde conservan alcance pendiente. |
-| P5 · Entrega inicial parcial | Declaraciones y layout | Nueve áreas de lenguaje, `<stdalign.h>`, `offsetof` y `max_align_t`; C11 completo, bibliotecas completas y resto de familias P5 siguen pendientes. |
+| P3 · Implementado parcialmente | Objetos y memoria | Punteros virtuales, arrays, structs/unions con miembros nombrados y anónimos, enums compatibles con `int`, inicialización, literales de cadena, compound literals, globals y malloc/realloc/free básicos; allocations heap con direcciones virtuales pseudoaleatorias y una vista debug de sus intervalos vivos. `realloc(NULL,n)` actúa como `malloc(n)`; `realloc(p,0)` libera y devuelve `NULL`; una reserva fallida no nula conserva el bloque anterior. P5 implementa sus adiciones acordadas de declarations/linkage, `offsetof` y `max_align_t` dentro del perfil; las familias C11 correspondientes siguen parciales y los headers completos quedan fuera. |
+| P4 · Subconjuntos del perfil implementados | Traducción y biblioteca base | Preprocesador y proyectos virtuales, varias unidades, variádicas, stdio, conversiones binary80, formatos `%a`/`%A` y `%L`, strings y utilidades base dentro del perfil. El inventario C11 conserva capacidades fuera de ese alcance: por ejemplo, `L06` tiene ampliaciones asignadas a P6, los formatos wide de stdio quedan en `Unplanned` y los headers se ofrecen como subconjuntos. Esto describe cobertura C11, no una tarea P4 abierta. |
+| P5 · Implementado en el perfil acordado | Declaraciones, layout y ampliaciones de biblioteca | Completa el alcance acordado de las nueve áreas de lenguaje y las cuatro ampliaciones descritas en esta hoja. Las familias C11 siguen parciales fuera de ese perfil; `completeC11` permanece `false`. |
 | P6 | Capacidades independientes | VLA, complejos, atomics, threads, TLS concurrente y evaluaciones separadas de Annex F/G y Annex K. |
 
 ## API y límites entre módulos
@@ -211,7 +217,7 @@ Resultados discriminados implementados:
 - `read-error` / `prepare-error` / `runtime-error`: diagnósticos de su etapa.
 - `limit`: recurso y límite alcanzado; `cancelled`: cancelación externa.
 
-En terminación normal, el perfil Linux expone `exitCode` entre 0 y 255, conservando el status original: retornar 256 desde `main` da `mainReturn: 256`, `rawExitStatus: 256`, `exitCode: 0`. Error, límite o cancelación no fabrican un exit code exitoso. Cuando se implementen `exit(status)`, `abort` y señales, se conservará el status de `exit` sin inventar un retorno de `main`, y la terminación anormal mantendrá su categoría y diagnóstico. [Linux exit(3)](https://man7.org/linux/man-pages/man3/exit.3.html).
+Al regresar normalmente `main`, el perfil Linux expone `exitCode` entre 0 y 255 y conserva el status original: retornar 256 da `mainReturn: 256`, `rawExitStatus: 256`, `exitCode: 0`. `exit(status)` termina con ese status y ejecuta los handlers `atexit` en orden LIFO; `quick_exit(status)` ejecuta solo los handlers `at_quick_exit`, también en orden LIFO. `_Exit(status)` y `abort()` terminan sin ejecutar esos handlers; `abort()` usa el status perfilado 134. Las terminaciones explícitas no inventan un retorno de `main`. Error, límite o cancelación no fabrican un exit code exitoso. Las señales y `<signal.h>` siguen en `Unplanned`. [Linux exit(3)](https://man7.org/linux/man-pages/man3/exit.3.html).
 
 ## Rendimiento y cancelación
 
@@ -223,11 +229,11 @@ P4 ofrece límites configurables de caracteres, tokens, pasos del preprocesador 
 
 La UI ya prepara y ejecuta en Worker. El hilo padre lo termina al pulsar Stop o vencer el watchdog. Los adaptadores aceptan `AbortSignal` y comprueban cancelación antes y después de la lectura y entre etapas. El core síncrono comprueba presupuestos en puntos definidos: un `AbortSignal` nuevo no puede interrumpirlo si el mismo hilo está ocupado y no procesa eventos. El adaptador de Node todavía no crea un Worker; el consumidor puede integrarlo para cancelación activa. `execute` directo sigue siendo síncrono y limitado por presupuestos. Cancelar descarta la sesión, preserva el texto y permite el siguiente Run.
 
-P4 introduce puertos virtuales para stdin/stdout/stderr y archivos. `maxIOBytes` limita de forma separada la entrada, salida y contenido residente del filesystem virtual; el reloj, entorno, señales y las familias restantes siguen futuros. La interfaz decodifica las salidas de bytes como texto UTF-8. En modo interactivo publica el snapshot antes de esperar más datos; la aplicación calcula y muestra el delta. El core solo recibe bytes UTF-8 o bytes directos y no importa DOM, Worker, decodificadores ni callbacks de la aplicación.
+P4 introduce puertos virtuales para stdin/stdout/stderr y archivos. `maxIOBytes` limita de forma separada la entrada, salida y contenido residente del filesystem virtual. P5 añade `<time.h>` con calendario UTC, default determinista en el core y reloj de pared inyectable por servicios de sesión; Run y Memory Viewer crean ese proveedor dentro de sus Workers. `<stdlib.h>` conserva un entorno virtual vacío; señales y entorno del host siguen fuera del core y el entorno del host consta como `Unplanned`. La interfaz decodifica las salidas de bytes como texto UTF-8. En modo interactivo publica el snapshot antes de esperar más datos; la aplicación calcula y muestra el delta. El core solo recibe bytes UTF-8 o bytes directos y no importa DOM, Worker, decodificadores ni callbacks de la aplicación.
 
 ## Matriz del lenguaje
 
-**32 familias parciales**, enumeradas en «Estado implementado: P5 parcial»; las otras **2 familias del lenguaje pendientes**. Ninguna familia completa. Las columnas siguientes describen el alcance objetivo y aceptaciones propuestas, incluidas capacidades que todavía se rechazan; la tabla no implica que una familia parcial ya esté completa. Cada aceptación es un ejemplo mínimo y no basta para demostrar conformidad. Inventario contrastado con [WG14 N1570, §§5–6](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+**32 familias C11 parciales**, enumeradas en «P5: implementado en el perfil acordado»; las otras **2 familias del lenguaje pendientes**. Ninguna familia C11 está completa. Las columnas siguientes describen alcance y aceptaciones por familia, incluidas capacidades que todavía se rechazan; esta clasificación no reabre el alcance ya implementado de P5 ni implica que una familia esté completa. Cada aceptación es un ejemplo mínimo y no basta para demostrar conformidad. Inventario contrastado con [WG14 N1570, §§5–6](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
 
 | ID | Área y alcance | Fase | Aceptación mínima propuesta |
 | --- | --- | --- | --- |
@@ -237,11 +243,11 @@ P4 introduce puertos virtuales para stdin/stdout/stderr y archivos. `maxIOBytes`
 | L04 | Includes y condicionales | P2→P4 | Header numérico virtual en P2; #if defined(X) y includes generales en P4. |
 | L05 | Macros: argumentos, variádicas, #, ## y rescaneo | P4 | Macro anidada expande una vez correctamente; #undef elimina la definición. |
 | L06 | Procedencia, predefinidas y pragmas STDC | P4→P6 | #line, #error, _Pragma, __FILE__/__LINE__ y capacidades verificables. |
-| L07 | Nombres, typedef, declaradores y tipos compatibles | P1→P5 | Declaradores anidados, arrays/funciones ajustados, typedef repetido del mismo tipo y composites entre declaraciones; tipos incompatibles diagnosticados. |
+| L07 | Nombres, typedef, declaradores y tipos compatibles | P1→P5 | Matriz finita de punteros, arrays, funciones, punteros a función y `typedef`; arrays completados por un inicializador, parámetros ajustados, ámbitos y espacios de nombres y tipos incompletos según el contexto; arrays/funciones compuestos entre declaraciones y unidades; incompatibilidades diagnosticadas. |
 | L08 | Enteros, _Bool y literales LP64 | P1→P2 | 9007199254740993ULL exacto; wrap unsigned; tamaños del perfil. |
 | L09 | float/double, literales decimales y hexadecimales | P2 | (float)16777217 redondea a 16777216; ±0, NaN e infinito se preservan. |
 | L10 | long double binary80 | P4 | `sizeof(long double)==16`; `1.0L+0x1p-63L != 1.0L`; almacenamiento binary80 y alineación de 16 bytes. |
-| L11 | Promociones, conversiones, casts y argumentos | P1→P5 | Default promotions de argumentos sin prototipo/variádicos, tipos de parámetros ajustados y conversions signed/unsigned; `int f()` frente a `int f(void)`. |
+| L11 | Promociones, conversiones, casts y argumentos | P1→P5 | `_Bool`, enteros pequeños y enums promueven a `int` en este perfil; `float` promueve a `double` en argumentos variádicos/sin prototipo; conversiones a parámetros y entre enteros con y sin signo según LP64; compatibilidad de prototipos frente a declaraciones sin prototipo, distinguiendo `f()` de `f(void)`. |
 | L12 | Unarios, prefijo/postfix y acceso | P1→P3 | Cubrir + - ! ~ & * [] . -&gt; () con objetos/funciones; distinguir ++i de i++. |
 | L13 | Aritmética, bits y comparaciones | P1→P2 | -7/3==-2; resto, shifts, & ^ \| y comparaciones con extremos. |
 | L14 | Cortocircuito, ternario, coma y secuenciación | P2 | 0&&f() no llama f; ?: elige una rama; coma ordena efectos. |
@@ -256,58 +262,75 @@ P4 introduce puertos virtuales para stdin/stdout/stderr y archivos. `maxIOBytes`
 | L23 | Objetos, duración, representación y tipo efectivo | P1→P5 | Duración automática, estática, heap y TLS por sesión; bytes little-endian, copy/effective-type observables y uso tras free diagnosticado, sin detector universal de UB. |
 | L24 | Arrays, strings y decay | P3 | Array multidimensional; sizeof conserva tipo; literal de cadena incluye NUL y no es modificable. |
 | L25 | Structs/unions y miembros anónimos | P3 | Copiar, pasar y retornar agregados; acceso . y -&gt; a miembros nombrados y promovidos desde struct/union anónimo. |
-| L26 | Enums y expresiones constantes | P3 | Valores explícitos e implícitos compatibles con `int`; expresión constante entera aceptada dentro del rango `int`, valor no constante o fuera de rango rechazado. |
+| L26 | Enums y expresiones constantes | P3 | Cada tipo enum conserva identidad aunque el perfil elija `int` como tipo entero compatible; enumeradores de tipo `int`, valores explícitos/implícitos dentro del rango y expresiones ICE; duplicados, valores no ICE y fuera de rango rechazados. |
 | L27 | Padding, bit-fields y miembro flexible | P5 parcial | Unidades, padding, barrera de ancho cero, extracción/signo y FAM final contrastados con GCC/Clang SysV x86-64; `sizeof` y asignación omiten la cola dinámica. |
 | L28 | Inicialización y designadores | P1→P3 | Ceros omitidos, arrays/agregados anidados, brace elision, .campo y [índice]. |
 | L29 | Compound literals | P3 | Dirección estable dentro del bloque y duración estática al nivel global. |
-| L30 | const, volatile y restrict | P5 parcial | Asignación a lvalue const rechazada, casts respetan el tipo del objeto original, qualifiers preservados y evaluación volatile; no hay detector total de alias UB por `restrict`. |
-| L31 | Almacenamiento, linkage, inline, _Noreturn y _Thread_local | P4→P6 | `extern` de bloque, linkage y external inline C11 entre unidades, TLS serializada por sesión; independencia por hilo y `_Noreturn` siguen pendientes. |
+| L30 | const, volatile y restrict | P5 parcial | Conserva qualifiers y evaluación volatile. El detector cubre bases restrict independientes y solapamientos restrict/plain modificados; permite derivados/copiados de una cadena, lecturas, ausencia de acceso y subobjetos disjuntos. Omite solapamientos bytewise/de biblioteca y aplica tratamiento conservador a procedencia desconocida; no es detector universal de UB. |
+| L31 | Almacenamiento, linkage, inline, _Noreturn y _Thread_local | P4→P5→P6 | `extern` de bloque, linkage, external inline C11, `_Noreturn` y TLS serializada por sesión; la independencia TLS entre hilos permanece en P6. |
 | L32 | sizeof, _Alignof, _Alignas y _Static_assert | P2→P5 | Alineación explícita hasta 65536 (heap 16), `max_align_t` de 32/16 en el perfil, `offsetof` anidado y ICE válidas; expresiones no-ICE rechazadas. |
 | L33 | _Generic | P5 parcial | Compatibilidad de tipo, lvalue conversions y asociaciones no evaluadas; selección correcta en expresiones y contextos de constante entera. |
 | L34 | VLA y complejos: capacidades separadas | P6 | sizeof dinámico de VLA; cálculo _Complex; _Imaginary se evalúa aparte. |
 | L35 | _Atomic y modelo de memoria concurrente | P6 | Load/store, RMW, CAS y órdenes; scheduler virtual y carreras detectables. |
 
+La cobertura C11 de L07/L11 sigue parcial: P5 implementa y prueba las combinaciones acordadas del perfil, no todas las producciones de declaradores ni todas las restricciones del estándar. Se conservan los tipos incompletos en las declaraciones permitidas, incluido el retorno `struct` incompleto en un prototipo; las definiciones y usos que requieren completitud se validan en su contexto. La matriz asociada está en `packages/c11-engine/README.md`; sus regresiones usan `packages/c11-engine/tests/p5-language.test.mjs`, `p5-language-extension.test.mjs`, `p5-differential.test.mjs` y `p5-enum-types.test.mjs`.
+
 ## Matriz de biblioteca estándar
 
-Los 29 headers de C11 aparecen en el inventario como familias de alcance completo. P1–P3 iniciaron parcialmente **B06 (`float.h`), B09 (`limits.h`), B11 (`math.h`), B17 (`stdbool.h`), B18 (`stddef.h`), B19 (`stdint.h`) y B21 (`stdlib.h`)**. P4 añade **B01 (`assert.h`), B03 (`ctype.h`), B04 (`errno.h`), B07 (`inttypes.h`), B08 (`iso646.h`), B15 (`stdarg.h`), B20 (`stdio.h`), B23 (`string.h`) y B28 (`wchar.h`)**. P5 suma **B14 (`stdalign.h`)** como familia parcial. Quedan **12 headers pendientes**. Ningún header se declara completo. Las aceptaciones siguientes describen el objetivo de cada familia, incluidos elementos todavía rechazados. [WG14 N1570, §7](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+El inventario incluye los 29 headers de C11. P1–P3 iniciaron parcialmente **B06 (`float.h`), B09 (`limits.h`), B11 (`math.h`), B17 (`stdbool.h`), B18 (`stddef.h`), B19 (`stdint.h`) y B21 (`stdlib.h`)**. P4 añade **B01 (`assert.h`), B03 (`ctype.h`), B04 (`errno.h`), B07 (`inttypes.h`), B08 (`iso646.h`), B15 (`stdarg.h`), B20 (`stdio.h`) y B23 (`string.h`)**. P5 suma **B14 (`stdalign.h`)** y amplía parcialmente **B20**, **B21** y **B26 (`time.h`)**. Quedan **12 headers sin implementar: cuatro pertenecen a P6 y ocho constan como `Unplanned`**. Ningún header se declara completo. Las aceptaciones siguientes describen el objetivo de cada familia, incluidos elementos todavía rechazados. [WG14 N1570, §7](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
 
 | ID | Área y alcance | Fase | Aceptación mínima propuesta |
 | --- | --- | --- | --- |
 | B01 | &lt;assert.h&gt; · aserciones | P4 | assert verdadero continúa; falso termina anormalmente con diagnóstico; NDEBUG lo desactiva. |
 | B02 | &lt;complex.h&gt; · familias complejas | P6 | cabs(3+4*I)==5; variantes float/double/long double y dominios. |
-| B03 | &lt;ctype.h&gt; · clasificación y transformación | P4→P5 | EOF y unsigned char válidos; toupper y clasificación bajo locale definido. |
+| B03 | &lt;ctype.h&gt; · clasificación y transformación | P4 | Clasificación y transformación bajo el locale C; la integración con locales configurables queda en `Unplanned` junto con B10. |
 | B04 | &lt;errno.h&gt; · errores de biblioteca | P4→P6 | Conversión fuera de rango fija ERANGE; errno independiente por hilo en P6. |
-| B05 | &lt;fenv.h&gt; · entorno flotante | P5→P6 | Guardar/restaurar entorno, consultar flags y redondeo; Annex F se valida aparte. |
+| B05 | &lt;fenv.h&gt; · entorno flotante | Unplanned | Guardar/restaurar entorno, consultar flags y redondeo; Annex F se valida aparte si se aborda. |
 | B06 | &lt;float.h&gt; · límites flotantes | P2→P5 | Radix 2; mantisas 24/53/64; macros LDBL_* concuerdan con binary80; FLT_EVAL_METHOD corresponde a la evaluación real. |
 | B07 | &lt;inttypes.h&gt; · formatos y conversiones anchas | P4 | PRI/SCN macros y strtoimax preservan el extremo de 64 bits. |
 | B08 | &lt;iso646.h&gt; · operadores alternativos | P4 | and, or y not expanden a sus operadores y respetan precedencia. |
 | B09 | &lt;limits.h&gt; · límites enteros | P2→P4 | CHAR_BIT==8 y LONG_MAX exacto; constantes tienen los tipos correctos. |
-| B10 | &lt;locale.h&gt; · locales virtuales | P5 | setlocale/localeconv; estado C inicial y datos de locale reproducibles. |
+| B10 | &lt;locale.h&gt; · locales virtuales | Unplanned | setlocale/localeconv y locales configurables; también se aplaza su integración en `<ctype.h>` y `<string.h>`. La cobertura existente bajo locale C se conserva. |
 | B11 | &lt;math.h&gt; · familias f/d/ld y clasificación | P2→P6 | sqrt, fmod, fma, clasificación y errores; variantes `long double` y Annex F siguen aparte. |
-| B12 | &lt;setjmp.h&gt; · salto no local | P5 | setjmp devuelve 0; longjmp vuelve con 7 y restaura el frame válido. |
-| B13 | &lt;signal.h&gt; · señales virtuales | P5 | signal registra handler; raise lo invoca; terminación anormal queda identificada. |
+| B12 | &lt;setjmp.h&gt; · salto no local | Unplanned | setjmp devuelve 0; longjmp vuelve con 7 y restaura el frame válido. |
+| B13 | &lt;signal.h&gt; · señales virtuales | Unplanned | signal registra handler; raise lo invoca; terminación anormal queda identificada. |
 | B14 | &lt;stdalign.h&gt; · macros de alineación | P5 parcial | `alignas`/`alignof` aliasan `_Alignas`/`_Alignof`; macros de disponibilidad valen 1. |
 | B15 | &lt;stdarg.h&gt; · recorrido de varargs | P4 | va_copy mantiene recorrido independiente y va_end cierra ambos. |
 | B16 | &lt;stdatomic.h&gt; · operaciones y fences | P6 | CAS, fetch_add, atomic_flag y órdenes bajo scheduler reproducible. |
 | B17 | &lt;stdbool.h&gt; · macros booleanas | P2→P4 | bool b=9 normaliza a 1; true/false y macro de disponibilidad correctos. |
-| B18 | &lt;stddef.h&gt; · tipos, NULL y offsetof | P3→P5 parcial | Ofrece `NULL`, `size_t`, `ptrdiff_t`, `wchar_t`, `offsetof` para miembros y subíndices constantes, y `max_align_t` alineado al perfil; la familia restante sigue parcial. |
+| B18 | &lt;stddef.h&gt; · tipos, NULL y offsetof | P3→P5 parcial | Ofrece `NULL`, `size_t`, `ptrdiff_t`, `offsetof` para miembros y subíndices constantes, y `max_align_t` alineado al perfil; la familia restante sigue parcial. |
 | B19 | &lt;stdint.h&gt; · tipos exactos/least/fast y límites | P2→P4 | int64_t y UINT64_C exactos; intptr_t representa la dirección virtual. |
-| B20 | &lt;stdio.h&gt; · FILE, formatos, buffers y archivos virtuales | P4→P5 | `printf`/`scanf` parciales, `%a`/`%A`, `%L`, wide ASCII de C locale, EOF/error, lectura binaria, seek y ungetc; API y formatos restantes siguen pendientes. |
-| B21 | &lt;stdlib.h&gt; · memoria, conversión, sort, RNG y entorno | P3→P5 | `NULL`, `size_t`, malloc/realloc/free; `realloc(p,0)` libera y devuelve `NULL`; strtol, qsort, rand, multibyte, atexit/exit y entorno virtual después. |
-| B22 | &lt;stdnoreturn.h&gt; · macro noreturn | P5 | noreturn corresponde a _Noreturn; validar declaración y uso. |
-| B23 | &lt;string.h&gt; · bytes, strings y colación | P4→P5 | memmove solapado, strcmp, strtok y strxfrm bajo locale virtual. |
+| B20 | &lt;stdio.h&gt; · FILE, formatos, buffers y archivos virtuales | P4→P5 parcial | Las 45 funciones narrow de `CAPABILITIES.stdioFunctions`; archivos solo virtuales, temporales eliminados al cerrar/terminar, `fpos_t` como offset de bytes `long`, `freopen` mantiene identidad `FILE *`. Para `freopen(NULL, mode, stream)`, este perfil cierra el stream anterior, devuelve `NULL` y establece `EINVAL`, sin reconfigurarlo; C11 permite que la implementación no ofrezca cambio alguno cuando `filename` es nulo (N1570 §7.21.5.4p3–5). El buffering es síncrono: `setbuf` no cambia modo; `setvbuf` solo acepta `_IONBF`. Wide `%lc`, `%ls` y `%l[` quedan en `Unplanned`. |
+| B21 | &lt;stdlib.h&gt; · memoria, conversión, sort, RNG y entorno | P3→P5 parcial | Conversiones enteras/de punto flotante, asignación, búsqueda/ordenamiento, RNG, terminación y entorno virtual vacío. `aligned_alloc` admite alineaciones potencia de dos hasta 65536 bytes y exige tamaño múltiplo; argumentos fuera del perfil devuelven `NULL`/`EINVAL`. Locale C: `MB_CUR_MAX=1`, `mblen` acepta ASCII de un byte; `system(NULL)=0` y los comandos fallan con `ENOSYS`. Las conversiones que dependen de `wchar_t` quedan en `Unplanned`. |
+| B22 | &lt;stdnoreturn.h&gt; · macro noreturn | Unplanned | Se aplaza el header y su macro; la palabra clave `_Noreturn` ya está implementada en el lenguaje. |
+| B23 | &lt;string.h&gt; · bytes, strings y colación | P4 | Conserva las funciones ya disponibles bajo locale C; la integración con locales configurables queda en `Unplanned` junto con B10. |
 | B24 | &lt;tgmath.h&gt; · selección matemática por tipo | P6 | Seleccionar real/complejo y precisión correcta sin evaluar argumentos dos veces. |
 | B25 | &lt;threads.h&gt; · hilos, mutex, condición y TSS | P6 | Dos hilos, join, mutex/cnd, call_once y destructor TSS; sin carreras ocultas. |
-| B26 | &lt;time.h&gt; · reloj y calendario | P5 | Fuente temporal virtual, timespec_get, difftime, mktime y strftime deterministas. |
-| B27 | &lt;uchar.h&gt; · conversiones char16_t/char32_t | P5 | mbrtoc16/32 y c16/32rtomb con mbstate; secuencia inválida diagnosticada. |
-| B28 | &lt;wchar.h&gt; · texto ancho, streams y multibyte | P4→P5 | P4 declara `wchar_t`, `wint_t`, `WEOF` y convierte `%lc`/`%ls` ASCII bajo locale C; conversiones con estado, streams, scanset wide y demás APIs quedan pendientes. |
-| B29 | &lt;wctype.h&gt; · clasificación ancha | P5 | wctype/wctrans, iswalpha y towupper conforme al locale seleccionado. |
+| B26 | &lt;time.h&gt; · reloj y calendario | P5 parcial | Diez funciones C11 con calendario UTC; el core usa el instante fijo `2024-01-01T00:00:00Z` por defecto y acepta un proveedor epoch-millisecond por sesión. Run y debug inyectan `Date.now` desde sus Workers. `time_t`/`clock_t` son `long` LP64, `time()` usa segundos, `timespec_get()` refleja la resolución de milisegundos del proveedor, `localtime` iguala a `gmtime` y los buffers son estáticos por ejecución. |
+| B27 | &lt;uchar.h&gt; · conversiones char16_t/char32_t | Unplanned | mbrtoc16/32 y c16/32rtomb con mbstate; secuencia inválida diagnosticada. |
+| B28 | &lt;wchar.h&gt; · texto ancho, streams y multibyte | Unplanned | No se publica el header ni se ofrece `wchar_t`: `wint_t`, `WEOF`, streams wide, conversiones multibyte y demás APIs de esta familia quedan fuera. |
+| B29 | &lt;wctype.h&gt; · clasificación ancha | Unplanned | wctype/wctrans, iswalpha y towupper conforme al locale seleccionado. |
 
 ### Extensión opcional
 
 | ID | Área y alcance | Fase | Aceptación mínima propuesta |
 | --- | --- | --- | --- |
 | O01 | Annex K · interfaces con límites y constraint handlers | P6 · opcional | Solo anunciar tras cubrir contratos y fallos; __STDC_LIB_EXT1__ y opt-in coherentes. |
+
+## Unplanned
+
+Estos ocho bloques de familias ya no forman parte de la planificación de P5. Permanecen visibles en la matriz para documentar el inventario estándar y su estado; no tienen fase objetivo asignada. Las conversiones wide de `<stdio.h>` y `<stdlib.h>` también quedan fuera de alcance. `<ctype.h>` y `<string.h>` conservan su soporte bajo locale C y `_Noreturn` sigue admitido por el lenguaje.
+
+| Bloque aplazado | Matriz | Alcance retirado de P5 |
+| --- | --- | --- |
+| `<fenv.h>` | B05 | API del entorno flotante. |
+| `<locale.h>` e integración de locales en `<ctype.h>`/`<string.h>` | B10, B03, B23 | Locales configurables y su integración con clasificación, transformación y colación; se conserva el comportamiento existente bajo locale C. |
+| `<setjmp.h>` | B12 | Saltos no locales. |
+| `<signal.h>` | B13 | Señales virtuales. |
+| `<stdnoreturn.h>` | B22 | El header y su macro; la palabra clave `_Noreturn` ya está implementada. |
+| `<uchar.h>` | B27 | Conversiones entre caracteres multibyte, `char16_t` y `char32_t`. |
+| Familia de caracteres anchos (`<wchar.h>`, `<stdio.h>` y `<stdlib.h>`) | B20, B21, B28 | No se ofrece `wchar_t` ni se implementan `%lc`, `%ls` o `%l[`; los formatos wide de `stdio` producen un diagnóstico explícito. También se aplazan `mbtowc`, `wctomb`, `mbstowcs` y `wcstombs`, además de `wint_t`, `WEOF`, streams wide y las demás APIs de caracteres anchos. |
+| `<wctype.h>` | B29 | Clasificación y transformaciones de caracteres anchos. |
 
 ## Capacidades y validación
 
@@ -316,56 +339,3 @@ VLA, complejos, atomics y threads se anuncian por separado. Sus macros `__STDC_N
 Una fila se completa cuando cubre toda su familia, dependencias, casos límite y diagnóstico, no cuando pasa el ejemplo de la tabla. Mantener pruebas unitarias propias y diferenciales frente a GCC/Clang con `-std=c11 -pedantic-errors`; usar ejemplos sin UB y evitar exigir igualdad cuando C admite varios órdenes o resultados. GCC distingue su dialecto GNU del estándar seleccionado. [GCC Standards](https://gcc.gnu.org/onlinedocs/gcc/Standards.html).
 
 Añadir pruebas de extremos numéricos, memoria/lifetime, procedencia, límites, cancelación y reinicio entre sesiones; cada fase debe probarse en navegador y Node. La cobertura, perfil y resultados de validación tendrán versión pública. “C11 completo” quedará reservado a una cobertura y validación suficientes.
-
-## Primer hito implementado: P1
-
-```c
-int main(void) {
-    int x = 6;
-    return x * 7;
-}
-```
-
-El hito ya devuelve `exitCode: 42` tanto desde `File` como desde ruta, permite reutilizar el preparado sin conservar estado, diagnostica características pendientes y detiene presupuestos agotados. Se mantiene como regresión del primer Run; su aceptación por sí sola no completa ninguna familia.
-
-En la app ya hay un botón compacto **Run** en la barra de `main.c`; durante ejecución cambia a **Stop**. La consola está debajo del editor, con separador fino y footer `Ln N Col N` visible. Muestra `stdout`, `stderr` y el código de salida al terminar, o un diagnóstico con archivo/línea/columna. Al pulsar Run toma una copia del contenido para que la edición posterior no altere esa sesión.
-
-## Hito implementado: P2
-
-```c
-#include <stdint.h>
-#include <math.h>
-
-long factorial(int n) {
-    if (n <= 1) return 1;
-    return n * factorial(n - 1);
-}
-
-int main(void) {
-    uint64_t exact = 9007199254740993ULL;
-    int sum = 0;
-    for (int i = 1; i <= 6; ++i) sum += i;
-    return exact - 9007199254740992ULL == 1
-        && factorial(10) == 3628800L
-        && sqrt(81.0) == 9.0 && sum == 21;
-}
-```
-
-El ejemplo termina con `exitCode: 1`. P2 se valida con regresiones P1, pruebas de extremos numéricos y promoción, redondeo, flujos y scopes, conversión de parámetros/retornos, recursión profunda, límites, diagnósticos y reinicio de sesiones. Los oráculos GCC y Clang usan programas fijos, finitos y sin UB con `-std=c11 -pedantic-errors`; no ejecutan texto del editor en el host. Los casos de UB detectado y elecciones no portables del perfil se verifican en pruebas separadas.
-
-## Hito implementado parcialmente: P3
-
-P3 añade direcciones y punteros virtuales LP64, punteros a función tipados, conversión de punteros a objetos con `void *`, aritmética/diferencia limitada al mismo array, one-past y diagnósticos de acceso fuera de límites, null, liveness y `free` inválido. Implementa arrays multidimensionales y decay, layout/copia/paso/retorno de structs y unions con miembros nombrados y anónimos, enums compatibles con `int` mediante expresiones constantes enteras de rango `int`, designadores recursivos, brace elision y cero-fill. Los literales de cadena incluyen NUL y son de solo lectura; los compound literals admiten duración automática de bloque y estática de archivo. Los globals se reinician al comenzar cada ejecución. `maxMemoryBytes` y `peakMemoryBytes` suman todos los bytes virtuales vivos de parámetros/locales, globals/estáticos, cadenas y heap.
-
-La biblioteca parcial incluye `<stddef.h>` con `NULL`, `size_t`, `ptrdiff_t`, `offsetof` y `max_align_t`, y `<stdlib.h>` con `NULL`, `size_t`, `malloc`, `realloc` y `free`. Este perfil elige que `malloc(0)` y `realloc(p, 0)` devuelvan `NULL`; `realloc(p, 0)` libera `p`, mientras que un fallo normal de reserva conserva el bloque anterior. `realloc(NULL, n)` se comporta como `malloc(n)`. `max_align_t` tiene tamaño 32 y alineación 16 en el perfil P5. P4 añade `static` local y varias unidades con enlace de ámbito de archivo; P5 agrega block `extern`, external inline C11 y TLS base, pero el área conserva alcances pendientes. Bit-fields y miembros flexibles tienen soporte parcial en L27/P5. Strings en esta fase son literales y arrays de `char`: las funciones de `string.h` siguen parciales en P4→P5.
-
-El [ejemplo inicial](../src/examples/main.c) recorre un puntero por un array, modifica una celda con `*p` y avanza un puntero de caracteres hasta el NUL de una cadena. Los arrays mayores de 10 elementos y matrices conservan sus placeholders locales; unions y structs con más de 10 miembros usan placeholders globales, y los miembros anidados no admitidos conservan placeholders locales. Estas vistas no detienen el programa. El [demo P2–P4](../src/examples/p2-p4-full-demo.c) conserva los casos completos de tipos, control, memoria, preprocesador y biblioteca. La matriz permanece abierta hasta completar y validar cada familia.
-
-
-## Hito implementado parcialmente: P4
-
-P4 añade traducción por unidades virtuales, macros y directivas, funciones K&R y variádicas, `main(argc, argv)` y una biblioteca C parcial. La cobertura comprobada incluye argumentos y salida por bytes, `printf`/`snprintf` y `scanf`/`sscanf`, `%a`/`%A`, conversiones `%L` binary80, `%lc`/`%ls` ASCII bajo locale C, streams/archivos virtuales, assert, clasificación C-locale, errno, inttypes y funciones básicas de strings/memoria. Los errores de conversión wide no representable fijan `EILSEQ`; el scanset wide `scanf %l[` sigue pendiente. Los headers se suministran como código C virtual; el core no busca archivos del host.
-
-`SourceProject` admite `translationUnits`; `ExecuteOptions.io` admite `argv`, `stdin` y archivos iniciales. Cada ejecución tiene un entorno de E/S nuevo, y el presupuesto `maxIOBytes` comparte capacidad entre entradas, salida y archivos residentes. La UI decodifica stdout/stderr y usa un límite de 1 MiB de E/S y 1.000.000 pasos de preprocesamiento. El paquete fija 5.000.000 pasos por defecto para el core.
-
-P4 fue un incremento parcial y P5 añade una entrega inicial parcial: las familias de lenguaje y biblioteca conservan capacidades pendientes, salvo L10 binary80 implementada. Las suites de aceptación no demuestran conformidad C11 completa; P6 y las capacidades restantes de P5 —incluidos hilos, VLA, complejos y biblioteca amplia— siguen fuera del perfil.

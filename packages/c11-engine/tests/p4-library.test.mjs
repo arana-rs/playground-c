@@ -76,10 +76,33 @@ test('stdio %p output round-trips object and null pointers through sscanf', () =
   executeTerminated(execute, program, undefined, 0);
 });
 
-test('stdio formats hexadecimal floats, C-locale wide characters and binary80 long doubles', () => {
-  const program = prepareProject(prepare, fixtureProject('.', 'stdio-format-hex-wide-long-double.c'));
+test('stdio formats narrow and hexadecimal values and preserves binary80 long doubles', () => {
+  const program = prepareProject(prepare, fixtureProject('.', 'stdio-format-hex-long-double.c'));
   const result = executeTerminated(execute, program, undefined, 0);
   assert.equal(decodeBytes(result.stdout), '');
+});
+
+test('stdio rejects wide character and string conversions without falling back to narrow', () => {
+  const sources = [
+    'int main(void) { printf("%lc", 65); return 0; }',
+    'int main(void) { char text[8]; snprintf(text, sizeof text, "%ls", "x"); return 0; }',
+    'int main(void) { int value; scanf("%lc", &value); return 0; }',
+    'int main(void) { char text[8]; sscanf("x", "%ls", text); return 0; }',
+    'int main(void) { scanf("%*lc"); return 0; }',
+    'int main(void) { sscanf("x", "%*ls"); return 0; }',
+    'int main(void) { sscanf("x", "%*l[a]"); return 0; }',
+    'int main(void) { char text[8]; sscanf("x", "%l[a]", text); return 0; }',
+  ];
+  for (const source of sources) {
+    const program = prepareProject(prepare, {
+      entry: 'wide-format.c',
+      files: [{ name: 'wide-format.c', source: `#include <stdio.h>\n${source}` }],
+    });
+    const result = execute(program);
+    assert.equal(result.kind, 'runtime-error', JSON.stringify(result));
+    assert.equal(result.diagnostics[0].code, 'UNSUPPORTED_FEATURE');
+    assert.match(result.diagnostics[0].message, /conversión wide/);
+  }
 });
 
 test('sscanf numeric conversions stop at separators and preserve scanf token prefixes', () => {

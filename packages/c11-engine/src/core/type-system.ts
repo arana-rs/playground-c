@@ -1,6 +1,6 @@
 import { failure } from './internal.ts';
 import type {
-  AggregateDefinition, CType, FunctionCType, Location, PointerCType, ArrayCType,
+  AggregateDefinition, CType, EnumCType, EnumDefinition, FunctionCType, Location, PointerCType, ArrayCType,
   AggregateCType, TypeQualifiers,
 } from './internal.ts';
 
@@ -10,6 +10,8 @@ export const arrayOf = (element: CType, length: number | null): ArrayCType => Ob
 export const functionOf = (returnType: CType, parameters: readonly CType[], variadic = false, prototype = true): FunctionCType =>
   Object.freeze({ kind: 'function', returnType, parameters: Object.freeze([...parameters]), ...(variadic ? { variadic: true } : {}), prototype });
 export const aggregateRef = (id: number): AggregateCType => Object.freeze({ kind: 'aggregate', id });
+export const enumRef = (definition: EnumDefinition): EnumCType =>
+  Object.freeze({ kind: 'enum', id: definition.id, tag: definition.tag, integerType: definition.integerType, definition });
 
 export function unqualifiedType(type: CType): CType {
   while (typeof type !== 'string' && type.kind === 'qualified') type = type.base;
@@ -59,6 +61,10 @@ export function aggregateType(type: CType): AggregateCType | undefined {
   const unqualified = unqualifiedType(type);
   return typeof unqualified !== 'string' && unqualified.kind === 'aggregate' ? unqualified : undefined;
 }
+export function enumType(type: CType): EnumCType | undefined {
+  const unqualified = unqualifiedType(type);
+  return typeof unqualified !== 'string' && unqualified.kind === 'enum' ? unqualified : undefined;
+}
 export function functionType(type: CType): FunctionCType | undefined {
   const unqualified = unqualifiedType(type);
   return typeof unqualified !== 'string' && unqualified.kind === 'function' ? unqualified : undefined;
@@ -85,7 +91,7 @@ const integerTypes = new Set<CType>([
   '_Bool', 'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int',
   'long', 'unsigned long', 'long long', 'unsigned long long',
 ]);
-export function isInteger(type: CType): boolean { return integerTypes.has(unqualifiedType(type)); }
+export function isInteger(type: CType): boolean { return integerTypes.has(unqualifiedType(type)) || enumType(type) !== undefined; }
 export function isArithmetic(type: CType): boolean {
   const unqualified = unqualifiedType(type);
   return isInteger(unqualified) || unqualified === 'float' || unqualified === 'double' || unqualified === 'long double';
@@ -94,6 +100,30 @@ export function isScalar(type: CType): boolean { return isArithmetic(type) || is
 export function isObject(type: CType): boolean { return unqualifiedType(type) !== 'void' && !isFunction(type); }
 
 export type AggregateContext = readonly AggregateDefinition[];
+export type EnumContext = readonly EnumDefinition[] | ReadonlyMap<number, EnumDefinition>;
+export interface TypeCompatibilityContext {
+  readonly aggregates: AggregateContext | ReadonlyMap<number, AggregateDefinition>;
+  readonly enums?: EnumContext;
+}
+
+function getAggregateDefinitionForCompatibility(context: TypeCompatibilityContext | undefined, id: number): AggregateDefinition | undefined {
+  const aggregates = context?.aggregates;
+  if (!aggregates) return undefined;
+  const byId = aggregates as ReadonlyMap<number, AggregateDefinition>;
+  return typeof byId.get === 'function'
+    ? byId.get(id)
+    : (aggregates as AggregateContext).find((candidate) => candidate.id === id);
+}
+
+function getEnumDefinitionForCompatibility(context: TypeCompatibilityContext | undefined, id: number): EnumDefinition | undefined {
+  const enums = context?.enums;
+  if (!enums) return undefined;
+  const byId = enums as ReadonlyMap<number, EnumDefinition>;
+  return typeof byId.get === 'function'
+    ? byId.get(id)
+    : (enums as readonly EnumDefinition[]).find((candidate) => candidate.id === id);
+}
+
 export const isComplete = (type: CType, aggregates: AggregateContext): boolean => {
   type = unqualifiedType(type);
   if (type === 'void' || isFunction(type)) return false;
@@ -102,6 +132,8 @@ export const isComplete = (type: CType, aggregates: AggregateContext): boolean =
   if (array) return array.length !== null && isComplete(array.element, aggregates);
   const aggregate = aggregateType(type);
   if (aggregate) return aggregates.some((definition) => definition.id === aggregate.id && definition.complete);
+  const enumeration = enumType(type);
+  if (enumeration) return enumeration.definition.complete;
   return true;
 };
 export function isModifiableObject(type: CType, aggregates: AggregateContext): boolean {
@@ -141,6 +173,8 @@ const integerLayout: Record<string, { size: number; alignment: number; bits: num
 
 export function scalarSize(type: CType): number {
   type = unqualifiedType(type);
+  const enumeration = enumType(type);
+  if (enumeration) return integerLayout[enumeration.integerType].size;
   if (type === 'float') return 4;
   if (type === 'double') return 8;
   if (type === 'long double') return 16;
@@ -149,13 +183,20 @@ export function scalarSize(type: CType): number {
 }
 export function scalarAlignment(type: CType): number {
   type = unqualifiedType(type);
+  const enumeration = enumType(type);
+  if (enumeration) return integerLayout[enumeration.integerType].alignment;
   if (type === 'float') return 4;
   if (type === 'double') return 8;
   if (type === 'long double') return 16;
   if (pointerType(type)) return 8;
   return typeof type === 'string' ? integerLayout[type]?.alignment ?? 0 : 0;
 }
-export function integerInfo(type: CType) { type = unqualifiedType(type); return typeof type === 'string' ? integerLayout[type] : undefined; }
+export function integerInfo(type: CType) {
+  const enumeration = enumType(type);
+  if (enumeration) return integerLayout[enumeration.integerType];
+  type = unqualifiedType(type);
+  return typeof type === 'string' ? integerLayout[type] : undefined;
+}
 
 const fallbackLocation: Location = { file: 'main.c', line: 1, column: 1 };
 const layingOut = new Set<number>();
@@ -303,6 +344,8 @@ export function sizeOfType(type: CType, aggregates: AggregateContext = [], at: L
   type = unqualifiedType(type);
   if (type === 'void' || isFunction(type)) failure('INCOMPLETE_TYPE', 'El tipo no tiene tamaño de objeto en C11.', at);
   if (pointerType(type)) return 8;
+  const enumeration = enumType(type);
+  if (enumeration && !enumeration.definition.complete) failure('INCOMPLETE_TYPE', 'El tipo enum todavía está incompleto.', at);
   const array = arrayType(type);
   if (array) {
     if (array.length === null) failure('INCOMPLETE_TYPE', 'No se puede calcular sizeof de un array incompleto.', at);
@@ -325,6 +368,8 @@ export function alignOfType(type: CType, aggregates: AggregateContext = [], at: 
   type = unqualifiedType(type);
   if (type === 'void' || isFunction(type)) failure('INCOMPLETE_TYPE', 'El tipo no tiene alineación de objeto en C11.', at);
   if (pointerType(type)) return 8;
+  const enumeration = enumType(type);
+  if (enumeration && !enumeration.definition.complete) failure('INCOMPLETE_TYPE', 'El tipo enum todavía está incompleto.', at);
   const array = arrayType(type);
   if (array) return alignOfType(array.element, aggregates, at);
   const aggregate = aggregateType(type);
@@ -355,6 +400,7 @@ function sameTypeInner(left: CType, right: CType): boolean {
   if (left.kind === 'pointer' && right.kind === 'pointer') return sameTypeInner(pointedToType(left)!, pointedToType(right)!);
   if (left.kind === 'array' && right.kind === 'array') return left.length === right.length && sameTypeInner(left.element, right.element);
   if (left.kind === 'aggregate' && right.kind === 'aggregate') return left.id === right.id;
+  if (left.kind === 'enum' && right.kind === 'enum') return left.id === right.id;
   if (left.kind === 'function' && right.kind === 'function') {
     return left.variadic === right.variadic && left.prototype === right.prototype && left.parameters.length === right.parameters.length &&
       sameTypeInner(left.returnType, right.returnType) && left.parameters.every((parameter, index) => sameTypeInner(parameter, right.parameters[index]));
@@ -363,25 +409,63 @@ function sameTypeInner(left: CType, right: CType): boolean {
 }
 export function sameType(left: CType, right: CType): boolean { return sameTypeInner(left, right); }
 
-export function compatibleType(left: CType, right: CType): boolean {
+export function compatibleType(left: CType, right: CType, context?: TypeCompatibilityContext): boolean {
+  return compatibleTypeInner(left, right, context, new Set());
+}
+
+function compatibleTypeInner(
+  left: CType, right: CType, context: TypeCompatibilityContext | undefined, seenAggregates: Set<string>,
+): boolean {
   if (sameTypeInner(left, right)) return true;
   const leftQualifiers = qualifiersOf(left), rightQualifiers = qualifiersOf(right);
   if (!!leftQualifiers.const !== !!rightQualifiers.const || !!leftQualifiers.volatile !== !!rightQualifiers.volatile || !!leftQualifiers.restrict !== !!rightQualifiers.restrict) return false;
   left = unqualifiedType(left); right = unqualifiedType(right);
+  const leftEnum = enumType(left), rightEnum = enumType(right);
+  if (leftEnum && rightEnum) {
+    if (leftEnum.id === rightEnum.id) return true;
+    const leftDefinition = getEnumDefinitionForCompatibility(context, leftEnum.id);
+    const rightDefinition = getEnumDefinitionForCompatibility(context, rightEnum.id);
+    if (!leftDefinition || !rightDefinition || leftDefinition.translationUnit === rightDefinition.translationUnit ||
+        leftDefinition.tag !== rightDefinition.tag || leftEnum.integerType !== rightEnum.integerType ||
+        !leftDefinition.complete || !rightDefinition.complete || leftDefinition.enumerators.length !== rightDefinition.enumerators.length) return false;
+    const rightMembers = new Map(rightDefinition.enumerators.map(({ name, value }) => [name, value]));
+    return leftDefinition.enumerators.every(({ name, value }) => rightMembers.get(name) === value);
+  }
+  if (leftEnum && typeof right === 'string') return right === leftEnum.integerType;
+  if (rightEnum && typeof left === 'string') return left === rightEnum.integerType;
   if (typeof left === 'string' || typeof right === 'string') return left === right;
   const leftArray = arrayType(left), rightArray = arrayType(right);
-  if (leftArray && rightArray) return sameTypeInner(leftArray.element, rightArray.element) && (leftArray.length === null || rightArray.length === null || leftArray.length === rightArray.length);
+  if (leftArray && rightArray) return compatibleTypeInner(leftArray.element, rightArray.element, context, seenAggregates) && (leftArray.length === null || rightArray.length === null || leftArray.length === rightArray.length);
   if (pointerType(left) && pointerType(right)) {
-    return compatibleType(pointedToType(left)!, pointedToType(right)!);
+    return compatibleTypeInner(pointedToType(left)!, pointedToType(right)!, context, seenAggregates);
+  }
+  if (typeof left !== 'string' && typeof right !== 'string' && left.kind === 'aggregate' && right.kind === 'aggregate') {
+    if (left.id === right.id) return true;
+    const key = left.id < right.id ? `${left.id}:${right.id}` : `${right.id}:${left.id}`;
+    if (seenAggregates.has(key)) return true;
+    const leftDefinition = getAggregateDefinitionForCompatibility(context, left.id);
+    const rightDefinition = getAggregateDefinitionForCompatibility(context, right.id);
+    if (!leftDefinition || !rightDefinition || leftDefinition.kind !== rightDefinition.kind ||
+        !leftDefinition.tag || leftDefinition.tag !== rightDefinition.tag) return false;
+    if (!leftDefinition.complete || !rightDefinition.complete) return true;
+    if (leftDefinition.members.length !== rightDefinition.members.length) return false;
+    seenAggregates.add(key);
+    return leftDefinition.members.every((member, index) => {
+      const other = rightDefinition.members[index];
+      return member.name === other.name && !!member.isConst === !!other.isConst &&
+        !!member.flexibleArray === !!other.flexibleArray && !!member.unnamedBitField === !!other.unnamedBitField &&
+        (member.bitField?.width ?? null) === (other.bitField?.width ?? null) &&
+        compatibleTypeInner(member.type, other.type, context, seenAggregates);
+    });
   }
   const leftFunction = functionType(left), rightFunction = functionType(right);
   if (leftFunction && rightFunction) {
-    if (!compatibleType(leftFunction.returnType, rightFunction.returnType)) return false;
+    if (!compatibleTypeInner(leftFunction.returnType, rightFunction.returnType, context, seenAggregates)) return false;
     const leftHasPrototype = leftFunction.prototype !== false;
     const rightHasPrototype = rightFunction.prototype !== false;
     if (leftHasPrototype && rightHasPrototype) {
       return leftFunction.variadic === rightFunction.variadic && leftFunction.parameters.length === rightFunction.parameters.length &&
-        leftFunction.parameters.every((parameter, index) => compatibleParameterType(parameter, rightFunction.parameters[index]));
+        leftFunction.parameters.every((parameter, index) => compatibleParameterType(parameter, rightFunction.parameters[index], context, seenAggregates));
     }
     if (!leftHasPrototype && !rightHasPrototype) return true;
     const prototype = leftHasPrototype ? leftFunction : rightFunction;
@@ -391,8 +475,10 @@ export function compatibleType(left: CType, right: CType): boolean {
   return false;
 }
 
-function compatibleParameterType(left: CType, right: CType): boolean {
-  return compatibleType(unqualifiedType(left), unqualifiedType(right));
+function compatibleParameterType(
+  left: CType, right: CType, context: TypeCompatibilityContext | undefined, seenAggregates: Set<string>,
+): boolean {
+  return compatibleTypeInner(unqualifiedType(left), unqualifiedType(right), context, seenAggregates);
 }
 
 function compatibleAfterDefaultPromotion(type: CType): boolean {
@@ -405,34 +491,77 @@ function compatibleAfterDefaultPromotion(type: CType): boolean {
   return true;
 }
 
-export function compositeType(left: CType, right: CType): CType | undefined {
+export function compositeType(left: CType, right: CType, context?: TypeCompatibilityContext): CType | undefined {
   if (sameTypeInner(left, right)) return left;
+  // A composite type is only defined for compatible types. Conditional pointer
+  // expressions have one additional rule for differently qualified pointed-to
+  // types; keep that rule in conditionalPointerCompositeType below.
+  if (!compatibleType(left, right, context)) return undefined;
   const qualifiers = qualifiersOf(left);
-  const rightQualifiers = qualifiersOf(right);
-  const combinedQualifiers = {
-    ...(qualifiers.const || rightQualifiers.const ? { const: true } : {}),
-    ...(qualifiers.volatile || rightQualifiers.volatile ? { volatile: true } : {}),
-    ...(qualifiers.restrict || rightQualifiers.restrict ? { restrict: true } : {}),
-  };
   left = unqualifiedType(left); right = unqualifiedType(right);
+  if (enumType(left) && enumType(right)) return qualifyType(left, qualifiers);
+  if (enumType(left) && typeof right === 'string' && right === enumType(left)!.integerType) return qualifyType(left, qualifiers);
+  if (enumType(right) && typeof left === 'string' && left === enumType(right)!.integerType) return qualifyType(right, qualifiers);
+  if (typeof left === 'string' || typeof right === 'string') {
+    return left === right ? qualifyType(left, qualifiers) : undefined;
+  }
+  if (left.kind !== right.kind) return undefined;
+  if (left.kind === 'aggregate' && right.kind === 'aggregate') {
+    return left.id === right.id || context ? qualifyType(left, qualifiers) : undefined;
+  }
   const leftArray = arrayType(left), rightArray = arrayType(right);
-  if (leftArray && rightArray && sameTypeInner(leftArray.element, rightArray.element)) {
-    return qualifyType(arrayOf(leftArray.element, leftArray.length ?? rightArray.length), combinedQualifiers);
+  if (leftArray && rightArray &&
+      (leftArray.length === null || rightArray.length === null || leftArray.length === rightArray.length)) {
+    const element = compositeType(leftArray.element, rightArray.element, context);
+    if (element) return qualifyType(arrayOf(element, leftArray.length ?? rightArray.length), qualifiers);
   }
   const leftPointer = pointerType(left), rightPointer = pointerType(right);
   if (leftPointer && rightPointer) {
     const leftBase = pointedToType(left)!;
     const rightBase = pointedToType(right)!;
-    if (compatibleType(leftBase, rightBase)) return qualifyType(pointerTo(compositeType(leftBase, rightBase) ?? leftBase), combinedQualifiers);
-    if (unqualifiedType(leftBase) === 'void' && isObject(rightBase)) return qualifyType(pointerTo(qualifyType('void', { const: !!qualifiersOf(leftBase).const || !!qualifiersOf(rightBase).const, volatile: !!qualifiersOf(leftBase).volatile || !!qualifiersOf(rightBase).volatile })), combinedQualifiers);
-    if (unqualifiedType(rightBase) === 'void' && isObject(leftBase)) return qualifyType(pointerTo(qualifyType('void', { const: !!qualifiersOf(leftBase).const || !!qualifiersOf(rightBase).const, volatile: !!qualifiersOf(leftBase).volatile || !!qualifiersOf(rightBase).volatile })), combinedQualifiers);
+    const pointedComposite = compositeType(leftBase, rightBase, context);
+    if (pointedComposite) return qualifyType(pointerTo(pointedComposite), qualifiers);
   }
   const leftFunction = functionType(left), rightFunction = functionType(right);
-  if (compatibleType(left, right) && leftFunction && rightFunction) {
+  if (compatibleType(left, right, context) && leftFunction && rightFunction) {
     const preferred = leftFunction.prototype === false ? rightFunction : leftFunction;
     return functionOf(preferred.returnType, preferred.parameters, !!preferred.variadic, preferred.prototype !== false);
   }
   return undefined;
+}
+
+/**
+ * C11 6.5.15 has a special pointer result rule: qualifiers on the immediate
+ * pointed-to types are unioned, while the remaining type structure must be
+ * compatible. This deliberately rejects unsafe recursive cases such as
+ * int ** versus const int **.
+ */
+export function conditionalPointerCompositeType(left: CType, right: CType): CType | undefined {
+  const leftPointer = pointerType(left), rightPointer = pointerType(right);
+  if (!leftPointer || !rightPointer) return undefined;
+  const leftBase = pointedToType(left)!;
+  const rightBase = pointedToType(right)!;
+  const leftUnqualifiedBase = unqualifiedType(leftBase);
+  const rightUnqualifiedBase = unqualifiedType(rightBase);
+  if (compatibleType(leftUnqualifiedBase, rightUnqualifiedBase)) {
+    const base = compositeType(leftUnqualifiedBase, rightUnqualifiedBase);
+    if (base) return pointerTo(qualifyType(base, unionQualifiers(qualifiersOf(leftBase), qualifiersOf(rightBase))));
+  }
+  if (leftUnqualifiedBase === 'void' && isObject(rightBase)) {
+    return pointerTo(qualifyType('void', unionQualifiers(qualifiersOf(leftBase), qualifiersOf(rightBase))));
+  }
+  if (rightUnqualifiedBase === 'void' && isObject(leftBase)) {
+    return pointerTo(qualifyType('void', unionQualifiers(qualifiersOf(leftBase), qualifiersOf(rightBase))));
+  }
+  return undefined;
+}
+
+function unionQualifiers(left: TypeQualifiers, right: TypeQualifiers): TypeQualifiers {
+  return {
+    ...(left.const || right.const ? { const: true } : {}),
+    ...(left.volatile || right.volatile ? { volatile: true } : {}),
+    ...(left.restrict || right.restrict ? { restrict: true } : {}),
+  };
 }
 
 /** C's implicit void-pointer conversion applies only to object pointers. */
@@ -464,6 +593,8 @@ export function typeName(type: CType, aggregates: AggregateContext = []): string
   if (array) return `${typeName(array.element, aggregates)}[${array.length ?? ''}]`;
   const fn = functionType(type);
   if (fn) return `${typeName(fn.returnType, aggregates)} (${fn.prototype === false ? '' : fn.parameters.map((item) => typeName(item, aggregates)).join(', ')}${fn.variadic ? `${fn.parameters.length ? ', ' : ''}...` : ''})`;
+  const enumeration = enumType(type);
+  if (enumeration) return `${enumeration.tag ? `enum ${enumeration.tag}` : `enum#${enumeration.id}`}`;
   const aggregate = aggregateType(type)!;
   const definition = aggregates.find((item) => item.id === aggregate.id);
   return `${definition?.kind ?? 'aggregate'}${definition?.tag ? ` ${definition.tag}` : `#${aggregate.id}`}`;

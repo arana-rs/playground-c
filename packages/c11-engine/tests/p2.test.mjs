@@ -43,17 +43,28 @@ test('P5 preserves P2 scalar/control coverage and publishes current capabilities
   assert.deepEqual(CAPABILITIES.virtualHeaders, [
     'assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h',
     'limits.h', 'math.h', 'stdarg.h', 'stdalign.h', 'stdbool.h', 'stddef.h', 'stdint.h',
-    'stdio.h', 'stdlib.h', 'string.h', 'wchar.h',
+    'stdio.h', 'stdlib.h', 'string.h', 'time.h',
   ]);
-  assert.equal(CAPABILITIES.enumerations, 'int-compatible-constants-with-integer-constant-expressions-in-int-range');
+  assert.equal(CAPABILITIES.enumerations, 'distinct-enum-types-with-int-compatible-representation-int-promotions-int-enumerators-and-integer-constant-expressions-in-int-range');
   assert.deepEqual(CAPABILITIES.aggregateMembers, ['named', 'anonymous-struct', 'anonymous-union', 'bit-fields', 'flexible-array-members']);
   assert.deepEqual(CAPABILITIES.qualifiers, ['const', 'volatile', 'restrict']);
+  assert.match(CAPABILITIES.restrictProfile, /independent restrict bases/);
+  assert.match(CAPABILITIES.restrictProfile, /bytewise\/library overlap is not analyzed/);
   assert.equal(CAPABILITIES.genericSelection, true);
   assert.deepEqual(CAPABILITIES.storageDurations, ['automatic', 'static', 'allocated', 'thread-local']);
   assert.deepEqual(CAPABILITIES.stdalignMacros, ['alignas', 'alignof', '__alignas_is_defined', '__alignof_is_defined']);
   assert.deepEqual(CAPABILITIES.stddefMacros, ['NULL', 'offsetof']);
-  assert.deepEqual(CAPABILITIES.stddefTypes, ['size_t', 'ptrdiff_t', 'wchar_t', 'max_align_t']);
-  assert.deepEqual(CAPABILITIES.wideCharacterTypes, ['wchar_t', 'wint_t']);
+  assert.deepEqual(CAPABILITIES.stddefTypes, ['size_t', 'ptrdiff_t', 'max_align_t']);
+  assert.ok(CAPABILITIES.errnoMacros.includes('EDOM'));
+  assert.ok(CAPABILITIES.errnoMacros.includes('EILSEQ'));
+  assert.ok(CAPABILITIES.errnoMacros.includes('ENOSYS'));
+  assert.deepEqual(CAPABILITIES.stdioFormatLimitations, ['printf floating precision cap: 100 decimal / 100000 hexadecimal digits']);
+  assert.ok(CAPABILITIES.stdioFunctions.includes('vfprintf'));
+  assert.ok(CAPABILITIES.stdioFunctions.includes('freopen'));
+  assert.ok(CAPABILITIES.stdlibFunctions.includes('strtold'));
+  assert.ok(CAPABILITIES.stdlibFunctions.includes('aligned_alloc'));
+  assert.ok(CAPABILITIES.timeFunctions.includes('timespec_get'));
+  assert.deepEqual(CAPABILITIES.timeMacros, ['CLOCKS_PER_SEC', 'TIME_UTC']);
   assert.deepEqual(CAPABILITIES.floatingTypes, ['float', 'double', 'long double']);
   assert.ok(CAPABILITIES.integerTypes.includes('unsigned long long'));
   assert.equal(CAPABILITIES.mathFunctions.includes('fma'), false);
@@ -65,7 +76,7 @@ test('P5 preserves P2 scalar/control coverage and publishes current capabilities
   assert.equal(TARGET_PROFILE.longDoubleSignificandBits, 64);
   assert.equal(TARGET_PROFILE.longDoubleExponentBits, 15);
   assert.equal(TARGET_PROFILE.floatEvaluationMethod, 0);
-  for (const value of [CAPABILITIES, TARGET_PROFILE, CAPABILITIES.virtualHeaders, CAPABILITIES.aggregateMembers, CAPABILITIES.qualifiers, CAPABILITIES.storageClasses, CAPABILITIES.storageDurations, CAPABILITIES.linkage, CAPABILITIES.stdalignMacros, CAPABILITIES.stddefMacros, CAPABILITIES.stddefTypes, CAPABILITIES.wideCharacterTypes, CAPABILITIES.mathFunctions, CAPABILITIES.integerTypes, CAPABILITIES.floatingTypes, CAPABILITIES.interactiveStdinFunctions]) assert.ok(Object.isFrozen(value));
+  for (const value of [CAPABILITIES, TARGET_PROFILE, CAPABILITIES.virtualHeaders, CAPABILITIES.aggregateMembers, CAPABILITIES.qualifiers, CAPABILITIES.storageClasses, CAPABILITIES.storageDurations, CAPABILITIES.linkage, CAPABILITIES.stdalignMacros, CAPABILITIES.stddefMacros, CAPABILITIES.stddefTypes, CAPABILITIES.errnoMacros, CAPABILITIES.stdioFunctions, CAPABILITIES.stdioMacros, CAPABILITIES.stdlibFunctions, CAPABILITIES.stdlibMacros, CAPABILITIES.timeFunctions, CAPABILITIES.timeMacros, CAPABILITIES.stdioFormatLimitations, CAPABILITIES.mathFunctions, CAPABILITIES.integerTypes, CAPABILITIES.floatingTypes, CAPABILITIES.interactiveStdinFunctions]) assert.ok(Object.isFrozen(value));
 });
 
 test('all LP64 scalar sizes and scalar sizeof expressions use the declared type', () => {
@@ -202,6 +213,18 @@ test('explicit runtime frames support recursion deeper than the host stack with 
 test('known virtual headers expose exact constants, aliases and bool without host I/O', () => {
   run(fixtureSourceFor('p2', 'known-virtual-headers-expose-exact-constants-aliases-and-01.c'), 1);
   run(fixtureSourceFor('p2', 'known-virtual-headers-expose-exact-constants-aliases-and-02.c'), 1);
+});
+
+test('wchar.h and wchar_t are unavailable', () => {
+  const diagnostic = rejects('#include <wchar.h>\nint main(void) { return 0; }');
+  assert.equal(diagnostic.code, 'INCLUDE_NOT_FOUND');
+  assert.match(diagnostic.message, /wchar\.h/);
+  rejects('#include <stddef.h>\nint main(void) { wchar_t text = 65; return text; }');
+  for (const literal of [`L'a'`, 'L"wide"']) {
+    const wideLiteral = rejects(`int main(void) { return sizeof(${literal}); }`);
+    assert.equal(wideLiteral.code, 'UNSUPPORTED_FEATURE');
+    assert.match(wideLiteral.message, /literales anchos/);
+  }
 });
 
 test('math subset provides float/double functions with declared return precision', () => {

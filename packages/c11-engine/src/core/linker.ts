@@ -1,11 +1,12 @@
 import { failure } from './internal.ts';
 import type {
-  AggregateDefinition, CType, FunctionCType, FunctionIR, GlobalObject, Location, ParsedProgram, ProgramIR,
+  AggregateDefinition, CType, EnumDefinition, FunctionCType, FunctionIR, GlobalObject, Location, ParsedProgram, ProgramIR,
 } from './internal.ts';
 import { analyze } from './parser.ts';
 import {
-  arrayOf, functionOf, isArray, isFunction, isInteger, pointerTo,
-  isModifiableObject, pointedToType, pointerType, qualifyType, qualifiersOf, unqualifiedType,
+  arrayOf, compositeType, compatibleType, functionOf, isInteger, isModifiableObject,
+  pointedToType, pointerTo, pointerType, qualifyType, qualifiersOf, unqualifiedType,
+  type TypeCompatibilityContext,
 } from './type-system.ts';
 import { promote } from './numeric.ts';
 
@@ -51,6 +52,11 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
   for (const { parsed } of unitWork) for (const definition of parsed.aggregates) {
     if (!aggregateDefinitions.has(definition.id)) aggregateDefinitions.set(definition.id, definition);
   }
+  const enumDefinitions = new Map<number, EnumDefinition>();
+  for (const { parsed } of unitWork) for (const definition of parsed.enums) {
+    if (!enumDefinitions.has(definition.id)) enumDefinitions.set(definition.id, definition);
+  }
+  const compatibilityContext: TypeCompatibilityContext = { aggregates: aggregateDefinitions, enums: enumDefinitions };
 
   const functionGroups = new Map<string, SymbolGroup<FunctionDeclaration>>();
   const globalGroups = new Map<string, SymbolGroup<GlobalDeclaration>>();
@@ -116,13 +122,14 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
   }
 
   const typeUnions = new TypeUnions();
+  const enumUnions = new TypeUnions();
   for (const group of functionGroups.values()) {
     const first = group.declarations[0];
     for (const item of group.declarations.slice(1)) {
-      if (!compatibleFunctionDeclarations(first.fn, item.fn, aggregateDefinitions)) {
+      if (!compatibleFunctionDeclarations(first.fn, item.fn, compatibilityContext)) {
         failure('CONFLICTING_TYPES', `Declaraciones incompatibles de la función «${first.fn.name}».`, item.fn.location);
       }
-      unifyFunctionTypes(first.fn, item.fn, aggregateDefinitions, typeUnions);
+      unifyFunctionTypes(first.fn, item.fn, aggregateDefinitions, typeUnions, enumUnions, compatibilityContext);
     }
   }
   for (const group of globalGroups.values()) {
@@ -130,10 +137,10 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
     for (const item of group.declarations.slice(1)) {
       if (!!first.global.isConst !== !!item.global.isConst ||
           !!first.global.threadLocal !== !!item.global.threadLocal ||
-          !compatibleAcross(first.global.type, item.global.type, aggregateDefinitions)) {
+          !compatibleType(first.global.type, item.global.type, compatibilityContext)) {
         failure('CONFLICTING_TYPES', `Declaraciones incompatibles del objeto «${first.global.name}».`, item.global.location);
       }
-      unifyTypes(first.global.type, item.global.type, aggregateDefinitions, typeUnions);
+      unifyTypes(first.global.type, item.global.type, aggregateDefinitions, typeUnions, enumUnions, compatibilityContext);
     }
   }
 
@@ -163,6 +170,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
       }
       if (type.kind === 'qualified') typeMemo.set(type, qualifyType(rewriteType(type.base), type.qualifiers));
       else if (type.kind === 'aggregate') typeMemo.set(type, { kind: 'aggregate', id: typeUnions.find(type.id) });
+      else if (type.kind === 'enum') typeMemo.set(type, { ...type, id: enumUnions.find(type.id) });
       else if (type.kind === 'pointer') typeMemo.set(type, pointerTo(rewriteType(type.base), {
         ...(type.const === undefined ? {} : { const: type.const }),
         ...(type.volatile === undefined ? {} : { volatile: type.volatile }),
@@ -181,6 +189,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
       definition.id = typeUnions.find(definition.id);
       for (const member of definition.members) member.type = rewriteType(member.type);
     }
+    for (const definition of parsed.enums) definition.id = enumUnions.find(definition.id);
     rewriteObjectGraph(parsed.functions, rewriteType);
     rewriteObjectGraph(parsed.globals, rewriteType);
   }
@@ -191,6 +200,11 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
     if (!prior || !prior.complete && candidate.complete) aggregatesById.set(candidate.id, candidate);
   }
   const aggregates = [...aggregatesById.values()];
+  const enumsById = new Map<number, EnumDefinition>();
+  for (const { parsed } of unitWork) for (const candidate of parsed.enums) {
+    if (!enumsById.has(candidate.id)) enumsById.set(candidate.id, candidate);
+  }
+  const enums = [...enumsById.values()];
 
   const functionRefs = new Map<string, Location>();
   const globalRefs = new Map<string, Location>();
@@ -272,9 +286,12 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
     }
     let combinedType = selected.global.type;
     for (const declaration of group.declarations) {
-      const composite = compositeCompatibleType(combinedType, declaration.global.type);
+      const composite = compositeType(combinedType, declaration.global.type, compatibilityContext);
       if (!composite) failure('CONFLICTING_TYPES', `Declaraciones incompatibles del objeto «${selected.global.name}».`, declaration.global.location);
-      combinedType = composite;
+      // The composite can be created after the parsed IR has been rewritten.
+      // Canonicalize it too, so an aggregate selected from a later TU cannot
+      // retain an ID that TypeUnions already folded into another definition.
+      combinedType = rewriteType(composite);
     }
     const index = globals.length;
     globals.push({ ...selected.global, id: index, type: combinedType, tentative: !!selected.global.tentative && !selected.global.initializer, declarationOnly: false });
@@ -329,7 +346,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
     mainArgvCharPointer === 'char' && !main.variadic;
   if (!validNoArgs && !validArgv) failure('UNSUPPORTED_FEATURE', 'P4 admite int main(void) o int main(int, char **).', main.location);
 
-  return { functions, globals, aggregates, mainIndex, entry, translationUnit: entry, sourceChars: 0, tokenCount: 0 };
+  return { functions, globals, aggregates, enums, mainIndex, entry, translationUnit: entry, sourceChars: 0, tokenCount: 0 };
 }
 
 function symbolKey(linkage: FunctionIR['linkage'] | GlobalObject['linkage'], unit: string, name: string): string {
@@ -369,8 +386,10 @@ function functionType(fn: FunctionIR): FunctionCType {
   return functionOf(fn.returnType, fn.parameters.map((parameter) => parameter.type), !!fn.variadic, fn.prototype !== false);
 }
 
-function compatibleFunctionDeclarations(left: FunctionIR, right: FunctionIR, definitions: ReadonlyMap<number, AggregateDefinition>): boolean {
-  if (!compatibleAcross(functionType(left), functionType(right), definitions)) return false;
+function compatibleFunctionDeclarations(
+  left: FunctionIR, right: FunctionIR, compatibilityContext: TypeCompatibilityContext,
+): boolean {
+  if (!compatibleType(functionType(left), functionType(right), compatibilityContext)) return false;
   for (const definition of [left, right]) {
     if (!definition.oldStyle || !definition.body) continue;
     const prototype = definition === left ? right : left;
@@ -378,60 +397,12 @@ function compatibleFunctionDeclarations(left: FunctionIR, right: FunctionIR, def
     if (definition.parameters.length !== prototype.parameters.length || prototype.variadic) return false;
     for (let index = 0; index < definition.parameters.length; index++) {
       const promoted = defaultArgumentType(definition.parameters[index].type);
-      if (!compatibleAcross(unqualifiedParameter(promoted), unqualifiedParameter(prototype.parameters[index].type), definitions)) return false;
+      if (!compatibleType(
+        unqualifiedParameter(promoted), unqualifiedParameter(prototype.parameters[index].type), compatibilityContext,
+      )) return false;
     }
   }
   return true;
-}
-
-function compatibleAcross(left: CType, right: CType, definitions: ReadonlyMap<number, AggregateDefinition>, seen = new Set<string>()): boolean {
-  if (!sameQualifiers(qualifiersOf(left), qualifiersOf(right))) return false;
-  left = unqualifiedType(left);
-  right = unqualifiedType(right);
-  if (typeof left === 'string' || typeof right === 'string') return left === right;
-  if (left.kind !== right.kind) return false;
-  if (left.kind === 'pointer' && right.kind === 'pointer') {
-    const leftBase = pointedToType(left) ?? left.base;
-    const rightBase = pointedToType(right) ?? right.base;
-    return compatibleAcross(leftBase, rightBase, definitions, seen);
-  }
-  if (left.kind === 'array' && right.kind === 'array') return (left.length === null || right.length === null || left.length === right.length) &&
-    compatibleAcross(left.element, right.element, definitions, seen);
-  if (left.kind === 'aggregate' && right.kind === 'aggregate') {
-    if (left.id === right.id) return true;
-    const key = `${left.id}:${right.id}`;
-    if (seen.has(key)) return true;
-    const a = definitions.get(left.id), b = definitions.get(right.id);
-    if (!a || !b || a.kind !== b.kind || !a.tag || a.tag !== b.tag) return false;
-    if (!a.complete || !b.complete) return true;
-    if (a.members.length !== b.members.length) return false;
-    seen.add(key);
-    return a.members.every((member, index) => {
-      const other = b.members[index];
-      return member.name === other.name && !!member.isConst === !!other.isConst &&
-        !!member.flexibleArray === !!other.flexibleArray && !!member.unnamedBitField === !!other.unnamedBitField &&
-        (member.bitField?.width ?? null) === (other.bitField?.width ?? null) &&
-        compatibleAcross(member.type, other.type, definitions, seen);
-    });
-  }
-  if (left.kind === 'function' && right.kind === 'function') {
-    if (!compatibleAcross(left.returnType, right.returnType, definitions, seen)) return false;
-    if (left.prototype !== false && right.prototype !== false) {
-      return left.variadic === right.variadic && left.parameters.length === right.parameters.length &&
-        left.parameters.every((parameter, index) => compatibleAcross(unqualifiedParameter(parameter), unqualifiedParameter(right.parameters[index]), definitions, seen));
-    }
-    if (left.prototype === false && right.prototype === false) return true;
-    const prototype = left.prototype === false ? right : left;
-    return !prototype.variadic && prototype.parameters.every((parameter) => stableAfterDefaultPromotion(parameter));
-  }
-  return false;
-}
-
-function stableAfterDefaultPromotion(type: CType): boolean {
-  type = unqualifiedParameter(type);
-  if (type === 'float') return false;
-  if (isInteger(type)) return promote(type) === type;
-  return !isArray(type) && !isFunction(type);
 }
 
 function defaultArgumentType(type: CType): CType {
@@ -447,83 +418,55 @@ function unqualifiedParameter(type: CType): CType {
   return pointer ? pointerTo(pointedToType(pointer) ?? pointer.base) : type;
 }
 
-function compositeCompatibleType(left: CType, right: CType): CType | undefined {
-  const leftQualifiers = qualifiersOf(left);
-  if (!sameQualifiers(leftQualifiers, qualifiersOf(right))) return undefined;
-  const qualified = (type: CType | undefined): CType | undefined =>
-    type === undefined ? undefined : qualifyType(type, leftQualifiers);
-  const leftBase = unqualifiedType(left);
-  const rightBase = unqualifiedType(right);
-  if (typeof leftBase === 'string' || typeof rightBase === 'string') {
-    return leftBase === rightBase ? qualified(leftBase) : undefined;
-  }
-  if (leftBase.kind !== rightBase.kind) return undefined;
-  if (leftBase.kind === 'aggregate' && rightBase.kind === 'aggregate') {
-    return leftBase.id === rightBase.id ? qualified(leftBase) : undefined;
-  }
-  if (leftBase.kind === 'array' && rightBase.kind === 'array') {
-    if (leftBase.length !== null && rightBase.length !== null && leftBase.length !== rightBase.length) return undefined;
-    const element = compositeCompatibleType(leftBase.element, rightBase.element);
-    return qualified(element ? arrayOf(element, leftBase.length ?? rightBase.length) : undefined);
-  }
-  if (leftBase.kind === 'pointer' && rightBase.kind === 'pointer') {
-    const base = compositeCompatibleType(pointedToType(leftBase) ?? leftBase.base, pointedToType(rightBase) ?? rightBase.base);
-    return qualified(base ? pointerTo(base) : undefined);
-  }
-  if (leftBase.kind === 'function' && rightBase.kind === 'function') {
-    if (leftBase.prototype === false || rightBase.prototype === false) {
-      const preferred = leftBase.prototype === false ? rightBase : leftBase;
-      return qualified(functionOf(preferred.returnType, preferred.parameters, !!preferred.variadic, preferred.prototype !== false));
-    }
-    if (leftBase.variadic !== rightBase.variadic || leftBase.parameters.length !== rightBase.parameters.length) return undefined;
-    const returnType = compositeCompatibleType(leftBase.returnType, rightBase.returnType);
-    if (!returnType) return undefined;
-    const parameters: CType[] = [];
-    for (let index = 0; index < leftBase.parameters.length; index++) {
-      const parameter = compositeCompatibleType(unqualifiedParameter(leftBase.parameters[index]), unqualifiedParameter(rightBase.parameters[index]));
-      if (!parameter) return undefined;
-      parameters.push(parameter);
-    }
-    return qualified(functionOf(returnType, parameters, !!leftBase.variadic, true));
-  }
-  return undefined;
-}
-
-function sameQualifiers(left: ReturnType<typeof qualifiersOf>, right: ReturnType<typeof qualifiersOf>): boolean {
-  return !!left.const === !!right.const && !!left.volatile === !!right.volatile && !!left.restrict === !!right.restrict;
-}
-
-function unifyFunctionTypes(left: FunctionIR, right: FunctionIR, definitions: ReadonlyMap<number, AggregateDefinition>, unions: TypeUnions): void {
-  unifyTypes(left.returnType, right.returnType, definitions, unions);
+function unifyFunctionTypes(
+  left: FunctionIR, right: FunctionIR, definitions: ReadonlyMap<number, AggregateDefinition>, unions: TypeUnions,
+  enumUnions: TypeUnions, compatibilityContext: TypeCompatibilityContext,
+): void {
+  unifyTypes(left.returnType, right.returnType, definitions, unions, enumUnions, compatibilityContext);
   if (left.prototype !== false && right.prototype !== false) {
-    left.parameters.forEach((parameter, index) => unifyTypes(unqualifiedParameter(parameter.type), unqualifiedParameter(right.parameters[index].type), definitions, unions));
+    left.parameters.forEach((parameter, index) => unifyTypes(
+      unqualifiedParameter(parameter.type), unqualifiedParameter(right.parameters[index].type), definitions, unions, enumUnions,
+      compatibilityContext,
+    ));
   } else {
     const oldStyle = left.oldStyle && left.body ? left : right.oldStyle && right.body ? right : undefined;
     const prototype = left.prototype !== false ? left : right.prototype !== false ? right : undefined;
     if (oldStyle && prototype && oldStyle.parameters.length === prototype.parameters.length) {
-      oldStyle.parameters.forEach((parameter, index) => unifyTypes(defaultArgumentType(parameter.type), prototype.parameters[index].type, definitions, unions));
+      oldStyle.parameters.forEach((parameter, index) => unifyTypes(
+        defaultArgumentType(parameter.type), prototype.parameters[index].type, definitions, unions, enumUnions, compatibilityContext,
+      ));
     }
   }
 }
 
-function unifyTypes(left: CType, right: CType, definitions: ReadonlyMap<number, AggregateDefinition>, unions: TypeUnions, seen = new Set<string>()): void {
-  if (!sameQualifiers(qualifiersOf(left), qualifiersOf(right))) return;
+function unifyTypes(
+  left: CType, right: CType, definitions: ReadonlyMap<number, AggregateDefinition>, unions: TypeUnions,
+  enumUnions: TypeUnions, compatibilityContext: TypeCompatibilityContext, seen = new Set<string>(),
+): void {
+  if (!compatibleType(left, right, compatibilityContext)) return;
   left = unqualifiedType(left);
   right = unqualifiedType(right);
   if (typeof left === 'string' || typeof right === 'string' || left.kind !== right.kind) return;
   const pair = `${typeKey(left)}:${typeKey(right)}`;
   if (seen.has(pair)) return;
   seen.add(pair);
-  if (left.kind === 'pointer' && right.kind === 'pointer') unifyTypes(left.base, right.base, definitions, unions, seen);
-  else if (left.kind === 'array' && right.kind === 'array') unifyTypes(left.element, right.element, definitions, unions, seen);
+  if (left.kind === 'pointer' && right.kind === 'pointer') unifyTypes(left.base, right.base, definitions, unions, enumUnions, compatibilityContext, seen);
+  else if (left.kind === 'array' && right.kind === 'array') unifyTypes(left.element, right.element, definitions, unions, enumUnions, compatibilityContext, seen);
+  else if (left.kind === 'enum' && right.kind === 'enum') {
+    if (left.id !== right.id) enumUnions.union(left.id, right.id);
+  }
   else if (left.kind === 'aggregate' && right.kind === 'aggregate') {
-    if (left.id === right.id || !compatibleAcross(left, right, definitions)) return;
+    if (left.id === right.id) return;
     unions.union(left.id, right.id);
     const a = definitions.get(left.id), b = definitions.get(right.id);
-    if (a?.complete && b?.complete) a.members.forEach((member, index) => unifyTypes(member.type, b.members[index].type, definitions, unions, seen));
+    if (a?.complete && b?.complete) a.members.forEach((member, index) => unifyTypes(
+      member.type, b.members[index].type, definitions, unions, enumUnions, compatibilityContext, seen,
+    ));
   } else if (left.kind === 'function' && right.kind === 'function') {
-    unifyTypes(left.returnType, right.returnType, definitions, unions, seen);
-    if (left.parameters.length === right.parameters.length) left.parameters.forEach((parameter, index) => unifyTypes(parameter, right.parameters[index], definitions, unions, seen));
+    unifyTypes(left.returnType, right.returnType, definitions, unions, enumUnions, compatibilityContext, seen);
+    if (left.parameters.length === right.parameters.length) left.parameters.forEach((parameter, index) => unifyTypes(
+      parameter, right.parameters[index], definitions, unions, enumUnions, compatibilityContext, seen,
+    ));
   }
 }
 
@@ -534,6 +477,7 @@ function typeKey(type: CType): string {
   const prefix = qualifierKey ? `q${qualifierKey}:` : '';
   if (typeof type === 'string') return `${prefix}${type}`;
   if (type.kind === 'aggregate') return `${prefix}a${type.id}`;
+  if (type.kind === 'enum') return `${prefix}e${type.id}`;
   if (type.kind === 'pointer') return `${prefix}p${type.baseConst ? 'b' : ''}${type.baseVolatile ? 'v' : ''}${typeKey(type.base)}`;
   if (type.kind === 'array') return `${prefix}y${type.length ?? ''}:${typeKey(type.element)}`;
   if (type.kind === 'function') return `${prefix}f${type.prototype === false ? 'n' : 'p'}${type.variadic ? 'v' : ''}:${typeKey(type.returnType)}:${type.parameters.map(typeKey).join(',')}`;
@@ -562,7 +506,7 @@ function isTypeDescriptor(value: unknown): value is Exclude<CType, string> {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Record<string, unknown>;
   return candidate.kind === 'qualified' && 'base' in candidate || candidate.kind === 'pointer' && 'base' in candidate || candidate.kind === 'array' && 'element' in candidate ||
-    candidate.kind === 'aggregate' && typeof candidate.id === 'number' || candidate.kind === 'function' && 'returnType' in candidate;
+    candidate.kind === 'aggregate' && typeof candidate.id === 'number' || candidate.kind === 'enum' && typeof candidate.id === 'number' || candidate.kind === 'function' && 'returnType' in candidate;
 }
 
 function rewriteObjectGraph(root: object, rewriteType: (type: CType) => CType): void {
@@ -578,18 +522,24 @@ function visitObjectGraph(root: object, visit: (value: object, parent?: object, 
   const pending: { value: object; parent?: object; key?: string | number }[] = [{ value: root }];
   while (pending.length) {
     const current = pending.pop()!;
-    if (seen.has(current.value)) continue;
-    seen.add(current.value);
+    const typeDescriptor = isTypeDescriptor(current.value);
+    // A shared descriptor may be referenced by several fields. Each field
+    // needs replacement, even though the descriptor itself is a visited leaf.
+    if (seen.has(current.value) && !typeDescriptor) continue;
+    if (!typeDescriptor) seen.add(current.value);
     visit(current.value, current.parent, current.key);
+    // Type descriptors are replaceable leaves: callers that rewrite them must
+    // see the descriptor as a child, while rewriteType handles its own graph.
+    if (typeDescriptor) continue;
     if (Array.isArray(current.value)) {
       for (let index = current.value.length - 1; index >= 0; index--) {
         const child = current.value[index];
-        if (child && typeof child === 'object' && !isTypeDescriptor(child)) pending.push({ value: child, parent: current.value, key: index });
+        if (child && typeof child === 'object') pending.push({ value: child, parent: current.value, key: index });
       }
       continue;
     }
     for (const [key, child] of Object.entries(current.value)) {
-      if (child && typeof child === 'object' && !isTypeDescriptor(child)) pending.push({ value: child, parent: current.value, key });
+      if (child && typeof child === 'object') pending.push({ value: child, parent: current.value, key });
     }
   }
 }

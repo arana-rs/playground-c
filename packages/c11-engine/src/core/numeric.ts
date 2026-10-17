@@ -8,7 +8,7 @@ import {
 import type { Binary80Value } from './binary80.ts';
 import { HEAP_ALLOCATOR_BUILTINS, HEAP_ALLOCATOR_SIGNATURES } from './allocator-builtins.ts';
 import {
-  aggregateType, canConvertPointerType, compatibleType, functionType, isArithmetic, isInteger, isPointer,
+  aggregateType, canConvertPointerType, compatibleType, enumType, functionType, isArithmetic, isInteger, isPointer,
   pointedToType, pointerTo, pointerType, scalarSize, unqualifiedType,
 } from './type-system.ts';
 import type { AggregateContext } from './type-system.ts';
@@ -33,12 +33,20 @@ const integers: Record<string, IntegerInfo | undefined> = {
 };
 
 export { isInteger };
+function integerRepresentationType(type: CType): string | undefined {
+  const enumeration = enumType(type);
+  if (enumeration) return enumeration.integerType;
+  const unqualified = unqualifiedType(type);
+  return typeof unqualified === 'string' ? unqualified : undefined;
+}
 export function sizeOf(type: CType): number {
   const unqualified = unqualifiedType(type);
   return pointerType(unqualified) ? 8 : scalarSize(unqualified);
 }
 export function promote(type: CType): CType {
   const unqualified = unqualifiedType(type);
+  const enumeration = enumType(unqualified);
+  if (enumeration) return enumeration.integerType;
   return integers[String(unqualified)] && integers[String(unqualified)]!.rank < 3 ? 'int' : unqualified;
 }
 export function commonType(left: CType, right: CType): CType {
@@ -60,24 +68,25 @@ export function commonType(left: CType, right: CType): CType {
   return `unsigned ${signed}` as CType;
 }
 function bounds(type: CType): { min: bigint; max: bigint } {
-  type = unqualifiedType(type);
-  const info = integers[String(type)]!;
+  const integerType = integerRepresentationType(type)!;
+  const info = integers[integerType]!;
   if (type === '_Bool') return { min: 0n, max: 1n };
   return info.unsigned
     ? { min: 0n, max: (1n << BigInt(info.bits)) - 1n }
     : { min: -(1n << BigInt(info.bits - 1)), max: (1n << BigInt(info.bits - 1)) - 1n };
 }
 function normalize(value: bigint, type: CType): bigint {
-  type = unqualifiedType(type);
-  const info = integers[String(type)]!;
+  const integerType = integerRepresentationType(type)!;
+  const info = integers[integerType]!;
   return info.unsigned ? BigInt.asUintN(info.bits, value) : BigInt.asIntN(info.bits, value);
 }
 function checked(value: bigint, type: CType, location: Location): CValue {
   type = unqualifiedType(type);
-  const info = integers[String(type)]!;
+  const integerType = integerRepresentationType(type)!;
+  const info = integers[integerType]!;
   if (info.unsigned) return { type, value: normalize(value, type) };
   const range = bounds(type);
-  if (value < range.min || value > range.max) failure('SIGNED_OVERFLOW', `Overflow de ${type} firmado de ${info.bits} bits: comportamiento indefinido en C11.`, location);
+  if (value < range.min || value > range.max) failure('SIGNED_OVERFLOW', `Overflow de ${integerType} firmado de ${info.bits} bits: comportamiento indefinido en C11.`, location);
   return { type, value };
 }
 function int(value: boolean | number): CValue { return { type: 'int', value: BigInt(value ? (typeof value === 'number' ? value : 1) : 0) }; }
@@ -149,7 +158,7 @@ export function convert(value: CValue, type: CType, location: Location, aggregat
     if (isInteger(value.type) && typeof value.value === 'bigint' && value.value === 0n) return { type, value: null };
     failure('INVALID_CONVERSION', 'Un puntero solo acepta otro puntero compatible o una constante de puntero nulo.', location);
   }
-  if (typeof type !== 'string' || !isArithmetic(type)) {
+  if (!isArithmetic(type)) {
     if (aggregateType(type) && compatibleType(value.type, type) && typeof value.value === 'object' && value.value !== null && value.value.kind === 'aggregate-value') {
       return { type, value: value.value };
     }

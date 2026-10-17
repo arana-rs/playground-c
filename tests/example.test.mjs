@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createDebugSession, createExecutionSession, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
+import { createDebugSession, execute, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
 import { runFile } from '@playground/c11-engine/browser';
 import { RUN_CONFIGURATION } from '../src/execution/useRunner.ts';
+import { createWorkerRuntimeServices } from '../src/execution/workerRuntimeServices.ts';
 
 const initialExampleSource = readFileSync(new URL('../src/examples/main.c', import.meta.url), 'utf8');
 const heapLifecycleSource = [
@@ -22,82 +23,53 @@ const heapLifecycleSource = [
   '}',
 ].join('\n');
 
-test('the initial example accepts a size and round-trips it through virtual memory and a file', async () => {
+function randomValuesFromOutput(stdout) {
+  const lines = stdout.trimEnd().split('\n');
+  assert.equal(lines[0], 'Arreglo con 10 numeros aleatorios entre 0 y 99:');
+  assert.equal(lines.length, 11);
+  return lines.slice(1).map((line, index) => {
+    const match = new RegExp(`^numeros\\[${index}\\] = (\\d+)$`).exec(line);
+    assert.ok(match, `línea de salida no válida: ${line}`);
+    const value = Number(match[1]);
+    assert.ok(Number.isInteger(value) && value >= 0 && value <= 99, `valor fuera de rango: ${value}`);
+    return value;
+  });
+}
+
+test('the initial example prints ten random integers in the documented range without stdin', async () => {
   const file = new File([initialExampleSource], 'main.c', { type: 'text/x-c' });
-  const options = {
-    ...RUN_CONFIGURATION.options,
-    execute: {
-      ...RUN_CONFIGURATION.options.execute,
-      io: { stdin: '8\n' },
-    },
-  };
-  const result = await runFile(file, options);
+  const result = await runFile(file, RUN_CONFIGURATION.options);
   assert.equal(result.kind, 'terminated', JSON.stringify(result));
   assert.equal(result.mainReturn, 0);
   assert.equal(result.exitCode, 0);
   const stdout = new TextDecoder().decode(result.stdout);
-  assert.match(stdout, /Memoria dinamica: B:9\/9 \(base=9\)\n/);
-  assert.match(stdout, /Archivo virtual, leido y cerrado: B:9\/9\n/);
-  assert.match(stdout, /Un tercio en long double:/);
+  assert.equal(randomValuesFromOutput(stdout).length, 10);
   assert.deepEqual(result.stderr, new Uint8Array());
 });
 
-test('the initial example exposes its prompt and handles valid input, EOF and invalid input in Run and Debug', () => {
+test('the initial example uses the Worker clock to seed rand across controlled seconds', () => {
   const prepared = prepare({
     entry: 'main.c',
     files: [{ name: 'main.c', source: initialExampleSource }],
   }, RUN_CONFIGURATION.options.prepare);
   assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));
 
-  const executeInteractive = (session, input) => {
-    let progress = session.resume();
-    let prompt;
-    let submitted = false;
-    for (let index = 0; index < 1_000; index += 1) {
-      if (progress.kind === 'paused') {
-        progress = session.resume();
-        continue;
-      }
-      if (progress.kind === 'input-needed') {
-        prompt ??= new TextDecoder().decode(progress.stdout);
-        assert.equal(new TextDecoder().decode(progress.stderr), '');
-        assert.equal(submitted, false, 'el ejemplo solo solicita una línea');
-        if (input === null) session.endStdin();
-        else session.appendStdin(new TextEncoder().encode(input));
-        submitted = true;
-        progress = session.resume();
-        continue;
-      }
-      return { result: progress, prompt };
-    }
-    assert.fail('La sesión no alcanzó un resultado terminal en 1.000 pasos.');
+  const runAt = milliseconds => execute(
+    prepared.program,
+    RUN_CONFIGURATION.options.execute,
+    createWorkerRuntimeServices(() => milliseconds),
+  );
+  const first = runAt(1_704_067_200_000);
+  const repeated = runAt(1_704_067_200_000);
+  const nextSecond = runAt(1_704_067_201_000);
+  for (const result of [first, repeated, nextSecond]) {
+    assert.equal(result.kind, 'terminated', JSON.stringify(result));
+    assert.equal(result.mainReturn, 0);
+    assert.deepEqual(result.stderr, new Uint8Array());
   };
-
-  for (const [mode, createSession] of [
-    ['Run', () => createExecutionSession(prepared.program, RUN_CONFIGURATION.options.execute)],
-    ['Debug', () => createDebugSession(prepared.program, RUN_CONFIGURATION.options.execute, RUN_CONFIGURATION.debug)],
-  ]) {
-    const valid = executeInteractive(createSession(), '8\n');
-    assert.equal(valid.result.kind, 'terminated', `${mode}: ${JSON.stringify(valid.result)}`);
-    assert.equal(valid.result.mainReturn, 0);
-    assert.equal(valid.prompt, 'Tamano del texto (8-64): ');
-    const validOutput = new TextDecoder().decode(valid.result.stdout);
-    assert.match(validOutput, /Memoria dinamica: B:9\/9 \(base=9\)\n/);
-    assert.match(validOutput, /Archivo virtual, leido y cerrado: B:9\/9\n/);
-    assert.deepEqual(valid.result.stderr, new Uint8Array());
-
-    const eof = executeInteractive(createSession(), null);
-    assert.equal(eof.result.kind, 'terminated', `${mode}: ${JSON.stringify(eof.result)}`);
-    assert.equal(eof.result.mainReturn, 0);
-    assert.equal(eof.prompt, 'Tamano del texto (8-64): ');
-    assert.match(new TextDecoder().decode(eof.result.stdout), /Fin de entrada; no se reservo memoria\./);
-    assert.deepEqual(eof.result.stderr, new Uint8Array());
-
-    const invalid = executeInteractive(createSession(), 'nope\n');
-    assert.equal(invalid.result.kind, 'terminated', `${mode}: ${JSON.stringify(invalid.result)}`);
-    assert.equal(invalid.result.exitCode, 1);
-    assert.match(new TextDecoder().decode(invalid.result.stdout), /Entrada invalida: escribe un entero\./);
-  }
+  const firstValues = randomValuesFromOutput(new TextDecoder().decode(first.stdout));
+  assert.deepEqual(randomValuesFromOutput(new TextDecoder().decode(repeated.stdout)), firstValues);
+  assert.notDeepEqual(randomValuesFromOutput(new TextDecoder().decode(nextSecond.stdout)), firstValues);
 });
 
 test('debug tracks heap allocations through free and replacement with a focused fixture', () => {

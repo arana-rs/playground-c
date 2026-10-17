@@ -13,6 +13,7 @@ import type {
 } from '@playground/c11-engine/core';
 import { RUN_CONFIGURATION } from '../execution/configuration.ts';
 import { OutputSnapshotDeltas } from '../execution/outputSnapshotDeltas.ts';
+import { createWorkerRuntimeServices } from '../execution/workerRuntimeServices.ts';
 import type { MemoryViewerCommand, MemoryViewerProgress, MemoryViewerResponse } from './protocol.ts';
 
 interface DebugRun {
@@ -184,6 +185,7 @@ function begin(command: Extract<MemoryViewerCommand, { type: 'debug-start' }>) {
       preparation.program,
       RUN_CONFIGURATION.options.execute,
       RUN_CONFIGURATION.debug,
+      createWorkerRuntimeServices(),
     );
     const run: DebugRun = {
       jobId: command.jobId,

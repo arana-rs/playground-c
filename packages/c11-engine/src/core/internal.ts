@@ -18,6 +18,15 @@ export interface PointerCType {
 }
 export interface ArrayCType { readonly kind: 'array'; readonly element: CType; readonly length: number | null }
 export interface AggregateCType { readonly kind: 'aggregate'; readonly id: number }
+export interface EnumCType {
+  readonly kind: 'enum';
+  readonly id: number;
+  readonly tag: string | null;
+  /** Integer type selected by this target for the enum representation. */
+  readonly integerType: Extract<ScalarCType, 'int'>;
+  /** Shared mutable definition lets early references observe the closing brace. */
+  readonly definition: EnumDefinition;
+}
 export interface TypeQualifiers {
   readonly const?: boolean;
   readonly volatile?: boolean;
@@ -37,7 +46,7 @@ export interface FunctionCType {
   /** false represents a C declaration written as f() without a prototype. */
   readonly prototype?: boolean;
 }
-export type CType = ScalarCType | PointerCType | ArrayCType | AggregateCType | FunctionCType | QualifiedCType;
+export type CType = ScalarCType | PointerCType | ArrayCType | AggregateCType | EnumCType | FunctionCType | QualifiedCType;
 
 export interface ObjectPointerValue {
   readonly kind: 'object-pointer';
@@ -172,6 +181,15 @@ export interface AggregateDefinition {
   flexibleOffset?: number;
   location: Location;
 }
+export interface EnumDefinition {
+  id: number;
+  tag: string | null;
+  complete: boolean;
+  integerType: Extract<ScalarCType, 'int'>;
+  enumerators: { name: string; value: bigint; location: Location }[];
+  translationUnit: string;
+  location: Location;
+}
 export type Linkage = 'internal' | 'external';
 export interface GlobalObject {
   id: number;
@@ -193,7 +211,7 @@ export interface GlobalObject {
   threadLocal?: boolean;
 }
 export interface StaticAssertion { condition: Expression; message: string; location: Location }
-export interface ParsedProgram { functions: FunctionIR[]; aggregates: AggregateDefinition[]; globals: GlobalObject[]; staticAssertions?: StaticAssertion[]; translationUnit?: string }
+export interface ParsedProgram { functions: FunctionIR[]; aggregates: AggregateDefinition[]; enums: EnumDefinition[]; globals: GlobalObject[]; staticAssertions?: StaticAssertion[]; translationUnit?: string }
 
 export type Statement =
   | { kind: 'block'; statements: Statement[]; bindings?: number[]; location: Location; endLocation: Location }
