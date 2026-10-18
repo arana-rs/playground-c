@@ -1,12 +1,14 @@
 import { failure } from './internal.ts';
-import type { Binding, CValue, Expression, FunctionIR, Initializer, Location, Statement } from './internal.ts';
+import type { Binding, CValue, Expression, FunctionIR, Initializer, Location, Parameter, Statement } from './internal.ts';
 
 export interface Scope { id: number; bindings: Binding[]; location: Location; name: string }
 export type Instruction = { location: Location; path: Scope[] } & (
   | { op: 'enter'; scope: Scope }
+  | { op: 'parameterBounds'; parameters: readonly Parameter[] }
   | { op: 'leave' }
   | { op: 'tick' }
   | { op: 'declaration'; binding: number; initializer?: Initializer }
+  | { op: 'typeDeclaration'; type: import('./internal.ts').CType }
   | { op: 'expression'; value: Expression }
   | { op: 'return'; value?: Expression }
   | { op: 'branch'; condition: Expression; target: number }
@@ -49,6 +51,9 @@ export function compile(fn: FunctionIR): CompiledFunction {
     if (node.kind === 'block') {
       const ids = node === fn.body ? [...new Set([...fn.parameters.map(parameter => parameter.binding!), ...(node.bindings ?? [])])] : node.bindings ?? [];
       enter(ids, node.location, node === fn.body ? fn.name : scopeName ?? 'block');
+      if (node === fn.body && fn.parameters.some((parameter) => parameter.variableLengthBounds?.length)) {
+        emit('parameterBounds', node.location, { parameters: fn.parameters });
+      }
       work.push(() => leave(node.endLocation));
       for (let index = node.statements.length - 1; index >= 0; index--) work.push(() => schedule(node.statements[index]));
     } else if (node.kind === 'sequence') {
@@ -57,6 +62,8 @@ export function compile(fn: FunctionIR): CompiledFunction {
       const binding = node.binding === undefined ? undefined : fn.bindings[node.binding];
       if (node.extern || binding?.linkage === 'external') emit('tick', node.location, {});
       else emit('declaration', node.location, { binding: node.binding!, initializer: node.initializer });
+    } else if (node.kind === 'typeDeclaration') {
+      emit('typeDeclaration', node.location, { type: node.type });
     } else if (node.kind === 'staticAssert') {
       // The analyzer evaluates and validates static assertions; they have no runtime effect.
     } else if (node.kind === 'expression' || node.kind === 'return') {

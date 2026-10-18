@@ -719,6 +719,129 @@ int main(void) {
   assert.equal(session.inspectArrays().arrays.find((array) => array.name === 'values').elements[2].displayValue, '9', 'indexed assignment updates the element');
 });
 
+test('pointer arrays publish bounded cells with the existing pointer states and direct targets', () => {
+  const source = `#include <stdlib.h>
+#include <string.h>
+int add_one(int value) { return value + 1; }
+int *global_pointers[1] = { 0 };
+_Thread_local int *tls_pointers[1] = { 0 };
+int main(void) {
+  int values[2] = { 10, 20 };
+  int *current = &values[0];
+  int **chain[1] = { &current };
+  int *pointers[7];
+  pointers[0] = &values[1];
+  pointers[1] = 0;
+  pointers[2] = values + 2;
+  int *heap = malloc(sizeof(int));
+  *heap = 4;
+  pointers[3] = heap;
+  free(heap);
+  {
+    int local = 5;
+    pointers[4] = &local;
+  }
+  unsigned char invalid[sizeof(int *)] = { 1 };
+  memcpy(&pointers[5], invalid, sizeof pointers[5]);
+  int (*functions[2])(int) = { add_one, 0 };
+  int bound = 2;
+  int *runtime[bound];
+  runtime[0] = &values[0];
+  int *large[11] = { 0 };
+  return 0;
+}`;
+  const prepared = prepareProject(prepare, {
+    entry: 'debug-pointer-array-cells.c',
+    files: [{ name: 'debug-pointer-array-cells.c', source }],
+  });
+  const session = createDebugSession(prepared, undefined, { maxElementsPerArray: 20, maxValueChars: 1 });
+  const returnLine = source.split('\n').findIndex((line) => line.trim() === 'return 0;') + 1;
+  assert.equal(pauseBeforeLine(session, returnLine).kind, 'paused');
+
+  const location = session.currentLocation();
+  const eventsBeforeInspection = session.drainEvents();
+  const inspection = session.inspectArrays();
+  assert.deepEqual(session.inspectArrays(), inspection, 'repeated queries return the same pointer values');
+  assert.deepEqual(session.currentLocation(), location, 'pointer inspection does not advance execution');
+  assert.deepEqual(session.drainEvents(), [], 'pointer inspection does not materialize element objects or events');
+  assert.deepEqual(structuredClone(inspection), inspection, 'the complete DTO remains serializable');
+
+  const byName = (name) => inspection.arrays.find((array) => array.name === name);
+  const values = byName('values');
+  const pointers = byName('pointers');
+  assert.equal(pointers.status, 'available');
+  assert.equal(pointers.rootId,
+    objects(eventsBeforeInspection, 'object-create').find((event) => event.name === 'pointers')?.allocationId,
+    'the pointer array retains its real allocation identity');
+  assert.equal(pointers.elements.length, 7);
+  assert.deepEqual(pointers.elements.map(({ kind, initialized, pointerStatus }) => [kind, initialized, pointerStatus]), [
+    ['pointer', true, 'live'], ['pointer', true, 'null'], ['pointer', true, 'one-past'],
+    ['pointer', true, 'dangling'], ['pointer', true, 'dangling'], ['pointer', true, 'unmapped'],
+    ['pointer', false, 'uninitialized'],
+  ]);
+  assert.deepEqual(pointers.elements.map(({ key, index }) => [key, index]),
+    pointers.elements.map((element, index) => [`${pointers.rootId}:${index}`, index]));
+  assert.equal(pointers.elements[0].address, pointers.address,
+    'the first cell address is the pointer object storage at the array base');
+  assert.equal(pointers.elements[1].address, `0x${(BigInt(pointers.address) + 8n).toString(16)}`,
+    'the next pointer cell advances by one pointer-sized element');
+  assert.equal(pointers.elements[0].displayValue, values.elements[1].address,
+    'the stored pointer value identifies values[1]');
+  assert.equal(pointers.elements[0].valueTruncated, false, 'pointer addresses remain exact when scalar display values are capped');
+  const directChain = byName('chain').elements[0];
+  const currentPointer = session.inspectPointers().find((pointer) => pointer.name === 'current');
+  assert.equal(directChain.displayValue, currentPointer.address,
+    'the array cell stores the address of the pointer object, without following its value');
+  assert.deepEqual(
+    { allocationId: directChain.target.allocationId, byteOffset: directChain.target.byteOffset, name: directChain.target.name, type: directChain.target.type },
+    { allocationId: currentPointer.id, byteOffset: 0, name: 'current', type: 'int *' },
+  );
+  assert.notEqual(directChain.displayValue, currentPointer.displayValue);
+  assert.equal('kind' in values.elements[0], false, 'arithmetic cells keep their existing serialized shape');
+  assert.equal(Object.isFrozen(pointers.elements[0]), true);
+  assert.equal(Object.isFrozen(pointers.elements[0].target), true);
+  assert.deepEqual(
+    { allocationId: pointers.elements[0].target.allocationId, byteOffset: pointers.elements[0].target.byteOffset, type: pointers.elements[0].target.type },
+    { allocationId: values.rootId, byteOffset: 4, type: 'int' },
+  );
+  assert.equal(pointers.elements[1].displayValue, '0x0');
+  assert.equal(pointers.elements[2].target.byteOffset, 8);
+  assert.match(pointers.elements[3].displayValue, /^0x[0-9a-f]+$/,
+    'a freed allocation keeps its exact virtual address');
+  assert.equal(pointers.elements[5].displayValue, '0x1');
+  assert.equal(pointers.elements[5].target, undefined, 'raw bytes do not invent destination identity');
+  assert.equal(pointers.elements[6].displayValue, '?');
+  assert.equal(pointers.elements[6].valueTruncated, false);
+  assert.equal(byName('runtime').status, 'available', 'a small VLA of pointers uses its captured bound');
+  assert.deepEqual(byName('runtime').elements.map(({ initialized, pointerStatus }) => [initialized, pointerStatus]), [
+    [true, 'live'], [false, 'uninitialized'],
+  ]);
+  assert.equal(byName('global_pointers').origin, 'variable');
+  assert.equal(byName('global_pointers').duration, 'static');
+  assert.equal(byName('global_pointers').region, 'static');
+  assert.deepEqual(byName('global_pointers').elements.map(({ pointerStatus }) => pointerStatus), ['null']);
+  assert.equal(byName('tls_pointers').duration, 'thread-local');
+  assert.equal(byName('tls_pointers').region, 'static');
+  assert.deepEqual(byName('tls_pointers').elements.map(({ pointerStatus }) => pointerStatus), ['null']);
+  assert.deepEqual(byName('functions').elements.map(({ kind, pointerStatus, target }) => [kind, pointerStatus, target]), [
+    ['pointer', 'function', undefined], ['pointer', 'null', undefined],
+  ]);
+  assert.equal(byName('large').status, 'too-many-elements', 'pointer arrays stay capped at ten even if the host raises its cell budget');
+  assert.deepEqual(byName('large').elements, []);
+  const pointerSnapshots = session.inspectPointers();
+  const scalarHeapPointer = pointerSnapshots.find((pointer) => pointer.name === 'heap');
+  assert.equal(scalarHeapPointer.status, pointers.elements[3].pointerStatus,
+    'array cells reuse the standalone pointer lifetime classification');
+  assert.equal(scalarHeapPointer.displayValue, pointers.elements[3].displayValue);
+  assert.equal(scalarHeapPointer.target.allocationId, pointers.elements[3].target.allocationId);
+  assert.equal(pointerSnapshots.some((pointer) => pointer.name === 'pointers'), false,
+    'an array root does not create duplicate standalone pointer snapshots');
+
+  const run = runToTerminal(session);
+  assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
+  assert.equal(run.result.mainReturn, 0, 'inspection leaves C execution unchanged');
+});
+
 test('large arrays, matrices and unsupported element types keep bounded descriptors without stopping C', () => {
   const source = `int main(void) {
   int large[11] = { 0 };
@@ -751,8 +874,10 @@ test('large arrays, matrices and unsupported element types keep bounded descript
   assert.deepEqual(byName('text').elements, []);
   assert.equal(byName('matrix').status, 'multidimensional');
   assert.deepEqual(byName('matrix').elements, []);
-  assert.equal(byName('pointers').status, 'unsupported-element-type');
-  assert.deepEqual(byName('pointers').elements, []);
+  assert.equal(byName('pointers').status, 'available');
+  assert.deepEqual(byName('pointers').elements.map(({ kind, pointerStatus, displayValue }) => [kind, pointerStatus, displayValue]), [
+    ['pointer', 'null', '0x0'], ['pointer', 'null', '0x0'],
+  ]);
   assert.equal(byName('cells').status, 'unsupported-element-type');
   assert.deepEqual(byName('cells').elements, []);
   assert.equal(byName('ten').status, 'available');
@@ -1548,6 +1673,7 @@ test('the debug session inspects live automatic scalars without reading uninitia
     stringLiteralContents: true,
     liveHeapAllocations: true,
     oneDimensionalArithmeticArrays: 'bounded-by-debug-session-options',
+    oneDimensionalPointerArrays: 'bounded-by-debug-session-options-and-default-array-cell-maximum; direct-pointer-status-and-target-identity',
     stringLiteralCharacters: 'bounded-by-debug-session-options',
       aggregates: 'bounded-direct-struct-members; unions-opaque',
     pointers: 'basic-identity-aware-binding-snapshots',

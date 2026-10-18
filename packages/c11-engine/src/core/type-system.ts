@@ -1,12 +1,15 @@
 import { failure } from './internal.ts';
 import type {
   AggregateDefinition, CType, EnumCType, EnumDefinition, FunctionCType, Location, PointerCType, ArrayCType,
-  AggregateCType, TypeQualifiers,
+  AggregateCType, TypeQualifiers, Expression,
 } from './internal.ts';
 
 export const pointerTo = (base: CType, qualifiers: { const?: boolean; volatile?: boolean; restrict?: boolean; baseConst?: boolean; baseVolatile?: boolean } = {}): PointerCType =>
   Object.freeze({ kind: 'pointer', base, ...qualifiers });
-export const arrayOf = (element: CType, length: number | null): ArrayCType => Object.freeze({ kind: 'array', element, length });
+export const arrayOf = (element: CType, length: number | null, lengthExpression?: Expression): ArrayCType => Object.freeze({
+  kind: 'array', element, length,
+  ...(lengthExpression === undefined ? {} : { lengthExpression }),
+});
 export const functionOf = (returnType: CType, parameters: readonly CType[], variadic = false, prototype = true): FunctionCType =>
   Object.freeze({ kind: 'function', returnType, parameters: Object.freeze([...parameters]), ...(variadic ? { variadic: true } : {}), prototype });
 export const aggregateRef = (id: number): AggregateCType => Object.freeze({ kind: 'aggregate', id });
@@ -44,7 +47,7 @@ export function qualifyType(type: CType, qualifiers: TypeQualifiers): CType {
   const base = unqualifiedType(type);
   // C applies array qualifiers to its element type.
   if (typeof base !== 'string' && base.kind === 'array') {
-    return arrayOf(qualifyType(base.element, next), base.length);
+    return arrayOf(qualifyType(base.element, next), base.length, base.lengthExpression);
   }
   return Object.freeze({ kind: 'qualified', base, qualifiers: Object.freeze(next) });
 }
@@ -129,7 +132,7 @@ export const isComplete = (type: CType, aggregates: AggregateContext): boolean =
   if (type === 'void' || isFunction(type)) return false;
   if (pointerType(type)) return true;
   const array = arrayType(type);
-  if (array) return array.length !== null && isComplete(array.element, aggregates);
+  if (array) return (array.length !== null || array.lengthExpression !== undefined) && isComplete(array.element, aggregates);
   const aggregate = aggregateType(type);
   if (aggregate) return aggregates.some((definition) => definition.id === aggregate.id && definition.complete);
   const enumeration = enumType(type);
@@ -348,7 +351,10 @@ export function sizeOfType(type: CType, aggregates: AggregateContext = [], at: L
   if (enumeration && !enumeration.definition.complete) failure('INCOMPLETE_TYPE', 'The enum type is still incomplete.', at);
   const array = arrayType(type);
   if (array) {
-    if (array.length === null) failure('INCOMPLETE_TYPE', 'Cannot compute sizeof for an incomplete array.', at);
+    if (array.length === null) {
+      if (array.lengthExpression) failure('UNRESOLVED_VLA_SIZE', 'Cannot compute sizeof for a variable-length array before its bound is evaluated.', at);
+      failure('INCOMPLETE_TYPE', 'Cannot compute sizeof for an incomplete array.', at);
+    }
     const stride = sizeOfType(array.element, aggregates, at);
     const size = stride * array.length;
     if (!Number.isSafeInteger(size)) failure('TYPE_SIZE_RANGE', 'The object size exceeds the representable virtual profile.', at);
@@ -391,6 +397,49 @@ export function decayType(type: CType): CType {
   return type;
 }
 
+/** True when the outermost array has a runtime bound. */
+export function isVariableLengthArray(type: CType): boolean {
+  const array = arrayType(type);
+  return !!array && array.length === null && array.lengthExpression !== undefined;
+}
+
+/** True when a type contains any VLA bound, including through pointers and function types. */
+export function hasVariableLengthBound(type: CType): boolean {
+  type = unqualifiedType(type);
+  if (typeof type === 'string') return false;
+  if (type.kind === 'array') return type.lengthExpression !== undefined || hasVariableLengthBound(type.element);
+  if (type.kind === 'pointer') return hasVariableLengthBound(type.base);
+  if (type.kind === 'function') return hasVariableLengthBound(type.returnType) || type.parameters.some(hasVariableLengthBound);
+  return false;
+}
+
+/** Return each VLA array layer in declarator order, including dimensions under pointers. */
+export function variableLengthArrayTypes(type: CType): readonly ArrayCType[] {
+  const arrays: ArrayCType[] = [];
+  const seen = new Set<object>();
+  const pending = [type];
+  while (pending.length) {
+    const current = unqualifiedType(pending.pop()!);
+    if (typeof current === 'string' || seen.has(current)) continue;
+    seen.add(current);
+    if (current.kind === 'array') {
+      if (current.lengthExpression) arrays.push(current);
+      pending.push(current.element);
+    } else if (current.kind === 'pointer') pending.push(current.base);
+    else if (current.kind === 'function') {
+      for (let index = current.parameters.length - 1; index >= 0; index--) pending.push(current.parameters[index]);
+      pending.push(current.returnType);
+    }
+  }
+  return arrays;
+}
+
+/** True when sizeof this type needs a runtime size; pointers to VLAs still have a fixed size. */
+export function hasVariableLengthObjectSize(type: CType): boolean {
+  const array = arrayType(type);
+  return !!array && (array.lengthExpression !== undefined || hasVariableLengthObjectSize(array.element));
+}
+
 function sameTypeInner(left: CType, right: CType): boolean {
   const leftQualifiers = qualifiersOf(left), rightQualifiers = qualifiersOf(right);
   if (!!leftQualifiers.const !== !!rightQualifiers.const || !!leftQualifiers.volatile !== !!rightQualifiers.volatile || !!leftQualifiers.restrict !== !!rightQualifiers.restrict) return false;
@@ -398,7 +447,12 @@ function sameTypeInner(left: CType, right: CType): boolean {
   if (typeof left === 'string' || typeof right === 'string') return left === right;
   if (left.kind !== right.kind) return false;
   if (left.kind === 'pointer' && right.kind === 'pointer') return sameTypeInner(pointedToType(left)!, pointedToType(right)!);
-  if (left.kind === 'array' && right.kind === 'array') return left.length === right.length && sameTypeInner(left.element, right.element);
+  if (left.kind === 'array' && right.kind === 'array') {
+    const sameLength = left.lengthExpression !== undefined || right.lengthExpression !== undefined
+      ? left.length === null && right.length === null
+      : left.length === right.length;
+    return sameLength && sameTypeInner(left.element, right.element);
+  }
   if (left.kind === 'aggregate' && right.kind === 'aggregate') return left.id === right.id;
   if (left.kind === 'enum' && right.kind === 'enum') return left.id === right.id;
   if (left.kind === 'function' && right.kind === 'function') {
@@ -435,7 +489,8 @@ function compatibleTypeInner(
   if (rightEnum && typeof left === 'string') return left === rightEnum.integerType;
   if (typeof left === 'string' || typeof right === 'string') return left === right;
   const leftArray = arrayType(left), rightArray = arrayType(right);
-  if (leftArray && rightArray) return compatibleTypeInner(leftArray.element, rightArray.element, context, seenAggregates) && (leftArray.length === null || rightArray.length === null || leftArray.length === rightArray.length);
+  if (leftArray && rightArray) return compatibleTypeInner(leftArray.element, rightArray.element, context, seenAggregates) &&
+    (leftArray.lengthExpression !== undefined || rightArray.lengthExpression !== undefined || leftArray.length === null || rightArray.length === null || leftArray.length === rightArray.length);
   if (pointerType(left) && pointerType(right)) {
     return compatibleTypeInner(pointedToType(left)!, pointedToType(right)!, context, seenAggregates);
   }
@@ -511,9 +566,10 @@ export function compositeType(left: CType, right: CType, context?: TypeCompatibi
   }
   const leftArray = arrayType(left), rightArray = arrayType(right);
   if (leftArray && rightArray &&
-      (leftArray.length === null || rightArray.length === null || leftArray.length === rightArray.length)) {
+      (leftArray.lengthExpression !== undefined || rightArray.lengthExpression !== undefined || leftArray.length === null || rightArray.length === null || leftArray.length === rightArray.length)) {
     const element = compositeType(leftArray.element, rightArray.element, context);
-    if (element) return qualifyType(arrayOf(element, leftArray.length ?? rightArray.length), qualifiers);
+    if (element) return qualifyType(arrayOf(element, leftArray.length ?? rightArray.length,
+      leftArray.lengthExpression ?? rightArray.lengthExpression), qualifiers);
   }
   const leftPointer = pointerType(left), rightPointer = pointerType(right);
   if (leftPointer && rightPointer) {
@@ -590,7 +646,7 @@ export function typeName(type: CType, aggregates: AggregateContext = []): string
   const pointer = pointerType(type);
   if (pointer) return `${typeName(pointedToType(pointer)!, aggregates)} *`;
   const array = arrayType(type);
-  if (array) return `${typeName(array.element, aggregates)}[${array.length ?? ''}]`;
+  if (array) return `${typeName(array.element, aggregates)}[${array.lengthExpression ? 'VLA' : array.length ?? ''}]`;
   const fn = functionType(type);
   if (fn) return `${typeName(fn.returnType, aggregates)} (${fn.prototype === false ? '' : fn.parameters.map((item) => typeName(item, aggregates)).join(', ')}${fn.variadic ? `${fn.parameters.length ? ', ' : ''}...` : ''})`;
   const enumeration = enumType(type);

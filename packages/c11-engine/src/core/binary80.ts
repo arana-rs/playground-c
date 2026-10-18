@@ -24,6 +24,7 @@ export interface Binary80Value {
 }
 
 export type Binary80Format = 'binary32' | 'binary64';
+export type BinaryFloatFormat = Binary80Format | 'binary80';
 
 export interface Binary80Rational {
   /** Magnitude numerator; `negative` carries the sign separately. */
@@ -239,6 +240,65 @@ const targetFormats: Readonly<Record<Binary80Format, BinaryTargetFormat>> = Obje
   binary64: Object.freeze({ precision: 53, minimumNormalExponent: -1022, maximumNormalExponent: 1023 }),
 });
 
+const adjacentFormats: Readonly<Record<BinaryFloatFormat, BinaryTargetFormat & { minimumSubnormalExponent: number }>> = Object.freeze({
+  binary32: Object.freeze({ precision: 24, minimumNormalExponent: -126, maximumNormalExponent: 127, minimumSubnormalExponent: -149 }),
+  binary64: Object.freeze({ precision: 53, minimumNormalExponent: -1022, maximumNormalExponent: 1023, minimumSubnormalExponent: -1074 }),
+  binary80: Object.freeze({
+    precision: BINARY80_PROFILE.precision,
+    minimumNormalExponent: BINARY80_PROFILE.minimumNormalExponent,
+    maximumNormalExponent: BINARY80_PROFILE.maximumNormalExponent,
+    minimumSubnormalExponent: BINARY80_PROFILE.minimumSubnormalExponent,
+  }),
+});
+
+/** Round an exact binary80 value to one of the profile's real floating formats. */
+export function binary80RoundToFormat(input: Binary80Value, format: BinaryFloatFormat): Binary80Value {
+  const checked = assertBinary80(input);
+  if (format === 'binary80') return checked;
+  return binary80FromNumber(binary80ToNumber(checked, format));
+}
+
+/** Return the adjacent value in `format` toward `direction` without narrowing direction first. */
+export function binary80NextAfter(
+  input: Binary80Value,
+  direction: Binary80Value,
+  format: BinaryFloatFormat,
+): Binary80Value {
+  const from = binary80RoundToFormat(input, format);
+  const toward = assertBinary80(direction);
+  if (from.classification === 'nan' || toward.classification === 'nan') return binary80NaN();
+  const order = binary80Compare(from, toward);
+  if (order === undefined) return binary80NaN();
+  if (order === 0) return binary80RoundToFormat(toward, format);
+  if (from.classification === 'infinity') {
+    if (from.negative) return binary80FromRational((1n << BigInt(adjacentFormats[format].precision)) - 1n, 1n, {
+      binaryExponent: adjacentFormats[format].maximumNormalExponent - adjacentFormats[format].precision + 1,
+      negative: true,
+    });
+    return binary80FromRational((1n << BigInt(adjacentFormats[format].precision)) - 1n, 1n, {
+      binaryExponent: adjacentFormats[format].maximumNormalExponent - adjacentFormats[format].precision + 1,
+    });
+  }
+  if (from.significand === 0n) {
+    return binary80FromRational(1n, 1n, {
+      binaryExponent: adjacentFormats[format].minimumSubnormalExponent,
+      negative: order > 0,
+    });
+  }
+
+  const target = adjacentFormats[format];
+  const exponent = Math.max(from.exponent + bitLength(from.significand) - 1, target.minimumNormalExponent) - (target.precision - 1);
+  const commonExponent = Math.min(from.exponent, exponent);
+  const magnitude = from.significand << BigInt(from.exponent - commonExponent);
+  const step = 1n << BigInt(exponent - commonExponent);
+  const movingAwayFromZero = (order < 0) !== from.negative;
+  const nextMagnitude = movingAwayFromZero ? magnitude + step : magnitude - step;
+  return binary80FromRational(nextMagnitude, 1n, {
+    binaryExponent: commonExponent,
+    negative: from.negative,
+  });
+}
+
 function roundToTarget(
   numerator: bigint,
   denominator: bigint,
@@ -380,6 +440,85 @@ export function binary80Divide(leftInput: Binary80Value, rightInput: Binary80Val
     binaryExponent: left.exponent - right.exponent,
     negative,
   });
+}
+
+/** Multiply and add exact binary80 operands, rounding only the final result. */
+export function binary80FusedMultiplyAdd(
+  leftInput: Binary80Value,
+  rightInput: Binary80Value,
+  addendInput: Binary80Value,
+): Binary80Value {
+  const left = assertBinary80(leftInput), right = assertBinary80(rightInput), addend = assertBinary80(addendInput);
+  if (left.classification === 'nan' || right.classification === 'nan' || addend.classification === 'nan') return binary80NaN();
+
+  const productNegative = left.negative !== right.negative;
+  const leftZero = left.classification === 'finite' && left.significand === 0n;
+  const rightZero = right.classification === 'finite' && right.significand === 0n;
+  if ((left.classification === 'infinity' && rightZero) || (right.classification === 'infinity' && leftZero)) return binary80NaN();
+
+  if (left.classification === 'infinity' || right.classification === 'infinity') {
+    if (addend.classification === 'infinity' && addend.negative !== productNegative) return binary80NaN();
+    return binary80Infinity(productNegative);
+  }
+  if (addend.classification === 'infinity') return addend;
+
+  const product = left.significand * right.significand;
+  if (product === 0n && addend.significand === 0n) {
+    return binary80Zero(productNegative === addend.negative ? productNegative : false);
+  }
+
+  const productExponent = left.exponent + right.exponent;
+  const commonExponent = Math.min(productExponent, addend.exponent);
+  const productInteger = product << BigInt(productExponent - commonExponent);
+  const addendInteger = addend.significand << BigInt(addend.exponent - commonExponent);
+  const sum = (productNegative ? -productInteger : productInteger) + (addend.negative ? -addendInteger : addendInteger);
+  if (sum === 0n) return binary80Zero();
+  return binary80FromRational(sum < 0n ? -sum : sum, 1n, {
+    binaryExponent: commonExponent,
+    negative: sum < 0n,
+  });
+}
+
+/** Multiply and add exact binary80 operands, rounding only once to binary32 or binary64. */
+export function binary80FusedMultiplyAddToNumber(
+  leftInput: Binary80Value,
+  rightInput: Binary80Value,
+  addendInput: Binary80Value,
+  format: Binary80Format,
+): number {
+  const left = assertBinary80(leftInput), right = assertBinary80(rightInput), addend = assertBinary80(addendInput);
+  const target = targetFormats[format];
+  if (!target) throw new RangeError(`Unrecognized floating-point format: ${String(format)}.`);
+  if (left.classification === 'nan' || right.classification === 'nan' || addend.classification === 'nan') return NaN;
+
+  const productNegative = left.negative !== right.negative;
+  const leftZero = left.classification === 'finite' && left.significand === 0n;
+  const rightZero = right.classification === 'finite' && right.significand === 0n;
+  if ((left.classification === 'infinity' && rightZero) || (right.classification === 'infinity' && leftZero)) return NaN;
+  if (left.classification === 'infinity' || right.classification === 'infinity') {
+    if (addend.classification === 'infinity' && addend.negative !== productNegative) return NaN;
+    return productNegative ? -Infinity : Infinity;
+  }
+  if (addend.classification === 'infinity') return addend.negative ? -Infinity : Infinity;
+
+  const product = left.significand * right.significand;
+  if (product === 0n && addend.significand === 0n) {
+    const negative = productNegative === addend.negative ? productNegative : false;
+    return negative ? -0 : 0;
+  }
+
+  const productExponent = left.exponent + right.exponent;
+  const commonExponent = Math.min(productExponent, addend.exponent);
+  const productInteger = product << BigInt(productExponent - commonExponent);
+  const addendInteger = addend.significand << BigInt(addend.exponent - commonExponent);
+  const sum = (productNegative ? -productInteger : productInteger) + (addend.negative ? -addendInteger : addendInteger);
+  if (sum === 0n) return 0;
+
+  const rounded = roundToTarget(sum < 0n ? -sum : sum, 1n, commonExponent, sum < 0n, target);
+  if (rounded.classification === 'infinity') return rounded.negative ? -Infinity : Infinity;
+  if (rounded.significand === 0n) return rounded.negative ? -0 : 0;
+  const magnitude = Number(rounded.significand) * 2 ** rounded.exponent;
+  return rounded.negative ? -magnitude : magnitude;
 }
 
 export function binary80Truthy(input: Binary80Value): boolean {

@@ -2,7 +2,7 @@ import { createDebugSession, createExecutionSession, DEFAULT_DEBUG_AGGREGATE_INS
 import type {
   DebugAggregateInspection, DebugAggregateMemberSnapshot, DebugAggregateSnapshot,
   DebugArrayElementSnapshot, DebugArrayInspection, DebugArraySnapshot, DebugExecutionSession,
-  DebugFlexibleArraySnapshot, DebugHeapObjectSnapshot, DebugObjectDuration, DebugPointerSnapshot, DebugProgress, DebugScalarSnapshot, DebugSessionOptions, DebugStaticObjectSnapshot,
+  DebugFlexibleArraySnapshot, DebugHeapObjectSnapshot, DebugObjectDuration, DebugPointerSnapshot, DebugPointerStatus, DebugPointerTargetSnapshot, DebugProgress, DebugScalarSnapshot, DebugSessionOptions, DebugStaticObjectSnapshot,
   DebugStaticObjectInspectionOptions, ExecuteProgress, ExecutionSession, PrepareResult, SourceProject,
 } from '@playground/c11-engine/core';
 // @ts-expect-error QualifiedCType is an internal compiler representation, not a public DTO.
@@ -67,6 +67,12 @@ void tlsDuration;
 void (null as unknown as QualifiedTypeMustStayInternal);
   const firstArray: DebugArraySnapshot | undefined = arrays.arrays[0];
   const firstElement: DebugArrayElementSnapshot | undefined = firstArray?.elements[0];
+  if (firstElement?.kind === 'pointer') {
+    const pointerStatus: DebugPointerStatus = firstElement.pointerStatus;
+    const pointerTarget: DebugPointerTargetSnapshot | undefined = firstElement.target;
+    void pointerStatus;
+    void pointerTarget;
+  }
   const heapObjects: readonly DebugHeapObjectSnapshot[] = debug.inspectHeapObjects();
   const firstId: number | undefined = scalars[0]?.id;
   void firstId;

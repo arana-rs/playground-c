@@ -5,14 +5,17 @@ import { scanC, type SyntaxKind } from '../syntax.ts';
 
 /** Convert one preprocessing token into the parser's smaller token vocabulary. */
 export function lexPreprocessingToken(kind: SyntaxKind, text: string, at: Location): Token {
-if (/^(?:u8|[LuU])['"]/.test(text)) failure('UNSUPPORTED_FEATURE', 'This profile does not implement wide literals.', at);
+  const literalPrefix = /^(u8|[LuU])(['"])/.exec(text);
+  if (literalPrefix && !(literalPrefix[1] === 'u8' && literalPrefix[2] === '"')) {
+    failure('UNSUPPORTED_FEATURE', 'This profile does not implement wide literals.', at);
+  }
   if (kind === 'identifier' || kind === 'symbol') return { kind, text, ...at };
   if (kind === 'number') {
     const hexadecimal = /^0[xX]/.test(text);
     return { kind: text.includes('.') || (hexadecimal ? /[pP]/ : /[eE]/).test(text) ? 'floating' : 'integer', text, ...at };
   }
   if (kind === 'string') {
-    if (!text.startsWith('"') || !text.endsWith('"')) failure('UNTERMINATED_STRING', 'Unterminated string literal.', at);
+    if ((!text.startsWith('"') && !text.startsWith('u8"')) || !text.endsWith('"')) failure('UNTERMINATED_STRING', 'Unterminated string literal.', at);
     return { kind: 'string', text, ...at };
   }
   if (kind === 'character') {

@@ -30,14 +30,35 @@ export function sameArrayElement(left: DebugArrayElementSnapshot, right: DebugAr
     && left.index === right.index
     && left.address === right.address
     && left.type === right.type
+    && left.kind === right.kind
     && left.initialized === right.initialized
     && left.displayValue === right.displayValue
-    && left.valueTruncated === right.valueTruncated;
+    && left.valueTruncated === right.valueTruncated
+    && left.pointerStatus === right.pointerStatus
+    && sameArrayElementPointerTarget(left.target, right.target);
+}
+
+function sameArrayElementPointerTarget(
+  left: DebugArrayElementSnapshot['target'],
+  right: DebugArrayElementSnapshot['target'],
+): boolean {
+  return left === right || (left !== undefined && right !== undefined
+    && left.allocationId === right.allocationId
+    && left.byteOffset === right.byteOffset
+    && left.type === right.type
+    && left.name === right.name);
 }
 
 /** Detach and freeze the bounded children before retaining a Worker snapshot in history. */
+function cloneMemoryViewerArrayElementSnapshot(
+  element: DebugArrayElementSnapshot,
+): DebugArrayElementSnapshot {
+  if (element.kind !== 'pointer' || !element.target) return Object.freeze({ ...element });
+  return Object.freeze({ ...element, target: Object.freeze({ ...element.target }) });
+}
+
 export function cloneMemoryViewerArraySnapshot(snapshot: DebugArraySnapshot): DebugArraySnapshot {
-  const elements = Object.freeze(snapshot.elements.map(element => Object.freeze({ ...element })));
+  const elements = Object.freeze(snapshot.elements.map(cloneMemoryViewerArrayElementSnapshot));
   return Object.freeze({ ...snapshot, elements });
 }
 
@@ -54,7 +75,10 @@ export function findMemoryViewerChangedArrayElementKeys(
   return current.flatMap(array => array.elements.flatMap(element => {
     const earlier = previousByKey.get(element.key);
     return earlier && (earlier.initialized !== element.initialized
-      || earlier.displayValue !== element.displayValue)
+      || earlier.displayValue !== element.displayValue
+      || earlier.kind !== element.kind
+      || earlier.pointerStatus !== element.pointerStatus
+      || !sameArrayElementPointerTarget(earlier.target, element.target))
       ? [element.key]
       : [];
   }));

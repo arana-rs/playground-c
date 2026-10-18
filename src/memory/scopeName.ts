@@ -4,6 +4,11 @@ export const MEMORY_VIEWER_SCOPE_NAME_MAX_CHARACTERS = 20;
 const SCOPE_NAME_PREFIX_CHARACTERS = 15;
 const SCOPE_NAME_SUFFIX_CHARACTERS = 2;
 
+/** The engine uses this name for a compound statement that is the body of a for loop. */
+export function isForBodyMemoryViewerScope(scopeName: string): boolean {
+  return scopeName === 'for block';
+}
+
 /** Keep scope labels readable in the compact vertical stack while preserving both ends. */
 export function truncateMemoryViewerScopeName(scopeName: string): string {
   return truncateMiddle(

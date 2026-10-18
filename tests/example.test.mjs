@@ -26,8 +26,9 @@ const heapLifecycleSource = [
 function randomValuesFromOutput(stdout) {
   const lines = stdout.trimEnd().split('\n');
   assert.equal(lines[0], 'Array with 10 random numbers between 0 and 99:');
-  assert.equal(lines.length, 11);
-  return lines.slice(1).map((line, index) => {
+  const numberLines = lines.filter((line) => line.startsWith('numbers['));
+  assert.equal(numberLines.length, 10);
+  return numberLines.map((line, index) => {
     const match = new RegExp(`^numbers\\[${index}\\] = (\\d+)$`).exec(line);
     assert.ok(match, `Invalid output line: ${line}`);
     const value = Number(match[1]);

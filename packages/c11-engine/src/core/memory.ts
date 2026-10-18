@@ -38,7 +38,7 @@ interface AddressReservation {
 interface RuntimeObject {
   readonly id: number;
   readonly allocationId: number;
-  readonly type: CType;
+  type: CType;
   readonly byteOffset: number;
   readonly size: number;
   readonly duration: StorageDuration;
@@ -116,6 +116,15 @@ interface RuntimeObjectViewDescription {
   readonly duration: StorageDuration;
   readonly addressVirtual: bigint;
   readonly size: number;
+  /** Bit-fields touch only their declared bits within a shared storage unit. */
+  readonly bitMask?: bigint;
+}
+
+interface PointerInspectionResult {
+  readonly initialized: boolean;
+  readonly status: DebugPointerStatus;
+  readonly address?: bigint;
+  readonly target?: { readonly allocationId: number; readonly byteOffset: number };
 }
 
 /**
@@ -153,6 +162,16 @@ export class VirtualMemory {
 
   get allocatedBytes(): number { return this.liveBytes; }
 
+  /** Attach a resolved variably modified pointer type to its fixed-size pointer object. */
+  retypePointer(ref: ObjectReference, type: CType, at: Location): ObjectReference {
+    const node = this.nodeFor(ref, at);
+    if (!isPointer(node.type) || !isPointer(type) || sizeOfType(type, this.aggregates, at) !== node.size) {
+      failure('TYPE_ERROR', 'A variably modified pointer must retain its pointer object size.', at);
+    }
+    node.type = type;
+    return this.reference(node);
+  }
+
   describeObject(ref: ObjectReference, at: Location): RuntimeObjectDescription {
     const node = this.nodeFor(ref, at);
     const root = this.roots.get(node.allocationId);
@@ -181,18 +200,35 @@ export class VirtualMemory {
         size = Math.max(size, root.byteOffset + root.size - node.byteOffset);
       }
     }
+    const bitField = this.bitFieldFor(node, at)?.member.bitField;
+    const bitMask = bitField
+      ? ((1n << BigInt(bitField.width)) - 1n) << BigInt(bitField.bitOffset)
+      : undefined;
     return {
       objectId: node.id,
       allocationId: node.allocationId,
       duration: root.duration,
       addressVirtual: root.virtualBase + BigInt(node.byteOffset - root.byteOffset),
       size,
+      ...(bitMask === undefined ? {} : { bitMask }),
     };
   }
 
   rootReference(allocationId: number): ObjectReference | undefined {
     const root = this.roots.get(allocationId);
     return root?.alive ? this.reference(root) : undefined;
+  }
+
+  /** Return integer scalar views intersecting a byte range without reading them. */
+  integerObjectViewsInRange(allocationId: number, byteOffset: number, byteCount: number): readonly ObjectReference[] {
+    const root = this.roots.get(allocationId);
+    if (!root?.alive || !Number.isSafeInteger(byteOffset) || !Number.isSafeInteger(byteCount) || byteCount < 0) return [];
+    const end = byteOffset + byteCount;
+    if (!Number.isSafeInteger(end)) return [];
+    return Object.freeze([...this.records.values()]
+      .filter((node) => node.alive && node.allocationId === allocationId && isInteger(node.type) &&
+        node.byteOffset < end && byteOffset < node.byteOffset + node.size)
+      .map((node) => this.reference(node)));
   }
 
   heapAggregateReferences(): readonly ObjectReference[] {
@@ -763,67 +799,44 @@ export class VirtualMemory {
   }
 
   /** Inspect pointer bytes and provenance without invoking a C pointer read or validating its target. */
-  inspectPointer(ref: ObjectReference, at: Location): {
-    readonly initialized: boolean;
-    readonly status: DebugPointerStatus;
-    readonly address?: bigint;
-    readonly target?: { readonly allocationId: number; readonly byteOffset: number };
-  } {
+  inspectPointer(ref: ObjectReference, at: Location): PointerInspectionResult {
     const node = this.nodeFor(ref, at);
     if (!isPointer(node.type)) failure('TYPE_ERROR', 'Pointer inspection requires a pointer object.', at);
     const root = this.rootFor(node, at);
-    const zeroInitialized = this.hasZeroInitializedAncestor(node);
-    let fullyRepresented = true;
-    for (let index = 0; index < node.size; index++) {
-      if (!root.representation.has(node.byteOffset + index)) {
-        fullyRepresented = false;
-        break;
-      }
-    }
-    const initialized = node.initialized || zeroInitialized || fullyRepresented;
-    if (!initialized) return { initialized: false, status: 'uninitialized' };
+    return this.inspectPointerRepresentation(
+      root,
+      node.type,
+      node.byteOffset,
+      node.size,
+      node.initialized,
+      this.hasZeroInitializedAncestor(node),
+      node.value,
+      at,
+    );
+  }
 
-    const value = root.pointerValues.get(node.byteOffset) ?? node.value;
-    if (value === null) return { initialized: true, status: 'null', address: 0n };
-    if (typeof value === 'object' && value !== null && value.kind === 'object-pointer') {
-      if (!Number.isSafeInteger(value.byteOffset)) {
-        return { initialized: true, status: 'unmapped' };
-      }
-      const target = { allocationId: value.allocationId, byteOffset: value.byteOffset };
-      const targetRoot = this.roots.get(value.allocationId);
-      const base = targetRoot?.virtualBase ?? this.pointerAllocationAddresses.get(value.allocationId);
-      if (base === undefined) return { initialized: true, status: 'unmapped', target };
-      const address = base + BigInt(value.byteOffset);
-      if (!targetRoot) return { initialized: true, status: 'dangling', address, target };
-      if (value.byteOffset === value.boundsEnd) return { initialized: true, status: 'one-past', address, target };
-      if (value.byteOffset < value.boundsStart || value.byteOffset > value.boundsEnd) {
-        return { initialized: true, status: 'unmapped', address, target };
-      }
-      return { initialized: true, status: 'live', address, target };
-    }
-    if (typeof value === 'object' && value !== null && value.kind === 'function-pointer') {
-      const address = value.functionIndex === null
-        ? 0n
-        : (1n << 63n) | BigInt(value.functionIndex + 1);
-      return address === 0n
-        ? { initialized: true, status: 'null', address }
-        : { initialized: true, status: 'function', address };
-    }
-
-    let address = 0n;
-    for (let index = 0; index < node.size; index++) {
-      const byte = root.representation.get(node.byteOffset + index) ?? (zeroInitialized ? 0 : undefined);
-      if (byte === undefined) return { initialized: true, status: 'unmapped' };
-      address |= BigInt(byte) << BigInt(index * 8);
-    }
-    if (address === 0n) return { initialized: true, status: 'null', address };
-    if (isFunction(pointedToType(node.type) ?? 'void') &&
-        (this.functionRepresentations.has(address) || (address & (1n << 63n)) !== 0n)) {
-      return { initialized: true, status: 'function', address };
-    }
-    // Raw bytes alone never establish object identity, even if their address now falls
-    // inside a newer allocation that reused a retired object's address.
-    return { initialized: true, status: 'unmapped', address };
+  /** Inspect a pointer array cell without creating a child object or performing a C read. */
+  inspectArrayPointerElement(ref: ObjectReference, index: number, at: Location): PointerInspectionResult | undefined {
+    const parent = this.nodeFor(ref, at);
+    const array = arrayType(parent.type);
+    if (!array || array.length === null || !isPointer(array.element) ||
+        !Number.isSafeInteger(index) || index < 0 || index >= array.length) return undefined;
+    const size = sizeOfType(array.element, this.aggregates, at);
+    const byteOffset = parent.byteOffset + index * size;
+    const child = parent.children.get(index);
+    const zeroInitialized = child
+      ? this.hasZeroInitializedAncestor(child)
+      : this.hasZeroInitializedAncestor(parent);
+    return this.inspectPointerRepresentation(
+      this.rootFor(parent, at),
+      array.element,
+      byteOffset,
+      size,
+      child?.initialized ?? false,
+      zeroInitialized,
+      child?.value,
+      at,
+    );
   }
 
   /** Inspect an arithmetic array cell without creating its subobject node or performing a C read. */
@@ -882,27 +895,45 @@ export class VirtualMemory {
   }
 
   /** Inspect a direct pointer struct member without creating its lazy child node. */
-  inspectAggregatePointer(ref: ObjectReference, memberIndex: number, at: Location): {
-    readonly initialized: boolean;
-    readonly status: DebugPointerStatus;
-    readonly address?: bigint;
-    readonly target?: { readonly allocationId: number; readonly byteOffset: number };
-  } {
+  inspectAggregatePointer(ref: ObjectReference, memberIndex: number, at: Location): PointerInspectionResult {
     const member = this.directStructMember(ref, memberIndex, at);
     if (!isPointer(member.type)) failure('TYPE_ERROR', 'Inspection requires a pointer struct member.', at);
     const child = member.parent.children.get(memberIndex);
     const size = sizeOfType(member.type, this.aggregates, at);
+    return this.inspectPointerRepresentation(
+      member.root,
+      member.type,
+      member.byteOffset,
+      size,
+      child?.initialized ?? false,
+      member.zeroInitialized,
+      child?.value,
+      at,
+    );
+  }
+
+  private inspectPointerRepresentation(
+    root: AllocationRoot,
+    type: CType,
+    byteOffset: number,
+    size: number,
+    nodeInitialized: boolean,
+    zeroInitialized: boolean,
+    nodeValue: ObjectScalarValue | undefined,
+    at: Location,
+  ): PointerInspectionResult {
+    if (!isPointer(type)) failure('TYPE_ERROR', 'Pointer inspection requires a pointer object.', at);
     let fullyRepresented = true;
-    for (let index = 0; index < size; index++) {
-      if (!member.root.representation.has(member.byteOffset + index)) {
+    for (let index = 0; index < size; index += 1) {
+      if (!root.representation.has(byteOffset + index)) {
         fullyRepresented = false;
         break;
       }
     }
-    const initialized = !!child?.initialized || member.zeroInitialized || fullyRepresented;
+    const initialized = nodeInitialized || zeroInitialized || fullyRepresented;
     if (!initialized) return { initialized: false, status: 'uninitialized' };
 
-    const value = member.root.pointerValues.get(member.byteOffset) ?? child?.value;
+    const value = root.pointerValues.get(byteOffset) ?? nodeValue;
     if (value === null) return { initialized: true, status: 'null', address: 0n };
     if (typeof value === 'object' && value !== null && value.kind === 'object-pointer') {
       if (!Number.isSafeInteger(value.byteOffset)) return { initialized: true, status: 'unmapped' };
@@ -928,16 +959,18 @@ export class VirtualMemory {
     }
 
     let address = 0n;
-    for (let index = 0; index < size; index++) {
-      const byte = member.root.representation.get(member.byteOffset + index) ?? (member.zeroInitialized ? 0 : undefined);
+    for (let index = 0; index < size; index += 1) {
+      const byte = root.representation.get(byteOffset + index) ?? (zeroInitialized ? 0 : undefined);
       if (byte === undefined) return { initialized: true, status: 'unmapped' };
       address |= BigInt(byte) << BigInt(index * 8);
     }
     if (address === 0n) return { initialized: true, status: 'null', address };
-    if (isFunction(pointedToType(member.type) ?? 'void') &&
+    if (isFunction(pointedToType(type) ?? 'void') &&
         (this.functionRepresentations.has(address) || (address & (1n << 63n)) !== 0n)) {
       return { initialized: true, status: 'function', address };
     }
+    // Raw bytes alone never establish object identity, even if their address now falls
+    // inside a newer allocation that reused a retired object's address.
     return { initialized: true, status: 'unmapped', address };
   }
 

@@ -40,8 +40,8 @@ function pauseBeforeLine(session, targetLine, maxSteps = 2_000) {
   assert.fail(`The session did not reach line ${targetLine}.`);
 }
 
-test('CAPABILITIES publishes the actual P5 subset without claiming full C11 or the full library', () => {
-  assert.equal(CAPABILITIES.phase, 'P5');
+test('CAPABILITIES publishes the P6 profile without claiming full C11 or the full library', () => {
+  assert.equal(CAPABILITIES.phase, 'P6');
   assert.equal(CAPABILITIES.completeC11, false);
   assert.equal(CAPABILITIES.library, 'partial');
   assert.ok(CAPABILITIES.virtualHeaders.includes('stdalign.h'));
@@ -64,7 +64,8 @@ test('CAPABILITIES publishes the actual P5 subset without claiming full C11 or t
   assert.ok(CAPABILITIES.stddefMacros.includes('offsetof'));
   assert.ok(CAPABILITIES.stddefTypes.includes('max_align_t'));
   assert.deepEqual(CAPABILITIES.stdalignMacros, ['alignas', 'alignof', '__alignas_is_defined', '__alignof_is_defined']);
-  assert.equal(CAPABILITIES.mathFunctions?.includes('fma') ?? false, false);
+  assert.ok(['fma', 'fmaf', 'fmal'].every((name) => CAPABILITIES.mathFunctions?.includes(name) ?? false));
+  assert.match(CAPABILITIES.variableLengthArrays, /dynamic-sizeof/);
   assert.ok(Object.isFrozen(CAPABILITIES));
 });
 
@@ -149,9 +150,8 @@ test('diagnoses bitfield, FAM, qualifier, generic, alignment and typedef constra
   }
 });
 
-test('preserves the P6 rejections for VLA, atomics, complex and the threads library', async (t) => {
+test('preserves the P6 rejections for atomics, complex and the threads library', async (t) => {
   const cases = [
-    'int main(void) { int count = 2; int values[count]; return sizeof values; }',
     '#include <stdatomic.h>\nint main(void) { atomic_int value = 0; return atomic_load(&value); }',
     '#include <complex.h>\nint main(void) { double complex value = 1.0 + 2.0 * I; return creal(value) == 1.0; }',
     '#include <threads.h>\nint main(void) { return 0; }',
@@ -159,6 +159,37 @@ test('preserves the P6 rejections for VLA, atomics, complex and the threads libr
   for (const [index, source] of cases.entries()) {
     await t.test(`P6 ${index + 1}`, () => rejects(source));
   }
+});
+
+test('initializes const character arrays from strings with explicit and inferred bounds', () => {
+  run(`
+    const char file_explicit[3] = "abc";
+    const char file_inferred[] = "ab";
+    const char file_braced_inferred[] = { "abc" };
+    char file_plain_braced_inferred[] = { "xy" };
+    const char file_utf8_braced_inferred[] = { "\\u00E9" };
+
+    int main(void) {
+      const char block_explicit[3] = "abc";
+      const char block_braced[3] = { "abc" };
+      const char block_inferred[] = "abc";
+      const char block_braced_inferred[] = { "abc" };
+      char block_plain_braced_inferred[] = { "xy" };
+      return sizeof file_explicit == 3 && sizeof file_inferred == 3 &&
+        sizeof file_braced_inferred == 4 && sizeof file_plain_braced_inferred == 3 &&
+        sizeof file_utf8_braced_inferred == 3 &&
+        sizeof block_explicit == 3 && sizeof block_inferred == 4 &&
+        sizeof block_braced_inferred == 4 && sizeof block_plain_braced_inferred == 3 &&
+        file_explicit[0] == 'a' && file_explicit[2] == 'c' &&
+        file_inferred[2] == '\\0' && file_braced_inferred[3] == '\\0' &&
+        file_plain_braced_inferred[2] == '\\0' && block_explicit[2] == 'c' &&
+        (unsigned char)file_utf8_braced_inferred[0] == 0xc3 &&
+        (unsigned char)file_utf8_braced_inferred[1] == 0xa9 && file_utf8_braced_inferred[2] == '\\0' &&
+        block_braced[2] == 'c' && block_inferred[3] == '\\0' &&
+        block_braced_inferred[3] == '\\0' && block_plain_braced_inferred[2] == '\\0';
+    }
+  `, 1);
+  rejects('int main(void) { const char text[] = "abc"; text[0] = \'x\'; return 0; }');
 });
 
 test('a cast removes the pointer qualifier while respecting whether the original object is const', () => {

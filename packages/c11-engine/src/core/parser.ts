@@ -4,19 +4,21 @@ import {
   INT_MAX, INT_MIN,
 } from './internal.ts';
 import type {
-  AggregateDefinition, AggregateMember, Binding, CType, CValue, EnumDefinition, Expression, FunctionIR, GlobalObject,
+  AggregateDefinition, AggregateMember, ArrayCType, Binding, CType, CValue, EnumDefinition, Expression, FunctionIR, GlobalObject,
   GenericAssociation, Initializer, InitializerDesignator, Location, Parameter, ParsedProgram, ScalarCType, Statement, Token, TypeQualifiers, StaticAssertion,
 } from './internal.ts';
-import { BUILTINS, binary, commonType, convert, parseLiteral, promote, truth, unary } from './numeric.ts';
+import { BUILTINS, binary, commonType, convert, encodeUtf8Bytes, parseLiteral, promote, truth, unary } from './numeric.ts';
 import {
   aggregateRef, aggregateType, arrayOf, arrayType, canConvertPointerType, compatibleType, containsFlexibleAggregate, decayType, enumRef, functionOf,
   functionType, isAggregate, isArray, isArithmetic, isComplete, isFunction, isInteger, isModifiableObject, isObject, isPointer,
   isScalar, layoutAggregate, pointerTo, pointerType, pointedToType, qualifyType, qualifiersOf, sameType, sizeOfType, typeName,
+  hasVariableLengthBound, hasVariableLengthObjectSize, variableLengthArrayTypes,
   conditionalPointerCompositeType,
   unqualifiedType, alignOfType,
 } from './type-system.ts';
 import { C_KEYWORDS } from '../syntax.ts';
 import { LIBRARY_FUNCTIONS } from './headers.ts';
+import { MATH_CLASSIFICATION_BUILTINS, MATH_CLASSIFICATION_FUNCTIONS, MATH_COMPARISON_BUILTINS } from './math-metadata.ts';
 
 const reserved = new Set(C_KEYWORDS);
 const scalarWords = new Set(['char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double', 'void', '_Bool']);
@@ -29,13 +31,14 @@ const operators: Record<string, number> = {
   '<<': 11, '>>': 11, '+': 12, '-': 12, '*': 13, '/': 13, '%': 13,
 };
 const assignments = new Set(['=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=']);
-const floatingClassifications = new Set(['isnan', 'isinf', 'isfinite', 'isnormal', 'signbit', 'fpclassify']);
+const floatingClassifications = new Set<string>([...MATH_CLASSIFICATION_FUNCTIONS, ...MATH_CLASSIFICATION_BUILTINS]);
+const floatingComparisons = new Set<string>(MATH_COMPARISON_BUILTINS);
 const vaIntrinsics = new Set(['__builtin_va_start', '__builtin_va_copy', '__builtin_va_end']);
 type Block = Extract<Statement, { kind: 'block' }>;
 type Declarator = {
   name: string; location: Location; apply: (base: CType) => CType; parameters?: Parameter[];
   prototype?: boolean; variadic?: boolean; oldStyle?: boolean; pointerQualifiers?: TypeQualifiers[];
-  parameterArrayQualifiers?: TypeQualifiers; minimumArrayBound?: number; parameterScope?: ParserScopeFrame;
+  parameterArrayQualifiers?: TypeQualifiers; minimumArrayBound?: number; prototypeVariableLengthBound?: boolean; parameterScope?: ParserScopeFrame;
 };
 type TagScope = Map<string, AggregateDefinition>;
 type Scope = { names: Map<string, Binding>; owner?: Block | Extract<Statement, { kind: 'for' }> };
@@ -143,7 +146,9 @@ function isIntegerConstantExpression(
         if (!isInteger(node.value.type)) return false;
         break;
       case 'sizeof':
-        // The operand of sizeof is not evaluated and does not constrain an ICE.
+        // A VLA's runtime size is not an integer constant expression.
+        if (!node.valueType && !node.operand?.type) return false;
+        if (hasVariableLengthObjectSize(node.valueType ?? node.operand!.type!)) return false;
         break;
       case 'generic': {
         const selected = resolveGeneric?.(node) ?? node.selected;
@@ -389,6 +394,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         const declarator = parseDeclarator(true);
         const memberType = declaredType(declarator, memberBase, memberQualifiers);
         if (isFunction(memberType)) failure('TYPE_ERROR', 'An aggregate member cannot be a function.', declarator.location);
+        if (hasVariableLengthBound(memberType)) failure('TYPE_ERROR', 'An aggregate member cannot have a variably modified type.', declarator.location);
         let bitWidth: number | undefined;
         let unnamedBitField = false;
         if (peek().text === ':') {
@@ -416,7 +422,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           ...(alignmentSpecifiers.length ? { requestedAlignment: requestedAlignment ?? 0 } : {}),
           ...(bitWidth !== undefined ? { bitField: { width: bitWidth, storageUnitOffset: 0, storageUnitSize: 0, bitOffset: 0, signed: false } } : {}),
           ...(unnamedBitField ? { unnamedBitField: true } : {}),
-          ...(arrayType(memberType)?.length === null ? { flexibleArray: true } : {}),
+          ...(arrayType(memberType)?.length === null && !arrayType(memberType)?.lengthExpression ? { flexibleArray: true } : {}),
         };
         members.push(field);
         if (peek().text !== ',') break;
@@ -606,12 +612,23 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     return unsigned ? 'unsigned int' : 'int';
   }
 
-  const parseArrayBound = (): number => {
-    if (peek().text === ']') failure('INCOMPLETE_TYPE', 'P3 requires a length for local arrays; it is inferred only from an initializer.', peek());
-    const length = parseIntegerConstant('The array length');
-    if (length <= 0n || length > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'Array length must be positive and representable.', peek());
+  const parseArrayBound = (): { length: number | null; expression?: Expression } => {
+    if (peek().text === ']') {
+      consume();
+      return { length: null };
+    }
+    const at = peek();
+    const expression = parseExpression(1, new Set([']']));
     consume();
-    return Number(length);
+    if (isIntegerConstantExpression(expression, aggregates, resolveGenericSelection)) {
+      const value = constantExpression(expression, aggregates, resolveGenericSelection);
+      if (!isInteger(value.type) || typeof value.value !== 'bigint') failure('TYPE_ERROR', 'The array length must have integer type.', at);
+      if (value.value <= 0n || value.value > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'Array length must be positive and representable.', at);
+      return { length: Number(value.value) };
+    }
+    const inferredType = inferExpressionType(expression);
+    if (inferredType && !isInteger(inferredType)) failure('TYPE_ERROR', 'A variable-length array bound must have integer type.', at);
+    return { length: null, expression };
   };
 
   const parseDeclarator = (abstractAllowed: boolean, parameterDeclarator = false, parameterScopeContext?: ParameterScopeContext): Declarator => {
@@ -636,6 +653,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     let declaredOldStyle = false;
     let parameterArrayQualifiers: TypeQualifiers | undefined;
     let minimumArrayBound: number | undefined;
+    let prototypeVariableLengthBound = false;
     let direct: (base: CType) => CType;
     if (peek().text === '(' && (peek(1).text === '*' || peek(1).text === '(' || peek(1).kind === 'identifier')) {
       consume();
@@ -645,6 +663,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       declaredPrototype = nested.prototype; declaredVariadic = !!nested.variadic; declaredOldStyle = !!nested.oldStyle;
       parameterArrayQualifiers = nested.parameterArrayQualifiers;
       minimumArrayBound = nested.minimumArrayBound;
+      prototypeVariableLengthBound = !!nested.prototypeVariableLengthBound;
     } else if (peek().kind === 'identifier' && !reserved.has(peek().text)) {
       const token = identifier(); name = token.text; location = token; direct = base => base;
     } else if (abstractAllowed) {
@@ -673,17 +692,23 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           if (!supportsParameterArrayModifiers || hasStaticMinimum) failure('TYPE_ERROR', 'static inside brackets is only allowed once in an array parameter.', peek());
           consume(); hasStaticMinimum = true;
         }
-        let length: number | null;
-        if (peek().text === ']') { consume(); length = null; }
-        else length = parseArrayBound();
-        if (hasStaticMinimum && length === null) failure('TYPE_ERROR', 'A static parameter bound requires a positive constant length.', bracket);
+        let bound: { length: number | null; expression?: Expression };
+        if (peek().text === '*') {
+          if (!parameterDeclarator) failure('TYPE_ERROR', 'An array declarator using `[*]` is only permitted in function prototype scope.', bracket);
+          consume();
+          expect(']');
+          bound = { length: null };
+          prototypeVariableLengthBound = true;
+        } else bound = parseArrayBound();
+        const { length } = bound;
+        if (hasStaticMinimum && length === null && !bound.expression) failure('TYPE_ERROR', 'A static parameter bound requires a positive length.', bracket);
         if (Object.values(arrayQualifiers).some(Boolean) || hasStaticMinimum) {
           parameterArrayQualifiers = arrayQualifiers;
           if (hasStaticMinimum && length !== null) minimumArrayBound = length;
         }
         sawArraySuffix = true;
         const previous = direct;
-        direct = base => previous(arrayOf(base, length)); continue;
+        direct = base => previous(arrayOf(base, length, bound.expression)); continue;
       }
       if (peek().text === '(') {
         consume();
@@ -729,6 +754,8 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
             const parameterDeclarator = parseDeclarator(true, true);
             let parameterType = declaredType(parameterDeclarator, parameterBase, parameterQualifiers);
             if (parameterType === 'void') failure('TYPE_ERROR', 'void may only appear as an empty parameter list.', parameterAt);
+            const variableLengthBounds = variableLengthArrayTypes(parameterType)
+              .filter((array) => array.lengthExpression !== undefined);
             if (parameterDeclarator.parameterArrayQualifiers && !isArray(parameterType)) {
               failure('TYPE_ERROR', 'static and bracket qualifiers only apply to a parameter’s outer array.', parameterAt);
             }
@@ -740,6 +767,8 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
             const parameterConst = !!qualifiersOf(parameterType).const;
             const isConst = parameterConst;
             parameters.push({ name: parameterDeclarator.name, type: parameterType, isConst, qualifiers: qualifiersOf(parameterType), register: registerParameter,
+              ...(variableLengthBounds.length ? { variableLengthBounds } : {}),
+              ...(parameterDeclarator.prototypeVariableLengthBound ? { prototypeVariableLengthBound: true } : {}),
               ...(minimumArrayBound !== undefined ? { minimumArrayBound } : {}), location: parameterDeclarator.location });
             parameterTypes.push(parameterType);
             if (parameterDeclarator.name) declareOrdinary(parameterDeclarator.name, parameterDeclarator.location, parameterType);
@@ -766,6 +795,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       ...(parameterScopeContext?.frame ? { parameterScope: parameterScopeContext.frame } : {}),
       ...(parameterArrayQualifiers ? { parameterArrayQualifiers } : {}),
       ...(minimumArrayBound !== undefined ? { minimumArrayBound } : {}),
+      ...(prototypeVariableLengthBound ? { prototypeVariableLengthBound: true } : {}),
       apply: (base) => direct(applyPointers(base, pointerQualifiers)),
     };
   };
@@ -828,15 +858,26 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   }
 
   const decodeString = (text: string, at: Location): number[] => {
-    if (!text.startsWith('"') || !text.endsWith('"')) failure('UNTERMINATED_STRING', 'Unterminated string literal.', at);
+    const utf8 = text.startsWith('u8"');
+    const prefixLength = utf8 ? 2 : 0;
+    if ((!utf8 && !text.startsWith('"')) || !text.endsWith('"')) failure('UNTERMINATED_STRING', 'Unterminated string literal.', at);
     const result: number[] = [];
-    const body = text.slice(1, -1);
+    const body = text.slice(prefixLength + 1, -1);
     for (let index = 0; index < body.length; index++) {
       let code = 0;
       const char = body[index];
       if (char !== '\\') {
-        code = body.charCodeAt(index);
-        if (code > 127) unsupported({ ...at, text: char, kind: 'string' }, 'P3 supports ASCII string literals; Unicode support is pending.');
+        const codePoint = body.codePointAt(index)!;
+        if (utf8 && codePoint >= 0xd800 && codePoint <= 0xdfff) {
+          failure('INVALID_STRING_LITERAL', 'A UTF-8 string literal contains an invalid Unicode code point.', at);
+        }
+        if (utf8 && codePoint > 127) {
+          result.push(...encodeUtf8Bytes(codePoint));
+          if (codePoint > 0xffff) index++;
+          continue;
+        }
+        if (codePoint > 127) unsupported({ ...at, text: char, kind: 'string' }, 'P3 supports ASCII string literals; Unicode support is pending.');
+        code = codePoint;
       } else {
         const next = body[++index];
         if (next === undefined) failure('SYNTAX_ERROR', 'Incomplete escape in string literal.', at);
@@ -1402,11 +1443,18 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
 
   const inferArrayType = (type: CType, initializer: Initializer | undefined): CType => {
     const array = arrayType(type);
-    if (!array || array.length !== null) return type;
+    if (!array || array.length !== null || array.lengthExpression) return type;
     if (!initializer) return type;
     let length = 0;
-    if (initializer.kind === 'expression' && initializer.value.kind === 'string' && array.element === 'char') {
-      length = initializer.value.bytes.length;
+    let stringLiteral: Extract<Expression, { kind: 'string' }> | undefined;
+    if (initializer.kind === 'expression' && initializer.value.kind === 'string') {
+      stringLiteral = initializer.value;
+    } else if (initializer.kind === 'list' && initializer.items.length === 1 && initializer.items[0].designators.length === 0) {
+      const item = initializer.items[0].initializer;
+      if (item.kind === 'expression' && item.value.kind === 'string') stringLiteral = item.value;
+    }
+    if (stringLiteral && unqualifiedType(array.element) === 'char') {
+      length = stringLiteral.bytes.length;
     } else if (initializer.kind === 'list') {
       let next = 0;
       for (const item of initializer.items) {
@@ -1450,22 +1498,28 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline and _Noreturn only apply to function declarations.', at);
     if (isTypedef) {
       if (alignments.length || isThreadLocal) failure('TYPE_ERROR', 'typedef does not allow _Alignas or _Thread_local.', at);
+      const declarations: Statement[] = [];
       do {
         const declarator = parseDeclarator(false);
         const type = declaredType(declarator, base, baseQualifiers);
+        if (hasVariableLengthBound(type) && !local) failure('TYPE_ERROR', 'A variably modified type can only be declared at block scope.', declarator.location);
         if (peek().text === '=') failure('SYNTAX_ERROR', 'A typedef cannot have an initializer.', peek());
         declareTypedef(declarator.name, type, isConstObjectType(type), declarator.location);
+        if (hasVariableLengthBound(type)) declarations.push({ kind: 'typeDeclaration', type, location: declarator.location });
         if (peek().text !== ',') break;
         consume();
       } while (true);
       expect(';');
-      return { kind: 'empty', location: at };
+      if (!declarations.length) return { kind: 'empty', location: at };
+      if (declarations.length === 1) return declarations[0];
+      return { kind: 'sequence', statements: declarations, location: at };
     }
     const declarations: Statement[] = [];
     do {
       const declarator = parseDeclarator(false);
       let type = declaredType(declarator, base, baseQualifiers);
       if (isFunction(type)) {
+        if (hasVariableLengthBound(functionType(type)!.returnType)) failure('TYPE_ERROR', 'A function cannot return a variably modified type.', declarator.location);
         if (!local) failure('ENGINE_INTERNAL_ERROR', 'File-scope function declarations must be handled by the outer parser.', declarator.location);
         if (alignments.length || isStatic || isThreadLocal || isAuto || isRegister) failure('TYPE_ERROR', 'A function declaration does not allow this storage or alignment specifier.', declarator.location);
         if (peek().text === '=') failure('TYPE_ERROR', 'A function declaration cannot have an initializer.', peek());
@@ -1488,6 +1542,15 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         continue;
       }
       if (unqualifiedType(type) === 'void') failure('TYPE_ERROR', 'A variable cannot have type void.', declarator.location);
+      if (hasVariableLengthBound(type) && !local) {
+        failure('TYPE_ERROR', 'A variably modified type can only be declared at block or function prototype scope.', declarator.location);
+      }
+      if (hasVariableLengthBound(type) && isExtern) {
+        failure('TYPE_ERROR', 'An identifier with a variably modified type cannot have linkage.', declarator.location);
+      }
+      if (hasVariableLengthObjectSize(type) && (isStatic || isThreadLocal)) {
+        failure('TYPE_ERROR', 'An object with variable-length array type cannot have static or thread storage duration.', declarator.location);
+      }
       if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline and _Noreturn only apply to functions.', declarator.location);
       let initializer: Initializer | undefined;
       declareOrdinary(declarator.name, declarator.location, type);
@@ -1499,8 +1562,11 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         try { initializer = parseInitializer(); } finally { expressionDuration = priorDuration; }
       }
       type = inferArrayType(type, initializer);
+      if (isArray(type) && hasVariableLengthBound(type) && initializer) {
+        failure('TYPE_ERROR', 'A variable-length array cannot have an initializer.', declarator.location);
+      }
       setOrdinaryType(declarator.name, type);
-      const incompleteExternArray = isExtern && arrayType(type)?.length === null && isComplete(arrayType(type)!.element, aggregates);
+      const incompleteExternArray = isExtern && arrayType(type)?.length === null && !arrayType(type)?.lengthExpression && isComplete(arrayType(type)!.element, aggregates);
       if (!isComplete(type, aggregates) && !incompleteExternArray) failure('INCOMPLETE_TYPE', 'The declared object must have a complete type.', declarator.location);
       if (arrayType(type) && containsFlexibleAggregate(arrayType(type)!.element, aggregates)) failure('TYPE_ERROR', 'Cannot declare an array of a struct that contains a flexible member.', declarator.location);
       const requestedAlignment = alignments.filter((value) => value > 0);
@@ -1672,6 +1738,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       }
       if (isTypedef) {
         if (alignments.length || isThreadLocal) failure('TYPE_ERROR', 'typedef does not allow _Alignas or _Thread_local.', declarator.location);
+        if (hasVariableLengthBound(type)) failure('TYPE_ERROR', 'A variably modified type can only be declared at block scope.', declarator.location);
         if (peek().text === '=') failure('SYNTAX_ERROR', 'A typedef cannot have an initializer.', peek());
         declareTypedef(declarator.name, type, isConstObjectType(type), declarator.location);
         if (peek().text !== ',') break;
@@ -1681,6 +1748,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         if (alignments.length || isThreadLocal) failure('TYPE_ERROR', '_Alignas and _Thread_local cannot be applied to functions.', declarator.location);
         declareOrdinary(declarator.name, declarator.location, type);
         const fnType = functionType(type)!;
+        if (hasVariableLengthBound(fnType.returnType)) failure('TYPE_ERROR', 'A function cannot return a variably modified type.', declarator.location);
         let linkage: 'internal' | 'external' = isStatic ? 'internal' : 'external';
         if (isExtern && fileLinkage.get(declarator.name) === 'internal') linkage = 'internal';
         const previousLinkage = fileLinkage.get(declarator.name);
@@ -1690,7 +1758,9 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         const sourceParameters = declarator.parameters ?? [];
         const parameters: Parameter[] = parameterTypes.map((parameterType, index) => ({
           name: sourceParameters[index]?.name ?? '', type: parameterType, isConst: !!qualifiersOf(parameterType).const, qualifiers: qualifiersOf(parameterType), register: sourceParameters[index]?.register,
+          ...(sourceParameters[index]?.prototypeVariableLengthBound ? { prototypeVariableLengthBound: true } : {}),
           ...(sourceParameters[index]?.minimumArrayBound !== undefined ? { minimumArrayBound: sourceParameters[index].minimumArrayBound } : {}),
+          ...(sourceParameters[index]?.variableLengthBounds ? { variableLengthBounds: sourceParameters[index].variableLengthBounds } : {}),
           location: sourceParameters[index]?.location ?? declarator.location,
         }));
         const symbolKey = linkage === 'internal' ? `internal:${translationUnit}:${declarator.name}` : `external:${declarator.name}`;
@@ -1701,6 +1771,9 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         };
         if (peek().text === '{' || declarator.oldStyle && isDeclarationStart()) {
           if (!first || peek(1).text === ';') failure('SYNTAX_ERROR', 'A function definition must be a separate external declaration.', peek());
+          if (sourceParameters.some((parameter) => parameter.prototypeVariableLengthBound)) {
+            failure('TYPE_ERROR', 'An array declarator using `[*]` is only permitted in function prototype scope.', declarator.location);
+          }
           if (isNoreturn && declarator.name === 'main') failure('TYPE_ERROR', 'main cannot be declared _Noreturn.', declarator.location);
           if (parameterScope) restoreTags(parameterScope);
           if (unqualifiedType(fn.returnType) !== 'void' && !isComplete(fn.returnType, aggregates)) {
@@ -1751,6 +1824,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         functions.push(fn);
       } else {
         if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline and _Noreturn only apply to functions.', declarator.location);
+        if (hasVariableLengthBound(type)) failure('TYPE_ERROR', 'A variably modified type can only be declared at block or function prototype scope.', declarator.location);
         declareOrdinary(declarator.name, declarator.location, type);
         if (unqualifiedType(type) === 'void' || isFunction(type) || !isComplete(type, aggregates) && !isArray(type)) failure('TYPE_ERROR', 'A global object requires a valid object type.', declarator.location);
         let initializer: Initializer | undefined;
@@ -2244,6 +2318,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
             node.type = unqualifiedType(type); break;
           }
           case 'cast': {
+            analyzeVariableLengthBounds(variableLengthArrayTypes(node.targetType), node.location);
             node.operand = analyzedValue(node.operand);
             const source = node.operand.type!;
             const target = node.targetType;
@@ -2254,9 +2329,11 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
           }
           case 'sizeof': {
             const type = node.valueType ?? node.operand!.type!;
+            analyzeVariableLengthBounds(variableLengthArrayTypes(type), node.location);
             if (node.operand?.bitField) failure('TYPE_ERROR', 'sizeof does not apply to a bit-field.', node.location);
             if (!isComplete(type, aggregates) || isFunction(type)) failure('INCOMPLETE_TYPE', 'sizeof requires a complete object type.', node.location);
-            sizeOfType(type, aggregates, node.location); node.type = 'unsigned long'; break;
+            if (!hasVariableLengthObjectSize(type)) sizeOfType(type, aggregates, node.location);
+            node.type = 'unsigned long'; break;
           }
           case 'conditional': {
             node.condition = analyzedValue(node.condition); requireScalar(node.condition.type!, node.condition.location);
@@ -2391,6 +2468,13 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
                 node.args[0].type !== 'float' && node.args[0].type !== 'double' && node.args[0].type !== 'long double') {
               failure('TYPE_ERROR', `«${node.name}» requires a floating-point argument.`, node.args[0].location);
             }
+            if (node.name && node.builtin && floatingComparisons.has(node.name)) {
+              for (const argument of node.args) {
+                if (argument.type !== 'float' && argument.type !== 'double' && argument.type !== 'long double') {
+                  failure('TYPE_ERROR', `«${node.name}» requires real floating-point arguments.`, argument.location);
+                }
+              }
+            }
             node.type = signature.returnType; break;
           }
           case 'generic': {
@@ -2407,6 +2491,16 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       }
       return root.type!;
     };
+    const analyzedVlaBounds = new WeakSet<object>();
+    const analyzeVariableLengthBounds = (bounds: readonly ArrayCType[], at: Location): void => {
+      for (const array of bounds) {
+        const expression = array.lengthExpression;
+        if (!expression || analyzedVlaBounds.has(expression)) continue;
+        const type = analyzeExpression(expression);
+        requireInteger(type, expression.location ?? at);
+        analyzedVlaBounds.add(expression);
+      }
+    };
 
     const integerConstantValue = (node: Expression): bigint | undefined => {
       try {
@@ -2419,6 +2513,10 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       while (pending.length) {
         const node = pending.pop()!;
         if (node.kind === 'literal') { if (!isArithmetic(node.value.type)) return false; continue; }
+        if (node.kind === 'call') {
+          if (node.builtin === true && node.args.length === 0 && (node.name === '__c11_inf' || node.name === '__c11_nan')) continue;
+          return false;
+        }
         if (node.kind === 'sizeof') continue;
         if (node.kind === 'cast') {
           if (!isArithmetic(node.targetType)) return false;
@@ -2508,7 +2606,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         const original = initializer.value;
         const sourceType = analyzeExpression(original);
         const targetArray = arrayType(type);
-        if (targetArray && targetArray.element === 'char' && original.kind === 'string') {
+        if (targetArray && unqualifiedType(targetArray.element) === 'char' && original.kind === 'string') {
           const textLength = original.bytes.length - 1;
           if (targetArray.length! < textLength) failure('INITIALIZER_TOO_LARGE', 'The string does not fit in the character array.', original.location);
         } else {
@@ -2519,7 +2617,8 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         return initializer;
       }
 
-      if (arrayType(type)?.element === 'char' && initializer.items.length === 1 && initializer.items[0].designators.length === 0) {
+      const targetArray = arrayType(type);
+      if (targetArray && unqualifiedType(targetArray.element) === 'char' && initializer.items.length === 1 && initializer.items[0].designators.length === 0) {
         const single = initializer.items[0].initializer;
         if (single.kind === 'expression' && single.value.kind === 'string') return analyzeInitializer(type, single, fileDuration);
       }
@@ -2645,6 +2744,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       parameter.binding = declare(parameter.name, parameter.type, parameter.location, true, parameter.isConst);
       fn.bindings[parameter.binding].register = !!parameter.register;
     }
+    for (const parameter of fn.parameters) analyzeVariableLengthBounds(parameter.variableLengthBounds ?? [], parameter.location);
     type SwitchContext = { type: CType; cases: Set<string>; hasDefault: boolean };
     const labels = new Map<string, Location>();
     const gotos: Extract<Statement, { kind: 'goto' }>[] = [];
@@ -2676,7 +2776,11 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         case 'sequence':
           for (let index = node.statements.length - 1; index >= 0; index--) pendingStatements.push({ node: node.statements[index], loops, switches });
           break;
+        case 'typeDeclaration':
+          analyzeVariableLengthBounds(variableLengthArrayTypes(node.type), node.location);
+          break;
         case 'declaration': {
+          analyzeVariableLengthBounds(variableLengthArrayTypes(node.type), node.location);
           if (node.extern) {
             const globalIndex = globals.findIndex((global) => global.symbolKey === node.symbolKey);
             if (globalIndex < 0) failure('ENGINE_INTERNAL_ERROR', `No global extern symbol exists for «${node.name}».`, node.location);
@@ -2787,5 +2891,5 @@ function requirePointerArithmetic(type: CType, aggregates: readonly AggregateDef
   if (!base || unqualifiedType(base) === 'void' || isFunction(base) || !isObject(base) || !isComplete(base, aggregates)) {
     failure('INCOMPLETE_TYPE', 'Pointer arithmetic requires a complete object type other than void.', at);
   }
-  sizeOfType(base, aggregates, at);
+  if (!hasVariableLengthObjectSize(base)) sizeOfType(base, aggregates, at);
 }

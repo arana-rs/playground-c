@@ -34,7 +34,7 @@ const runtimeError = (source, code) => {
 
 test('P5 preserves P2 scalar/control coverage and publishes current capabilities', () => {
   assert.equal(ENGINE_VERSION, '0.1.0');
-  assert.equal(CAPABILITIES.phase, 'P5');
+  assert.equal(CAPABILITIES.phase, 'P6');
   assert.equal(CAPABILITIES.completeC11, false);
   assert.equal(CAPABILITIES.multipleFiles, true);
   assert.equal(CAPABILITIES.library, 'partial');
@@ -49,7 +49,8 @@ test('P5 preserves P2 scalar/control coverage and publishes current capabilities
   assert.deepEqual(CAPABILITIES.aggregateMembers, ['named', 'anonymous-struct', 'anonymous-union', 'bit-fields', 'flexible-array-members']);
   assert.deepEqual(CAPABILITIES.qualifiers, ['const', 'volatile', 'restrict']);
   assert.match(CAPABILITIES.restrictProfile, /independent restrict bases/);
-  assert.match(CAPABILITIES.restrictProfile, /bytewise\/library overlap is not analyzed/);
+  assert.match(CAPABILITIES.restrictProfile, /byte-wise and library accesses/);
+  assert.match(CAPABILITIES.restrictProfile, /RESTRICT_PROVENANCE_UNKNOWN/);
   assert.equal(CAPABILITIES.genericSelection, true);
   assert.deepEqual(CAPABILITIES.storageDurations, ['automatic', 'static', 'allocated', 'thread-local']);
   assert.deepEqual(CAPABILITIES.stdalignMacros, ['alignas', 'alignof', '__alignas_is_defined', '__alignof_is_defined']);
@@ -58,7 +59,9 @@ test('P5 preserves P2 scalar/control coverage and publishes current capabilities
   assert.ok(CAPABILITIES.errnoMacros.includes('EDOM'));
   assert.ok(CAPABILITIES.errnoMacros.includes('EILSEQ'));
   assert.ok(CAPABILITIES.errnoMacros.includes('ENOSYS'));
-  assert.deepEqual(CAPABILITIES.stdioFormatLimitations, ['printf floating precision cap: 100 decimal / 100000 hexadecimal digits']);
+  assert.equal(CAPABILITIES.stringLiteralProfile, 'char-arrays-with-terminator; narrow-UCNs-encode-as-UTF-8; u8-raw-Unicode-and-UCNs-encode-as-UTF-8; ordinary-raw-non-ASCII-and-wide-literal-prefixes-unsupported');
+  assert.equal(CAPABILITIES.characterConstantProfile, 'single-byte-values-use-signed-char-profile; multicharacter-bytes-pack-left-to-right-into-int-low-32-bits');
+  assert.deepEqual(CAPABILITIES.stdioFormatLimitations, ['printf hexadecimal precision cap: 100000 digits']);
   assert.ok(CAPABILITIES.stdioFunctions.includes('vfprintf'));
   assert.ok(CAPABILITIES.stdioFunctions.includes('freopen'));
   assert.ok(CAPABILITIES.stdlibFunctions.includes('strtold'));
@@ -67,7 +70,7 @@ test('P5 preserves P2 scalar/control coverage and publishes current capabilities
   assert.deepEqual(CAPABILITIES.timeMacros, ['CLOCKS_PER_SEC', 'TIME_UTC']);
   assert.deepEqual(CAPABILITIES.floatingTypes, ['float', 'double', 'long double']);
   assert.ok(CAPABILITIES.integerTypes.includes('unsigned long long'));
-  assert.equal(CAPABILITIES.mathFunctions.includes('fma'), false);
+  assert.ok(['fma', 'fmaf', 'fmal'].every((name) => CAPABILITIES.mathFunctions.includes(name)));
   assert.equal(TARGET_PROFILE.charSigned, true);
   assert.equal(TARGET_PROFILE.longLongBits, 64);
   assert.equal(TARGET_PROFILE.longDoubleBits, 80);
@@ -76,7 +79,7 @@ test('P5 preserves P2 scalar/control coverage and publishes current capabilities
   assert.equal(TARGET_PROFILE.longDoubleSignificandBits, 64);
   assert.equal(TARGET_PROFILE.longDoubleExponentBits, 15);
   assert.equal(TARGET_PROFILE.floatEvaluationMethod, 0);
-  for (const value of [CAPABILITIES, TARGET_PROFILE, CAPABILITIES.virtualHeaders, CAPABILITIES.aggregateMembers, CAPABILITIES.qualifiers, CAPABILITIES.storageClasses, CAPABILITIES.storageDurations, CAPABILITIES.linkage, CAPABILITIES.stdalignMacros, CAPABILITIES.stddefMacros, CAPABILITIES.stddefTypes, CAPABILITIES.errnoMacros, CAPABILITIES.stdioFunctions, CAPABILITIES.stdioMacros, CAPABILITIES.stdlibFunctions, CAPABILITIES.stdlibMacros, CAPABILITIES.timeFunctions, CAPABILITIES.timeMacros, CAPABILITIES.stdioFormatLimitations, CAPABILITIES.mathFunctions, CAPABILITIES.integerTypes, CAPABILITIES.floatingTypes, CAPABILITIES.interactiveStdinFunctions]) assert.ok(Object.isFrozen(value));
+  for (const value of [CAPABILITIES, TARGET_PROFILE, CAPABILITIES.virtualHeaders, CAPABILITIES.aggregateMembers, CAPABILITIES.qualifiers, CAPABILITIES.storageClasses, CAPABILITIES.storageDurations, CAPABILITIES.linkage, CAPABILITIES.stdalignMacros, CAPABILITIES.stddefMacros, CAPABILITIES.stddefTypes, CAPABILITIES.errnoMacros, CAPABILITIES.stdioFunctions, CAPABILITIES.stdioMacros, CAPABILITIES.stdlibFunctions, CAPABILITIES.stdlibMacros, CAPABILITIES.timeFunctions, CAPABILITIES.timeMacros, CAPABILITIES.stdioFormatLimitations, CAPABILITIES.mathFunctions, CAPABILITIES.mathClassificationMacros, CAPABILITIES.mathComparisonMacros, CAPABILITIES.mathTypes, CAPABILITIES.mathConstants, CAPABILITIES.integerTypes, CAPABILITIES.floatingTypes, CAPABILITIES.interactiveStdinFunctions]) assert.ok(Object.isFrozen(value));
 });
 
 test('all LP64 scalar sizes and scalar sizeof expressions use the declared type', () => {
@@ -261,7 +264,6 @@ test('P2 constraints reject invalid operands, lvalues, control placement and fun
 
 test('library and concurrency features still pending remain explicit preparation rejections', () => {
   for (const source of [
-    '#include <math.h>\nint main(void) { return fma(1.0, 2.0, 3.0); }',
     '#include <threads.h>\nint main(void) { return 0; }',
   ]) rejects(source);
 });

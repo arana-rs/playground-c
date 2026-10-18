@@ -12,16 +12,16 @@ import {
 } from './internal.ts';
 import { formatBinary80Hex } from './binary80.ts';
 import type {
-  AggregateDefinition, Binding, CValue, Expression, Initializer, InitializerDesignator,
-  Location, ObjectPointerValue, ObjectReference, ObjectScalarValue,
+  AggregateDefinition, ArrayCType, Binding, CType, CValue, Expression, Initializer, InitializerDesignator,
+  Location, ObjectPointerValue, ObjectReference, ObjectScalarValue, Parameter,
 } from './internal.ts';
 import { compile } from './bytecode.ts';
 import type { CompiledFunction, Scope } from './bytecode.ts';
-import { binary, callBuiltin, convert, isFloatingClassificationBuiltin, promote, truth, unary } from './numeric.ts';
+import { binary, callBuiltin, convert, isFloatingMathBuiltin, promote, truth, unary } from './numeric.ts';
 import {
-  aggregateType, arrayOf, arrayType, compatibleType, enumType, functionType, isAggregate, isArithmetic, isArray, isFunction,
+  aggregateType, arrayOf, arrayType, compatibleType, enumType, functionOf, functionType, hasVariableLengthBound, hasVariableLengthObjectSize, isAggregate, isArithmetic, isArray, isFunction,
   isInteger, isPointer, isScalar, pointerTo, pointerType, pointedToType, qualifiersOf, sameType, sizeOfType,
-  typeName, unqualifiedType,
+  qualifyType, typeName, unqualifiedType, variableLengthArrayTypes,
 } from './type-system.ts';
 import { VirtualMemory } from './memory.ts';
 import { dispatchLibraryBuiltin } from './library.ts';
@@ -32,7 +32,7 @@ import type { StdlibSessionState, StdlibTimeRuntimeContext } from './stdlib-time
 import { VirtualIO, VirtualIOError, VirtualStream } from './virtual-io.ts';
 
 interface Cell { binding: Binding; reference: ObjectReference }
-interface RuntimeScope { layout: Scope; token: object; scopeId: number; cells: number[]; restrictBases: number[] }
+interface RuntimeScope { layout: Scope; token: object; scopeId: number; cells: number[]; vlaTypeKeys: ArrayCType[]; restrictBases: number[] }
 interface Frame {
   compiled: CompiledFunction;
   frameId: number | null;
@@ -41,14 +41,17 @@ interface Frame {
   scopes: RuntimeScope[];
   fullExpressionToken?: object;
   cells: Map<number, Cell>;
+  vlaLengths: Map<ArrayCType, number>;
   args: CValue[];
   argumentPointerBases?: readonly ReadonlySet<number>[];
+  argumentUnknownPointerBases?: readonly ReadonlySet<number>[];
   variadicArgs: CValue[];
   vaCursorIds: Set<number>;
   temporaryObjects: ObjectReference[];
   returned: boolean;
   result?: CValue;
   resultPointerBases?: Set<number>;
+  resultUnknownPointerBases?: Set<number>;
 }
 interface DebugObjectMetadata {
   readonly duration: DebugObjectDuration;
@@ -88,13 +91,20 @@ type RuntimeSession = {
 };
 interface VaCursor { frame: Frame; args: readonly CValue[]; index: number; active: boolean; indeterminate: boolean; marker: ObjectReference }
 interface Access { read: boolean; write: boolean; name: string }
-interface RestrictObservation { accessedViaBase: boolean; independentAccess: boolean; modified: boolean }
+interface RestrictObservation {
+  accessedViaBaseMask: number;
+  independentAccessMask: number;
+  unknownAccessMask: number;
+  modifiedMask: number;
+}
 interface Evaluation {
   value?: CValue;
   reference?: ObjectReference;
   label?: string;
   pointerBases?: Set<number>;
+  unknownPointerBases?: Set<number>;
   addressBases?: Set<number>;
+  unknownAddressBases?: Set<number>;
   accesses: Map<number, Access>;
   pendingWrites: Set<number>;
 }
@@ -544,23 +554,27 @@ function createRuntimeSession(
           }) satisfies DebugScalarSnapshot];
         })),
       ));
+      const snapshotPointerTarget = (
+        pointerType: CType,
+        targetIdentity: { readonly allocationId: number; readonly byteOffset: number } | undefined,
+      ): DebugPointerSnapshot['target'] => {
+        if (!targetIdentity) return undefined;
+        const targetType = debugTypeSummary(pointedToType(pointerType) ?? 'void', ir.aggregates);
+        const targetRecord = debugObjects.get(targetIdentity.allocationId);
+        const name = targetIdentity.byteOffset === 0 && targetRecord?.typeSummary === targetType
+          ? targetRecord.name
+          : undefined;
+        return Object.freeze({
+          allocationId: targetIdentity.allocationId,
+          byteOffset: targetIdentity.byteOffset,
+          type: targetType,
+          ...(name === undefined ? {} : { name }),
+        });
+      };
       const snapshotPointer = (record: DebugObjectRecord, reference: ObjectReference): DebugPointerSnapshot | undefined => {
         if (!isPointer(reference.type) || record.name === undefined) return undefined;
         const inspected = memory.inspectPointer(reference, debugObjectLocations!.get(record.allocationId) ?? location);
-        let target: DebugPointerSnapshot['target'];
-        if (inspected.target) {
-          const targetType = debugTypeSummary(pointedToType(reference.type) ?? 'void', ir.aggregates);
-          const targetRecord = debugObjects.get(inspected.target.allocationId);
-          const name = inspected.target.byteOffset === 0 && targetRecord?.typeSummary === targetType
-            ? targetRecord.name
-            : undefined;
-          target = Object.freeze({
-            allocationId: inspected.target.allocationId,
-            byteOffset: inspected.target.byteOffset,
-            type: targetType,
-            ...(name === undefined ? {} : { name }),
-          });
-        }
+        const target = snapshotPointerTarget(reference.type, inspected.target);
         return Object.freeze({
           id: record.allocationId,
           scopeId: record.scopeId,
@@ -675,8 +689,10 @@ function createRuntimeSession(
           const at = debugObjectLocations!.get(record.allocationId) ?? location;
           let status: DebugArraySnapshot['status'];
           if (isArray(elementType)) status = 'multidimensional';
-          else if (!isArithmetic(elementType)) status = 'unsupported-element-type';
-          else if (length > maxElementsPerArray) status = 'too-many-elements';
+          else if (!isArithmetic(elementType) && !isPointer(elementType)) status = 'unsupported-element-type';
+          else if (length > (isPointer(elementType)
+            ? Math.min(maxElementsPerArray, DEFAULT_DEBUG_ARRAY_INSPECTION_LIMITS.maxElementsPerArray)
+            : maxElementsPerArray)) status = 'too-many-elements';
           else status = 'available';
 
           let elements: readonly DebugArrayElementSnapshot[] = Object.freeze([]);
@@ -684,6 +700,25 @@ function createRuntimeSession(
             const elementSize = sizeOfType(elementType, ir.aggregates, at);
             const cells: DebugArrayElementSnapshot[] = [];
             for (let index = 0; index < length; index += 1) {
+              const address = `0x${(record.addressVirtual + BigInt(index) * BigInt(elementSize)).toString(16)}`;
+              if (isPointer(elementType)) {
+                const inspected = memory.inspectArrayPointerElement(reference, index, at);
+                if (!inspected) failure('ENGINE_INTERNAL_ERROR', 'The pointer array cell could not be inspected.', at);
+                const target = snapshotPointerTarget(elementType, inspected.target);
+                cells.push(Object.freeze({
+                  key: `${record.allocationId}:${index}`,
+                  index,
+                  address,
+                  type: elementTypeName,
+                  initialized: inspected.initialized,
+                  displayValue: inspected.address === undefined ? '?' : `0x${inspected.address.toString(16)}`,
+                  valueTruncated: false,
+                  kind: 'pointer',
+                  pointerStatus: inspected.status,
+                  ...(target === undefined ? {} : { target }),
+                }) satisfies DebugArrayElementSnapshot);
+                continue;
+              }
               const inspected = memory.inspectArrayElement(reference, index, at);
               const initialized = inspected?.initialized === true && inspected.value !== undefined;
               const fullValue = initialized ? debugScalarValue(elementType, inspected.value!) : '?';
@@ -691,7 +726,7 @@ function createRuntimeSession(
               cells.push(Object.freeze({
                 key: `${record.allocationId}:${index}`,
                 index,
-                address: `0x${(record.addressVirtual + BigInt(index) * BigInt(elementSize)).toString(16)}`,
+                address,
                 type: elementTypeName,
                 initialized,
                 displayValue: valueTruncated ? fullValue.slice(0, maxValueChars) : fullValue,
@@ -831,20 +866,7 @@ function createRuntimeSession(
               }
               if (isPointer(member.type)) {
                 const inspected = memory.inspectAggregatePointer(reference, member.index, member.location);
-                let target: DebugAggregateMemberSnapshot['target'];
-                if (inspected.target) {
-                  const targetType = debugTypeSummary(pointedToType(member.type) ?? 'void', ir.aggregates);
-                  const targetRecord = debugObjects.get(inspected.target.allocationId);
-                  const targetName = inspected.target.byteOffset === 0 && targetRecord?.typeSummary === targetType
-                    ? targetRecord.name
-                    : undefined;
-                  target = Object.freeze({
-                    allocationId: inspected.target.allocationId,
-                    byteOffset: inspected.target.byteOffset,
-                    type: targetType,
-                    ...(targetName === undefined ? {} : { name: targetName }),
-                  });
-                }
+                const target = snapshotPointerTarget(member.type, inspected.target);
                 return Object.freeze({
                   ...common,
                   kind: 'pointer',
@@ -1096,7 +1118,14 @@ function createRuntimeSession(
     const restrictBaseByPointerObject = new Map<number, number>();
     const restrictPointerObjectByBase = new Map<number, number>();
     const pointerOriginsByObject = new Map<number, Set<number>>();
+    const unknownPointerOriginsByObject = new Map<number, Set<number>>();
+    const integerPointerOriginsByObject = new Map<number, Set<number>>();
+    const unknownIntegerPointerOriginsByObject = new Map<number, Set<number>>();
+    const integerPointerOriginReferences = new Map<number, ObjectReference>();
     const pointerValueBases = new WeakMap<ObjectPointerValue, Set<number>>();
+    const unknownPointerValueBases = new WeakMap<ObjectPointerValue, Set<number>>();
+    const integerValueBases = new WeakMap<CValue, Set<number>>();
+    const unknownIntegerValueBases = new WeakMap<CValue, Set<number>>();
     const activeRestrictBases = new Map<number, object>();
     // Restrict pointers initialized or assigned from another restricted pointer
     // belong to one provenance chain. Accesses through either member of that
@@ -1140,6 +1169,9 @@ function createRuntimeSession(
       const bytePointer = asBytePointer(pointer, at);
       const address = bytePointer.value as ObjectPointerValue;
       if (count > address.boundsEnd - address.byteOffset) failure('POINTER_BOUNDS', 'Read exceeds the pointed-to object.', at);
+      observeRestrictAddress(
+        address, pointerValueBases.get(address), unknownPointerValueBases.get(address), count, false, at,
+      );
       const bytes = new Uint8Array(count);
       for (let index = 0; index < count; index++) {
         const current = { ...address, byteOffset: address.byteOffset + index };
@@ -1166,21 +1198,33 @@ function createRuntimeSession(
       if (!bytes.length) return;
       const bytePointer = asBytePointer(pointer, at);
       const address = bytePointer.value as ObjectPointerValue;
+      observeRestrictAddress(
+        address, pointerValueBases.get(address), unknownPointerValueBases.get(address), bytes.length, true, at,
+      );
+      clearIntegerPointerOriginsInRange(address.allocationId, address.byteOffset, bytes.length);
       for (let index = 0; index < bytes.length; index++) {
         const current = { ...address, byteOffset: address.byteOffset + index };
         const ref = memory.dereference({ type: bytePointer.type, value: current }, at);
         memory.write(ref, { type: 'unsigned char', value: BigInt(bytes[index]) }, at);
       }
     };
-    const readCString = (pointer: CValue, at: Location): Uint8Array => {
+    const readCString = (pointer: CValue, at: Location, maxBytes?: number): Uint8Array => {
+      if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 0)) {
+        failure('INVALID_MEMORY_SIZE', 'The string read limit is not representable.', at);
+      }
+      if (maxBytes === 0) return new Uint8Array();
       const bytePointer = asBytePointer(pointer, at);
       const address = bytePointer.value as ObjectPointerValue;
       if (address.byteOffset < address.boundsStart || address.byteOffset >= address.boundsEnd) {
         failure('POINTER_BOUNDS', 'The string starts outside the pointed-to object.', at);
       }
       const bytes: number[] = [];
-      for (let offset = address.byteOffset; offset < address.boundsEnd; offset++) {
+      const limit = maxBytes === undefined ? address.boundsEnd : Math.min(address.boundsEnd, address.byteOffset + maxBytes);
+      for (let offset = address.byteOffset; offset < limit; offset++) {
         const current = { ...address, byteOffset: offset };
+        observeRestrictAddress(
+          current, pointerValueBases.get(address), unknownPointerValueBases.get(address), 1, false, at,
+        );
         const ref = memory.dereference({ type: bytePointer.type, value: current }, at);
         const value = memory.read(ref, at).value;
         if (typeof value !== 'bigint') failure('INVALID_OBJECT_REPRESENTATION', 'A string byte is not an integer.', at);
@@ -1188,6 +1232,7 @@ function createRuntimeSession(
         if (byte === 0) return Uint8Array.from(bytes);
         bytes.push(byte);
       }
+      if (maxBytes !== undefined && bytes.length === maxBytes) return Uint8Array.from(bytes);
       failure('UNTERMINATED_STRING', 'The string contains no NUL within the pointed-to object.', at);
     };
     const copyBytes = (destination: CValue, source: CValue, count: number, at: Location): void => {
@@ -1197,16 +1242,34 @@ function createRuntimeSession(
       }
       const bytes = readBytes(source, count, at);
       const sourceAddress = asBytePointer(source, at).value as ObjectPointerValue;
+      const integerOrigins = copyIntegerPointerOrigins(sourceAddress.allocationId, sourceAddress.byteOffset, count);
       const pointerValues = memory.copyablePointerValues(sourceAddress, count, at);
       const effectiveTypes = memory.copyableEffectiveTypes(sourceAddress, count, at);
       const destinationAddress = asBytePointer(destination, at).value as ObjectPointerValue;
       writeBytes(destination, bytes, at);
       memory.restoreCopiedPointerValues(destinationAddress, count, pointerValues, at);
       memory.restoreCopiedEffectiveTypes(destinationAddress, count, effectiveTypes, at);
+      restoreIntegerPointerOrigins(destinationAddress.allocationId, destinationAddress.byteOffset, count, integerOrigins);
     };
     const writeScalar = (pointer: CValue, value: CValue, at: Location): void => {
       const reference = memory.dereference(pointer, at);
-      memory.write(reference, valueForType(value, reference.type, at), at);
+      if (pointer.value !== null && typeof pointer.value === 'object' && pointer.value.kind === 'object-pointer') {
+        observeRestrictAccess(
+          reference, pointerValueBases.get(pointer.value), unknownPointerValueBases.get(pointer.value), true, at,
+        );
+      }
+      const converted = valueForType(value, reference.type, at);
+      const pointerBases = isPointer(reference.type) && typeof converted.value === 'object' && converted.value !== null && converted.value.kind === 'object-pointer'
+        ? pointerValueBases.get(converted.value) : undefined;
+      const unknownPointerBases = isPointer(reference.type) && typeof converted.value === 'object' && converted.value !== null && converted.value.kind === 'object-pointer'
+        ? unknownPointerValueBases.get(converted.value) : undefined;
+      const integerBases = isInteger(reference.type) ? integerValueBases.get(converted) : undefined;
+      const unknownIntegerBases = isInteger(reference.type) ? unknownIntegerValueBases.get(converted) : undefined;
+      const view = memory.describeObjectView(reference, at);
+      clearIntegerPointerOriginsInRange(view.allocationId, reference.byteOffset, view.size);
+      memory.write(reference, converted, at);
+      if (isPointer(reference.type)) setPointerBasesForObject(reference, pointerBases, unknownPointerBases);
+      if (isInteger(reference.type)) setIntegerPointerBasesForObject(reference, integerBases, unknownIntegerBases);
     };
     const chargeWork = (count: number, at: Location): void => {
       if (!Number.isSafeInteger(count) || count < 0) failure('INVALID_WORK_SIZE', 'The requested work amount is not representable.', at);
@@ -1279,6 +1342,7 @@ function createRuntimeSession(
             bytes: readBytes(pointer, size, at),
             pointers: memory.copyablePointerValues(address, size, at),
             effectiveTypes: memory.copyableEffectiveTypes(address, size, at),
+            integerOrigins: copyIntegerPointerOrigins(address.allocationId, address.byteOffset, size),
           };
         };
         const leftSnapshot = snapshot(leftValue);
@@ -1288,6 +1352,7 @@ function createRuntimeSession(
           writeBytes(destination, source.bytes, at);
           memory.restoreCopiedPointerValues(address, size, source.pointers, at);
           memory.restoreCopiedEffectiveTypes(address, size, source.effectiveTypes, at);
+          restoreIntegerPointerOrigins(address.allocationId, address.byteOffset, size, source.integerOrigins);
         };
         restore(leftValue, rightSnapshot);
         restore(rightValue, leftSnapshot);
@@ -1310,11 +1375,11 @@ function createRuntimeSession(
         const key = pointerKey(file);
         if (!key) return -1;
         const stream = filePointers.get(key);
-        if (!stream || !stream.close()) return -1;
+        if (!stream || stream.isClosed) return -1;
+        const closed = stream.close(at);
         if (!standardFileKeys.has(key)) filePointers.delete(key);
         filePointerValues.delete(stream);
-        void at;
-        return 0;
+        return closed ? 0 : -2;
       },
       consumeVaList: (list, at) => {
         const { cursor } = cursorFromHandle(list, at);
@@ -1329,7 +1394,8 @@ function createRuntimeSession(
         if (!key) return null;
         const previous = filePointers.get(key);
         const isStandard = standardFileKeys.has(key);
-        if (!previous || previous.isClosed && !isStandard || !previous.isClosed && !previous.close()) return null;
+        if (!previous || previous.isClosed && !isStandard) return null;
+        if (!previous.isClosed) previous.close(at);
         filePointerValues.delete(previous);
         if (path === null) return null;
         const replacement = io!.open(path, mode, at);
@@ -1347,10 +1413,15 @@ function createRuntimeSession(
       },
       errno: {
         get: () => {
-          const value = memory.read(getErrnoReference(), runtimeLocation).value;
+          const reference = getErrnoReference();
+          observeRestrictAccess(reference, undefined, undefined, false, runtimeLocation);
+          const value = memory.read(reference, runtimeLocation).value;
           return typeof value === 'bigint' ? Number(value) : 0;
         },
-        set: (value) => memory.write(getErrnoReference(), integer(BigInt(value), 'int'), runtimeLocation),
+        set: (value) => writeScalar(
+          memory.addressOf(getErrnoReference(), pointerTo('int')),
+          integer(BigInt(value), 'int'), runtimeLocation,
+        ),
       },
       makeErrnoPointer: () => {
         if (!errnoPointer) errnoPointer = memory.addressOf(getErrnoReference(), pointerTo('int'));
@@ -1371,7 +1442,7 @@ function createRuntimeSession(
           type: pointer.type,
           value: { ...original, byteOffset: original.byteOffset + byteOffset },
         };
-        rememberPointerBases(result, pointerValueBases.get(original));
+        rememberPointerBases(result, pointerValueBases.get(original), unknownPointerValueBases.get(original));
         return result;
       },
       makeString: (bytes, at) => {
@@ -1407,17 +1478,29 @@ function createRuntimeSession(
         return integer(value.value !== null, '_Bool');
       }
       if (isInteger(targetType) && isPointer(value.type)) {
-        return convert({ type: 'unsigned long', value: memory.pointerInteger(value, at) }, targetType, at, ir.aggregates);
+        const converted = convert({ type: 'unsigned long', value: memory.pointerInteger(value, at) }, targetType, at, ir.aggregates);
+        if (typeof value.value === 'object' && value.value !== null && value.value.kind === 'object-pointer') {
+          rememberIntegerPointerBases(
+            converted, pointerValueBases.get(value.value), unknownPointerValueBases.get(value.value),
+          );
+        }
+        return converted;
       }
       if (pointerType(targetType)) {
         if (value.value === null) return { type: targetType, value: null };
         if (typeof value.value === 'bigint' && value.value === 0n) return { type: targetType, value: null };
-        if (typeof value.value === 'bigint') return memory.pointerFromInteger(value.value, targetType, at);
+        if (typeof value.value === 'bigint') {
+          const converted = memory.pointerFromInteger(value.value, targetType, at);
+          rememberPointerBases(converted, integerValueBases.get(value), unknownIntegerValueBases.get(value));
+          return converted;
+        }
         if (typeof value.value === 'object' && value.value !== null) {
           const kind = (value.value as { kind?: string }).kind;
           if (kind === 'object-pointer') {
             if (isFunction(pointedToType(targetType) ?? 'void')) failure('INVALID_POINTER_CONVERSION', 'An object pointer cannot be converted to a function pointer.', at);
-            return { type: targetType, value: value.value as ObjectPointerValue };
+            const converted = { type: targetType, value: value.value as ObjectPointerValue };
+            rememberPointerBases(converted, pointerValueBases.get(value.value as ObjectPointerValue), unknownPointerValueBases.get(value.value as ObjectPointerValue));
+            return converted;
           }
           if (kind === 'function-pointer') {
             if (!isFunction(pointedToType(targetType) ?? 'void')) failure('INVALID_POINTER_CONVERSION', 'A function pointer cannot be converted to an object pointer.', at);
@@ -1436,19 +1519,52 @@ function createRuntimeSession(
         }
         failure('INVALID_AGGREGATE_CONVERSION', 'By-value conversion requires the same struct or union type.', at);
       }
-      return convert(value, targetType, at, ir.aggregates);
+      const converted = convert(value, targetType, at, ir.aggregates);
+      if (isInteger(targetType) && isInteger(value.type)) {
+        if (sameType(unqualifiedType(targetType), unqualifiedType(value.type))) {
+          preserveIntegerPointerBases(value, converted);
+        } else {
+          const origins = integerPointerOrigins(value);
+          rememberIntegerPointerBases(converted, [], unionUnknownPointerBases(origins.known, origins.unknown));
+        }
+      }
+      return converted;
     };
     const truthValue = (value: CValue): boolean => truth(value, runtimeLocation);
     const activePointerBases = (bases?: Iterable<number>): Set<number> => new Set(
       [...(bases ?? [])].filter((base) => activeRestrictBases.has(base)),
     );
+    const activeUnknownPointerBases = (bases?: Iterable<number>): Set<number> => new Set(
+      [...(bases ?? [])].filter((base) => activeRestrictBases.has(base)),
+    );
     const unionPointerBases = (...sources: Array<Iterable<number> | undefined>): Set<number> =>
       activePointerBases(sources.flatMap((source) => [...(source ?? [])]));
-    const rememberPointerBases = (value: CValue, bases?: Iterable<number>): void => {
+    const unionUnknownPointerBases = (...sources: Array<Iterable<number> | undefined>): Set<number> =>
+      activeUnknownPointerBases(sources.flatMap((source) => [...(source ?? [])]));
+    const rememberPointerBases = (
+      value: CValue,
+      bases?: Iterable<number>,
+      unknownBases?: Iterable<number>,
+    ): void => {
       if (!isPointer(value.type) || typeof value.value !== 'object' || value.value === null || value.value.kind !== 'object-pointer') return;
+      pointerValueBases.set(value.value, activePointerBases(bases));
+      unknownPointerValueBases.set(value.value, activeUnknownPointerBases(unknownBases));
+    };
+    const rememberIntegerPointerBases = (
+      value: CValue,
+      bases?: Iterable<number>,
+      unknownBases?: Iterable<number>,
+    ): void => {
+      if (!isInteger(value.type)) return;
       const filtered = activePointerBases(bases);
-      if (filtered.size) pointerValueBases.set(value.value, filtered);
-      else pointerValueBases.delete(value.value);
+      const unknown = activeUnknownPointerBases(unknownBases);
+      if (filtered.size) integerValueBases.set(value, filtered);
+      else integerValueBases.delete(value);
+      if (unknown.size) unknownIntegerValueBases.set(value, unknown);
+      else unknownIntegerValueBases.delete(value);
+    };
+    const preserveIntegerPointerBases = (source: CValue, target: CValue): void => {
+      rememberIntegerPointerBases(target, integerValueBases.get(source), unknownIntegerValueBases.get(source));
     };
     const pointerBasesForObject = (reference: ObjectReference): Set<number> => {
       const bases = activePointerBases(pointerOriginsByObject.get(reference.objectId));
@@ -1456,20 +1572,136 @@ function createRuntimeSession(
       if (ownBase !== undefined && activeRestrictBases.has(ownBase)) bases.add(ownBase);
       return bases;
     };
-    const setPointerBasesForObject = (reference: ObjectReference, bases?: Iterable<number>): void => {
+    const unknownPointerBasesForObject = (reference: ObjectReference): Set<number> =>
+      activeUnknownPointerBases(unknownPointerOriginsByObject.get(reference.objectId));
+    const setPointerBasesForObject = (
+      reference: ObjectReference,
+      bases?: Iterable<number>,
+      unknownBases?: Iterable<number>,
+    ): void => {
       if (!isPointer(reference.type)) {
         pointerOriginsByObject.delete(reference.objectId);
+        unknownPointerOriginsByObject.delete(reference.objectId);
         return;
       }
       const filtered = activePointerBases(bases);
-      if (filtered.size) pointerOriginsByObject.set(reference.objectId, filtered);
-      else pointerOriginsByObject.delete(reference.objectId);
+      pointerOriginsByObject.set(reference.objectId, filtered);
+      unknownPointerOriginsByObject.set(reference.objectId, activeUnknownPointerBases(unknownBases));
       const ownBase = restrictBaseByPointerObject.get(reference.objectId);
       if (ownBase !== undefined && activeRestrictBases.has(ownBase)) {
         const parents = new Set([...filtered].filter((base) => base !== ownBase));
         if (parents.size) restrictBaseParents.set(ownBase, parents);
         else restrictBaseParents.delete(ownBase);
       }
+    };
+    const integerPointerBasesForObject = (reference: ObjectReference): Set<number> =>
+      activePointerBases(integerPointerOriginsByObject.get(reference.objectId));
+    const unknownIntegerPointerBasesForObject = (reference: ObjectReference): Set<number> =>
+      activeUnknownPointerBases(unknownIntegerPointerOriginsByObject.get(reference.objectId));
+    const setIntegerPointerBasesForObject = (
+      reference: ObjectReference,
+      bases?: Iterable<number>,
+      unknownBases?: Iterable<number>,
+    ): void => {
+      if (!isInteger(reference.type)) {
+        integerPointerOriginsByObject.delete(reference.objectId);
+        unknownIntegerPointerOriginsByObject.delete(reference.objectId);
+        integerPointerOriginReferences.delete(reference.objectId);
+        return;
+      }
+      const known = activePointerBases(bases);
+      const unknown = activeUnknownPointerBases(unknownBases);
+      if (known.size || unknown.size) {
+        integerPointerOriginsByObject.set(reference.objectId, known);
+        unknownIntegerPointerOriginsByObject.set(reference.objectId, unknown);
+        integerPointerOriginReferences.set(reference.objectId, reference);
+      } else {
+        integerPointerOriginsByObject.delete(reference.objectId);
+        unknownIntegerPointerOriginsByObject.delete(reference.objectId);
+        integerPointerOriginReferences.delete(reference.objectId);
+      }
+    };
+    const clearIntegerPointerOriginsInRange = (allocationId: number, byteOffset: number, byteCount: number): void => {
+      if (!integerPointerOriginReferences.size || byteCount <= 0) return;
+      const end = byteOffset + byteCount;
+      for (const [objectId, reference] of integerPointerOriginReferences) {
+        if (!memory.isAlive(reference)) {
+          integerPointerOriginReferences.delete(objectId);
+          integerPointerOriginsByObject.delete(objectId);
+          unknownIntegerPointerOriginsByObject.delete(objectId);
+          continue;
+        }
+        const view = memory.describeObjectView(reference, runtimeLocation);
+        if (view.allocationId === allocationId && view.size > 0 &&
+            reference.byteOffset < end && byteOffset < reference.byteOffset + view.size) {
+          integerPointerOriginReferences.delete(objectId);
+          integerPointerOriginsByObject.delete(objectId);
+          unknownIntegerPointerOriginsByObject.delete(objectId);
+        }
+      }
+    };
+    const copyIntegerPointerOrigins = (
+      allocationId: number,
+      byteOffset: number,
+      byteCount: number,
+    ): readonly { relativeOffset: number; size: number; known: Set<number>; unknown: Set<number> }[] => {
+      if (!integerPointerOriginReferences.size || byteCount <= 0) return [];
+      const end = byteOffset + byteCount;
+      const copied: Array<{ relativeOffset: number; size: number; known: Set<number>; unknown: Set<number> }> = [];
+      for (const [objectId, reference] of integerPointerOriginReferences) {
+        if (!memory.isAlive(reference)) continue;
+        const view = memory.describeObjectView(reference, runtimeLocation);
+        if (view.allocationId !== allocationId || reference.byteOffset < byteOffset || reference.byteOffset + view.size > end) continue;
+        const known = activePointerBases(integerPointerOriginsByObject.get(objectId));
+        const unknown = activeUnknownPointerBases(unknownIntegerPointerOriginsByObject.get(objectId));
+        if (known.size || unknown.size) copied.push({ relativeOffset: reference.byteOffset - byteOffset, size: view.size, known, unknown });
+      }
+      return copied;
+    };
+    const restoreIntegerPointerOrigins = (
+      allocationId: number,
+      byteOffset: number,
+      byteCount: number,
+      copied: readonly { relativeOffset: number; size: number; known: Set<number>; unknown: Set<number> }[],
+    ): void => {
+      const targets = memory.integerObjectViewsInRange(allocationId, byteOffset, byteCount);
+      for (const origin of copied) {
+        const target = targets.find((reference) => {
+          const view = memory.describeObjectView(reference, runtimeLocation);
+          return reference.byteOffset === byteOffset + origin.relativeOffset && view.size === origin.size;
+        });
+        if (target) setIntegerPointerBasesForObject(target, origin.known, origin.unknown);
+      }
+    };
+    const integerPointerOrigins = (value: CValue): { known: Set<number>; unknown: Set<number> } => ({
+      known: activePointerBases(integerValueBases.get(value)),
+      unknown: activeUnknownPointerBases(unknownIntegerValueBases.get(value)),
+    });
+    const hasIntegerPointerOrigins = (origins: { known: Set<number>; unknown: Set<number> }): boolean =>
+      origins.known.size > 0 || origins.unknown.size > 0;
+    const propagateIntegerPointerOperation = (
+      operator: string,
+      left: CValue,
+      right: CValue | undefined,
+      result: CValue,
+    ): void => {
+      if (!isInteger(result.type)) return;
+      const leftOrigins = integerPointerOrigins(left);
+      const rightOrigins = right ? integerPointerOrigins(right) : { known: new Set<number>(), unknown: new Set<number>() };
+      const dependent = hasIntegerPointerOrigins(leftOrigins) || hasIntegerPointerOrigins(rightOrigins);
+      if (!dependent) return;
+      const known = unionPointerBases(leftOrigins.known, rightOrigins.known);
+      const unknown = unionUnknownPointerBases(leftOrigins.unknown, rightOrigins.unknown);
+      const unaryBijective = right === undefined && ['+', '-', '~'].includes(operator);
+      const oneDependentOperand = hasIntegerPointerOrigins(leftOrigins) !== hasIntegerPointerOrigins(rightOrigins);
+      const additiveBijective = right !== undefined && ['+', '-'].includes(operator) && oneDependentOperand;
+      const leftDependent = hasIntegerPointerOrigins(leftOrigins);
+      const rightDependent = hasIntegerPointerOrigins(rightOrigins);
+      const multiplicativeIdentity = operator === '*' && oneDependentOperand &&
+        (leftDependent && right?.value === 1n || rightDependent && left.value === 1n);
+      const divisionIdentity = operator === '/' && leftDependent && !rightDependent && right?.value === 1n;
+      if (unaryBijective || additiveBijective || multiplicativeIdentity || divisionIdentity) rememberIntegerPointerBases(result, known, unknown);
+      else rememberIntegerPointerBases(result, [], unionUnknownPointerBases(known, unknown));
     };
     const registerRestrictPointer = (scope: RuntimeScope, binding: Binding, reference: ObjectReference): void => {
       if (!isPointer(binding.type) || !qualifiersOf(binding.type).restrict) return;
@@ -1499,30 +1731,71 @@ function createRuntimeSession(
       }
       return related;
     };
-    const observeRestrictAccess = (
-      reference: ObjectReference, addressBases: Iterable<number> | undefined, write: boolean, at: Location,
+    const observeRestrictRange = (
+      allocationId: number,
+      byteOffset: number,
+      byteCount: number,
+      addressBases: Iterable<number> | undefined,
+      unknownAddressBases: Iterable<number> | undefined,
+      write: boolean,
+      at: Location,
+      bitMask?: bigint,
     ): void => {
       const bases = activePointerBases(addressBases);
-      const view = memory.describeObjectView(reference, at);
-      // objectId identifies the typed subobject independently of qualifiers;
-      // allocation and byte range distinguish equal-looking subobjects in an
-      // array or aggregate and keep adjacent elements/members disjoint.
-      const objectKey = `${view.allocationId}:${view.objectId}:${reference.byteOffset}:${view.size}`;
-      for (const base of activeRestrictBases.keys()) {
-        let objects = restrictObservations.get(base);
-        if (!objects) restrictObservations.set(base, objects = new Map());
-        let observation = objects.get(objectKey);
-        if (!observation) objects.set(objectKey, observation = {
-          accessedViaBase: false, independentAccess: false, modified: false,
-        });
-        const related = relatedRestrictBases(base);
-        if ([...bases].some((candidate) => related.has(candidate))) observation.accessedViaBase = true;
-        else observation.independentAccess = true;
-        if (write) observation.modified = true;
-        if (observation.accessedViaBase && observation.independentAccess && observation.modified) {
-          failure('RESTRICT_ALIAS', `Object «${reference.objectId}» was accessed through pointers not based on the same restrict pointer and modified within its scope.`, at);
+      const unknownBases = activeUnknownPointerBases(unknownAddressBases);
+      if (!activeRestrictBases.size || !byteCount) return;
+      for (let byteIndex = 0; byteIndex < byteCount; byteIndex++) {
+        const byteMask = bitMask === undefined
+          ? 0xff
+          : Number((bitMask >> BigInt(byteIndex * 8)) & 0xffn);
+        if (!byteMask) continue;
+        const key = `${allocationId}:${byteOffset + byteIndex}`;
+        for (const base of activeRestrictBases.keys()) {
+          let objects = restrictObservations.get(base);
+          if (!objects) restrictObservations.set(base, objects = new Map());
+          let observation = objects.get(key);
+          if (!observation) objects.set(key, observation = {
+            accessedViaBaseMask: 0, independentAccessMask: 0, unknownAccessMask: 0, modifiedMask: 0,
+          });
+          const related = relatedRestrictBases(base);
+          if ([...bases].some((candidate) => related.has(candidate))) {
+            observation.accessedViaBaseMask |= byteMask;
+          } else if ([...unknownBases].some((candidate) => related.has(candidate))) {
+            observation.unknownAccessMask |= byteMask;
+          } else {
+            observation.independentAccessMask |= byteMask;
+          }
+          if (write) observation.modifiedMask |= byteMask;
+          if (observation.accessedViaBaseMask & observation.independentAccessMask & observation.modifiedMask) {
+            failure('RESTRICT_ALIAS', `Storage at byte offset ${byteOffset + byteIndex} was accessed through unrelated pointer associations and modified within their scope.`, at);
+          }
+          if (observation.accessedViaBaseMask & observation.unknownAccessMask & observation.modifiedMask) {
+            failure('RESTRICT_PROVENANCE_UNKNOWN', 'An overlapping modified access has pointer provenance that cannot be resolved for restrict.', at);
+          }
         }
       }
+    };
+    function observeRestrictAddress(
+      pointer: ObjectPointerValue,
+      bases: Iterable<number> | undefined,
+      unknownBases: Iterable<number> | undefined,
+      byteCount: number,
+      write: boolean,
+      at: Location,
+    ): void {
+      observeRestrictRange(pointer.allocationId, pointer.byteOffset, byteCount, bases, unknownBases, write, at);
+    }
+    const observeRestrictAccess = (
+      reference: ObjectReference,
+      addressBases: Iterable<number> | undefined,
+      unknownAddressBases: Iterable<number> | undefined,
+      write: boolean,
+      at: Location,
+    ): void => {
+      const view = memory.describeObjectView(reference, at);
+      observeRestrictRange(
+        view.allocationId, reference.byteOffset, view.size, addressBases, unknownAddressBases, write, at, view.bitMask,
+      );
     };
     const addAccess = (evaluation: Evaluation, objectId: number, access: Access): void => {
       const previous = evaluation.accesses.get(objectId);
@@ -1552,26 +1825,41 @@ function createRuntimeSession(
       };
     };
     const referenceEvaluation = (
-      reference: ObjectReference, label: string, effects?: Evaluation, addressBases?: Iterable<number>,
+      reference: ObjectReference,
+      label: string,
+      effects?: Evaluation,
+      addressBases?: Iterable<number>,
+      unknownAddressBases?: Iterable<number>,
     ): Evaluation => ({
       reference,
       label,
       accesses: effects ? new Map(effects.accesses) : new Map(),
       pendingWrites: effects ? new Set(effects.pendingWrites) : new Set(),
       ...(addressBases === undefined ? {} : { addressBases: activePointerBases(addressBases) }),
+      ...(unknownAddressBases === undefined ? {} : { unknownAddressBases: activeUnknownPointerBases(unknownAddressBases) }),
     });
     const markRead = (evaluation: Evaluation, reference: ObjectReference, label: string): void => {
       addAccess(evaluation, reference.objectId, { read: true, write: false, name: label });
-      observeRestrictAccess(reference, evaluation.addressBases, false, runtimeLocation);
+      observeRestrictAccess(reference, evaluation.addressBases, evaluation.unknownAddressBases, false, runtimeLocation);
     };
     const markWrite = (evaluation: Evaluation, reference: ObjectReference, label: string): void => {
       addAccess(evaluation, reference.objectId, { read: false, write: true, name: label });
-      observeRestrictAccess(reference, evaluation.addressBases, true, runtimeLocation);
+      observeRestrictAccess(reference, evaluation.addressBases, evaluation.unknownAddressBases, true, runtimeLocation);
+      const view = memory.describeObjectView(reference, runtimeLocation);
+      clearIntegerPointerOriginsInRange(view.allocationId, reference.byteOffset, view.size);
       evaluation.pendingWrites.add(reference.objectId);
     };
     const materialize = (evaluation: Evaluation, at: Location): CValue => {
       if (evaluation.value) {
-        rememberPointerBases(evaluation.value, evaluation.pointerBases);
+        const pointer = typeof evaluation.value.value === 'object' && evaluation.value.value !== null &&
+          evaluation.value.value.kind === 'object-pointer' ? evaluation.value.value : undefined;
+        if (pointer) {
+          evaluation.pointerBases = activePointerBases(evaluation.pointerBases ?? pointerValueBases.get(pointer));
+          evaluation.unknownPointerBases = activeUnknownPointerBases(
+            evaluation.unknownPointerBases ?? unknownPointerValueBases.get(pointer),
+          );
+          rememberPointerBases(evaluation.value, evaluation.pointerBases, evaluation.unknownPointerBases);
+        }
         return evaluation.value;
       }
       const reference = evaluation.reference;
@@ -1579,18 +1867,34 @@ function createRuntimeSession(
       if (isArray(reference.type)) {
         evaluation.value = memory.decay(reference);
         evaluation.pointerBases = activePointerBases(evaluation.addressBases);
+        evaluation.unknownPointerBases = activeUnknownPointerBases(evaluation.unknownAddressBases);
       } else if (isFunction(reference.type)) {
         failure('INVALID_OBJECT', 'A function cannot be read as an object.', at);
       } else {
         evaluation.value = memory.read(reference, at);
         markRead(evaluation, reference, evaluation.label ?? 'object');
         if (isPointer(reference.type)) {
-          evaluation.pointerBases = pointerBasesForObject(reference);
-          rememberPointerBases(evaluation.value, evaluation.pointerBases);
+          evaluation.pointerBases = unionPointerBases(
+            pointerBasesForObject(reference),
+            typeof evaluation.value.value === 'object' && evaluation.value.value !== null && evaluation.value.value.kind === 'object-pointer'
+              ? pointerValueBases.get(evaluation.value.value) : undefined,
+          );
+          evaluation.unknownPointerBases = unionUnknownPointerBases(
+            unknownPointerBasesForObject(reference),
+            typeof evaluation.value.value === 'object' && evaluation.value.value !== null && evaluation.value.value.kind === 'object-pointer'
+              ? unknownPointerValueBases.get(evaluation.value.value) : undefined,
+          );
+          rememberPointerBases(evaluation.value, evaluation.pointerBases, evaluation.unknownPointerBases);
+        } else if (isInteger(reference.type)) {
+          rememberIntegerPointerBases(
+            evaluation.value,
+            integerPointerBasesForObject(reference),
+            unknownIntegerPointerBasesForObject(reference),
+          );
         }
       }
       evaluation.reference = undefined;
-      rememberPointerBases(evaluation.value, evaluation.pointerBases);
+      rememberPointerBases(evaluation.value, evaluation.pointerBases, evaluation.unknownPointerBases);
       return evaluation.value;
     };
     const aggregateDefinition = (type: CValue['type'], at: Location): AggregateDefinition => {
@@ -1689,8 +1993,12 @@ function createRuntimeSession(
           const result = operands.pop();
           if (!result) failure('ENGINE_STACK_ERROR', 'Missing initializer value.', initializer.location);
           const value = materialize(result, initializer.location);
-          memory.write(reference, valueForType(value, type, initializer.location), initializer.location, true);
-          if (isPointer(type)) setPointerBasesForObject(reference, result.pointerBases);
+          const converted = valueForType(value, type, initializer.location);
+          memory.write(reference, converted, initializer.location, true);
+          if (isPointer(type)) setPointerBasesForObject(reference, result.pointerBases, result.unknownPointerBases);
+          if (isInteger(type)) {
+            setIntegerPointerBasesForObject(reference, integerValueBases.get(converted), unknownIntegerValueBases.get(converted));
+          }
         }, depth + 1);
         return;
       }
@@ -1786,6 +2094,74 @@ function createRuntimeSession(
       evaluate(expression, frame, depth, used);
     }
 
+    function resolveVariableType(type: CType, frame: Frame, at: Location): CType {
+      if (typeof type === 'string') return type;
+      if (type.kind === 'qualified') return qualifyType(resolveVariableType(type.base, frame, at), type.qualifiers);
+      if (type.kind === 'array') {
+        const length = type.lengthExpression ? frame.vlaLengths.get(type) : type.length;
+        if (type.lengthExpression && length === undefined) {
+          failure('UNRESOLVED_VLA_SIZE', 'The variable-length array bound has not been evaluated in this scope.', at);
+        }
+        return arrayOf(resolveVariableType(type.element, frame, at), length ?? null);
+      }
+      if (type.kind === 'pointer') return pointerTo(resolveVariableType(type.base, frame, at), {
+        ...(type.const === undefined ? {} : { const: type.const }),
+        ...(type.volatile === undefined ? {} : { volatile: type.volatile }),
+        ...(type.restrict === undefined ? {} : { restrict: type.restrict }),
+        ...(type.baseConst === undefined ? {} : { baseConst: type.baseConst }),
+        ...(type.baseVolatile === undefined ? {} : { baseVolatile: type.baseVolatile }),
+      });
+      if (type.kind === 'function') return functionOf(
+        resolveVariableType(type.returnType, frame, at),
+        type.parameters.map((parameter) => resolveVariableType(parameter, frame, at)),
+        !!type.variadic,
+        type.prototype !== false,
+      );
+      return type;
+    }
+
+    function evaluateVariableBounds(
+      bounds: readonly ArrayCType[],
+      frame: Frame,
+      at: Location,
+      done: () => void,
+      retainForScope = true,
+    ): void {
+      const ephemeralTypes: ArrayCType[] = [];
+      const evaluateAt = (index: number): void => {
+        while (index < bounds.length && (!bounds[index].lengthExpression || frame.vlaLengths.has(bounds[index]))) index++;
+        if (index >= bounds.length) {
+          for (const array of bounds) {
+            if (array.lengthExpression) sizeOfType(resolveVariableType(array, frame, at), ir.aggregates, array.lengthExpression.location);
+          }
+          try { done(); }
+          finally {
+            for (const type of ephemeralTypes) frame.vlaLengths.delete(type);
+          }
+          return;
+        }
+        const array = bounds[index];
+        const expression = array.lengthExpression!;
+        evaluateFullExpression(expression, frame, () => {
+          const result = operands.pop();
+          if (!result) failure('ENGINE_STACK_ERROR', 'Missing variable-length array bound value.', expression.location);
+          const value = materialize(result, expression.location);
+          if (!isInteger(value.type) || typeof value.value !== 'bigint') {
+            failure('TYPE_ERROR', 'A variable-length array bound must have integer type.', expression.location);
+          }
+          if (value.value <= 0n) failure('INVALID_ARRAY_BOUND', 'A variable-length array bound must be greater than zero.', expression.location);
+          if (value.value > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'The variable-length array bound exceeds the representable range.', expression.location);
+          const owner = frame.scopes.at(-1);
+          if (!owner) failure('INVALID_SCOPE', 'A variable-length array bound requires an active block scope.', at);
+          frame.vlaLengths.set(array, Number(value.value));
+          if (retainForScope) owner.vlaTypeKeys.push(array);
+          else ephemeralTypes.push(array);
+          evaluateAt(index + 1);
+        });
+      };
+      evaluateAt(0);
+    }
+
     const operateBinary = (operator: string, left: CValue, right: CValue, at: Location): CValue => {
       const leftPointer = isPointer(left.type);
       const rightPointer = isPointer(right.type);
@@ -1848,7 +2224,21 @@ function createRuntimeSession(
         } else if (node.kind === 'sizeof') {
           const type = node.valueType ?? node.operand?.type;
           if (!type) failure('INVALID_SIZEOF', 'Could not determine the type of the sizeof operand.', at);
-          operands.push(plain({ type: 'unsigned long', value: BigInt(sizeOfType(type, ir.aggregates, at)) }));
+          if (!hasVariableLengthObjectSize(type)) {
+            operands.push(plain({ type: 'unsigned long', value: BigInt(sizeOfType(type, ir.aggregates, at)) }));
+          } else if (node.valueType) {
+            evaluateVariableBounds(variableLengthArrayTypes(type), frame, at, () => {
+              const resolvedType = resolveVariableType(type, frame, at);
+              operands.push(plain({ type: 'unsigned long', value: BigInt(sizeOfType(resolvedType, ir.aggregates, at)) }));
+            }, false);
+          } else {
+            const operand = node.operand!;
+            evaluateFullExpression(operand, frame, () => {
+              const result = operands.pop();
+              if (!result?.reference) failure('INVALID_SIZEOF', 'The variable-length sizeof operand has no runtime object.', at);
+              operands.push(plain({ type: 'unsigned long', value: BigInt(sizeOfType(result.reference.type, ir.aggregates, at)) }));
+            }, depth + 1, true);
+          }
         } else if (node.kind === 'generic') {
           evaluate(node.selected, frame, depth + 1, used);
         } else if (node.kind === 'unary' && node.operator === '&') {
@@ -1867,6 +2257,7 @@ function createRuntimeSession(
               result.type = node.type && isPointer(node.type) ? node.type : result.type;
               effects.value = result;
               effects.pointerBases = activePointerBases(baseResult.pointerBases);
+              effects.unknownPointerBases = activeUnknownPointerBases(baseResult.unknownPointerBases);
               operands.push(effects);
             });
             evaluate(subscript.index, frame, depth + 1);
@@ -1883,6 +2274,7 @@ function createRuntimeSession(
               if (node.type && isPointer(node.type)) pointer.type = node.type;
               const result = plain(pointer);
               result.pointerBases = activePointerBases(operand.pointerBases);
+              result.unknownPointerBases = activeUnknownPointerBases(operand.unknownPointerBases);
               operands.push(result);
             });
             evaluate(dereference.operand, frame, depth + 1);
@@ -1895,6 +2287,7 @@ function createRuntimeSession(
               const requestedPointer = node.type ? pointerType(node.type) : undefined;
               const result = plain(memory.addressOf(operand.reference, requestedPointer ?? pointerTo(operand.reference.type)));
               result.pointerBases = activePointerBases(operand.addressBases);
+              result.unknownPointerBases = activeUnknownPointerBases(operand.unknownAddressBases);
               operands.push(result);
             } else {
               const value = materialize(operand, at);
@@ -1902,6 +2295,7 @@ function createRuntimeSession(
                   (value.value as { kind?: string }).kind === 'function-pointer') {
                 const result = plain(value);
                 result.pointerBases = activePointerBases(operand.pointerBases);
+                result.unknownPointerBases = activeUnknownPointerBases(operand.unknownPointerBases);
                 operands.push(result);
               }
               else failure('INVALID_LVALUE', 'The & operator requires an object or function.', at);
@@ -1915,7 +2309,9 @@ function createRuntimeSession(
             const pointer = materialize(operand, at);
             if (!isPointer(pointer.type)) failure('INVALID_OPERAND_TYPE', 'The * operator requires a pointer.', at);
             if (isFunction(pointedToType(pointer.type) ?? 'void')) operands.push(plain(pointer));
-            else operands.push(referenceEvaluation(memory.dereference(pointer, at), 'pointed object', operand, operand.pointerBases));
+            else operands.push(referenceEvaluation(
+              memory.dereference(pointer, at), 'pointed object', operand, operand.pointerBases, operand.unknownPointerBases,
+            ));
           });
           evaluate(node.operand, frame, depth + 1);
         } else if (node.kind === 'unary') {
@@ -1924,23 +2320,40 @@ function createRuntimeSession(
             if (!result) failure('ENGINE_STACK_ERROR', 'Missing unary operand.', at);
             const value = materialize(result, at);
             result.value = node.operator === '!' ? integer(!truthValue(value)) : unary(node.operator, value, at);
+            propagateIntegerPointerOperation(node.operator, value, undefined, result.value);
+            if (isInteger(result.value.type) && isPointer(value.type)) {
+              rememberIntegerPointerBases(result.value, [], unionUnknownPointerBases(result.pointerBases, result.unknownPointerBases));
+            }
             operands.push(result);
           });
           evaluate(node.operand, frame, depth + 1);
         } else if (node.kind === 'cast') {
-          work.push(() => {
-            const result = operands.pop();
-            if (!result) failure('ENGINE_STACK_ERROR', 'Missing cast operand.', at);
-            const sourceValue = materialize(result, at);
-            result.value = valueForType(sourceValue, node.targetType, at);
-            if (isPointer(node.targetType) && isPointer(sourceValue.type)) result.pointerBases = activePointerBases(result.pointerBases);
-            else result.pointerBases = undefined;
-            result.reference = undefined;
-            operands.push(result);
-          });
-          // An explicit cast to void discards the operand's value. In particular,
-          // a non-void function may fall through when its result is discarded.
-          evaluate(node.operand, frame, depth + 1, node.targetType !== 'void');
+          evaluateVariableBounds(variableLengthArrayTypes(node.targetType), frame, at, () => {
+            const targetType = resolveVariableType(node.targetType, frame, at);
+            work.push(() => {
+              const result = operands.pop();
+              if (!result) failure('ENGINE_STACK_ERROR', 'Missing cast operand.', at);
+              const sourceValue = materialize(result, at);
+              result.value = valueForType(sourceValue, targetType, at);
+              if (isPointer(targetType)) {
+                if (isPointer(sourceValue.type)) {
+                  result.pointerBases = activePointerBases(result.pointerBases);
+                  result.unknownPointerBases = activeUnknownPointerBases(result.unknownPointerBases);
+                } else if (typeof result.value.value === 'object' && result.value.value !== null && result.value.value.kind === 'object-pointer') {
+                  result.pointerBases = activePointerBases(pointerValueBases.get(result.value.value));
+                  result.unknownPointerBases = activeUnknownPointerBases(unknownPointerValueBases.get(result.value.value));
+                }
+              } else {
+                result.pointerBases = undefined;
+                result.unknownPointerBases = undefined;
+              }
+              result.reference = undefined;
+              operands.push(result);
+            });
+            // An explicit cast to void discards the operand's value. In particular,
+            // a non-void function may fall through when its result is discarded.
+            evaluate(node.operand, frame, depth + 1, targetType !== 'void');
+          }, false);
         } else if (node.kind === 'decay') {
           work.push(() => {
             const result = operands.pop();
@@ -1948,6 +2361,7 @@ function createRuntimeSession(
             if (result.reference && isArray(result.reference.type)) {
               result.value = memory.decay(result.reference);
               result.pointerBases = activePointerBases(result.addressBases);
+              result.unknownPointerBases = activeUnknownPointerBases(result.unknownAddressBases);
               result.reference = undefined;
             } else result.value = materialize(result, at);
             operands.push(result);
@@ -1962,21 +2376,39 @@ function createRuntimeSession(
               failure('INVALID_LVALUE', 'Increment requires a modifiable scalar.', at);
             }
             const old = memory.read(reference, at);
+            if (isInteger(old.type)) {
+              rememberIntegerPointerBases(
+                old, integerPointerBasesForObject(reference), unknownIntegerPointerBasesForObject(reference),
+              );
+            }
             const readEvaluation = plain(old);
             readEvaluation.addressBases = activePointerBases(target.addressBases);
+            readEvaluation.unknownAddressBases = activeUnknownPointerBases(target.unknownAddressBases);
             markRead(readEvaluation, reference, target.label ?? 'object');
             const combined = mergeEffects(target, readEvaluation, at);
             combined.addressBases = activePointerBases(target.addressBases);
+            combined.unknownAddressBases = activeUnknownPointerBases(target.unknownAddressBases);
             const oldPointerBases = isPointer(old.type) ? pointerBasesForObject(reference) : undefined;
+            const oldUnknownPointerBases = isPointer(old.type) ? unknownPointerBasesForObject(reference) : undefined;
             let next: CValue;
             if (isPointer(old.type)) next = memory.pointerAdd(old, node.operator === '++' ? 1n : -1n, at);
-            else next = binary(node.operator === '++' ? '+' : '-', old, integer(1), at);
+            else {
+              next = binary(node.operator === '++' ? '+' : '-', old, integer(1), at);
+              propagateIntegerPointerOperation(node.operator === '++' ? '+' : '-', old, integer(1), next);
+            }
             next = valueForType(next, reference.type, at);
+            const nextIntegerBases = isInteger(reference.type) ? integerValueBases.get(next) : undefined;
+            const nextUnknownIntegerBases = isInteger(reference.type) ? unknownIntegerValueBases.get(next) : undefined;
             next = memory.write(reference, next, at);
-            if (isPointer(reference.type)) setPointerBasesForObject(reference, oldPointerBases);
+            if (isPointer(reference.type)) setPointerBasesForObject(reference, oldPointerBases, oldUnknownPointerBases);
             markWrite(combined, reference, target.label ?? 'object');
             combined.value = node.prefix ? next : old;
-            if (isPointer(next.type)) combined.pointerBases = oldPointerBases;
+            if (isPointer(next.type)) {
+              combined.pointerBases = oldPointerBases;
+              combined.unknownPointerBases = oldUnknownPointerBases;
+            }
+            if (isInteger(reference.type)) setIntegerPointerBasesForObject(reference, nextIntegerBases, nextUnknownIntegerBases);
+            if (isInteger(reference.type)) rememberIntegerPointerBases(next, nextIntegerBases, nextUnknownIntegerBases);
             operands.push(combined);
           });
           evaluate(node.operand, frame, depth + 1, true, true);
@@ -1991,11 +2423,19 @@ function createRuntimeSession(
             const name = target.label ?? 'object';
             let old: CValue | undefined;
             let oldPointerBases: Set<number> | undefined;
+            let oldUnknownPointerBases: Set<number> | undefined;
             if (node.operator !== '=') {
               old = memory.read(reference, at);
+              if (isInteger(old.type)) {
+                rememberIntegerPointerBases(
+                  old, integerPointerBasesForObject(reference), unknownIntegerPointerBasesForObject(reference),
+                );
+              }
               oldPointerBases = isPointer(old.type) ? pointerBasesForObject(reference) : undefined;
+              oldUnknownPointerBases = isPointer(old.type) ? unknownPointerBasesForObject(reference) : undefined;
               const oldEvaluation = plain(old);
               oldEvaluation.addressBases = activePointerBases(target.addressBases);
+              oldEvaluation.unknownAddressBases = activeUnknownPointerBases(target.unknownAddressBases);
               markRead(oldEvaluation, reference, name);
             }
             work.push(() => {
@@ -2006,20 +2446,38 @@ function createRuntimeSession(
               // deliberately does not merge address provenance from unrelated
               // value operands, so restore the target's provenance explicitly.
               effects.addressBases = activePointerBases(target.addressBases);
+              effects.unknownAddressBases = activeUnknownPointerBases(target.unknownAddressBases);
               let value = materialize(right, at);
-              if (old) value = operateBinary(node.operator.slice(0, -1), old, value, at);
+              if (old) {
+                const operator = node.operator.slice(0, -1);
+                const rightValue = value;
+                value = operateBinary(operator, old, rightValue, at);
+                propagateIntegerPointerOperation(operator, old, rightValue, value);
+              }
               if (right.pendingWrites.has(reference.objectId)) {
                 failure('UNSEQUENCED_ACCESS', 'Unsequenced writes to «' + name + '».', at);
               }
               value = valueForType(value, reference.type, at);
+              const nextIntegerBases = isInteger(reference.type) ? integerValueBases.get(value) : undefined;
+              const nextUnknownIntegerBases = isInteger(reference.type) ? unknownIntegerValueBases.get(value) : undefined;
               value = memory.write(reference, value, at);
               const storedPointerBases = isPointer(reference.type)
                 ? node.operator === '=' ? right.pointerBases : unionPointerBases(oldPointerBases, right.pointerBases)
                 : undefined;
-              setPointerBasesForObject(reference, storedPointerBases);
+              const storedUnknownPointerBases = isPointer(reference.type)
+                ? node.operator === '=' ? right.unknownPointerBases : unionUnknownPointerBases(oldUnknownPointerBases, right.unknownPointerBases)
+                : undefined;
+              setPointerBasesForObject(reference, storedPointerBases, storedUnknownPointerBases);
               markWrite(effects, reference, name);
+              if (isInteger(reference.type)) {
+                setIntegerPointerBasesForObject(reference, nextIntegerBases, nextUnknownIntegerBases);
+                rememberIntegerPointerBases(value, nextIntegerBases, nextUnknownIntegerBases);
+              }
               effects.value = value;
-              if (isPointer(value.type)) effects.pointerBases = storedPointerBases;
+              if (isPointer(value.type)) {
+                effects.pointerBases = storedPointerBases;
+                effects.unknownPointerBases = storedUnknownPointerBases;
+              }
               operands.push(effects);
             });
             evaluate(node.value, frame, depth + 1);
@@ -2045,7 +2503,9 @@ function createRuntimeSession(
             const effects = mergeEffects(baseResult, indexResult, at);
             const addressBases = baseResult.reference && isArray(baseResult.reference.type)
               ? baseResult.addressBases : baseResult.pointerBases;
-            operands.push(referenceEvaluation(reference, 'element', effects, addressBases));
+              const unknownAddressBases = baseResult.reference && isArray(baseResult.reference.type)
+                ? baseResult.unknownAddressBases : baseResult.unknownPointerBases;
+              operands.push(referenceEvaluation(reference, 'element', effects, addressBases, unknownAddressBases));
           });
           evaluate(node.index, frame, depth + 1);
           evaluate(node.base, frame, depth + 1, true, true);
@@ -2056,13 +2516,16 @@ function createRuntimeSession(
             let baseReference: ObjectReference;
             let effects = baseResult;
             let addressBases: Iterable<number> | undefined;
+            let unknownAddressBases: Iterable<number> | undefined;
             if (node.arrow) {
               const pointer = materialize(baseResult, at);
               baseReference = memory.dereference(pointer, at);
               addressBases = baseResult.pointerBases;
+              unknownAddressBases = baseResult.unknownPointerBases;
             } else if (baseResult.reference) {
               baseReference = baseResult.reference;
               addressBases = baseResult.addressBases;
+              unknownAddressBases = baseResult.unknownAddressBases;
             } else {
               const value = materialize(baseResult, at);
               if (!isAggregate(value.type)) failure('INVALID_MEMBER', 'The . operator requires an aggregate value.', at);
@@ -2079,24 +2542,40 @@ function createRuntimeSession(
             const memberIndex = node.memberIndex ?? definition.members.findIndex((member) => member.name === node.name);
             if (memberIndex < 0 || !definition.members[memberIndex]) failure('UNKNOWN_MEMBER', 'The aggregate has no member named «' + node.name + '».', at);
             const memberReference = memory.member(baseReference, memberIndex, at);
-            operands.push(referenceEvaluation(memberReference, node.name, effects, addressBases));
+            operands.push(referenceEvaluation(memberReference, node.name, effects, addressBases, unknownAddressBases));
           });
           evaluate(node.base, frame, depth + 1, true, !node.arrow);
         } else if (node.kind === 'conditional') {
           work.push(() => {
             const condition = operands.pop();
             if (!condition) failure('ENGINE_STACK_ERROR', 'Missing condition in ?: expression.', at);
-            const conditionValue = truthValue(materialize(condition, at));
+            const conditionResult = materialize(condition, at);
+            const conditionBranch = truthValue(conditionResult);
             work.push(() => {
               const result = operands.pop();
               if (!result) failure('ENGINE_STACK_ERROR', 'Missing result for ?: expression.', at);
               const value = valueForType(materialize(result, at), node.type ?? result.value!.type, at);
               const combined = mergeEffects(condition, result, at, true);
               combined.value = value;
-              if (isPointer(value.type)) combined.pointerBases = activePointerBases(result.pointerBases);
+              if (isPointer(value.type)) {
+                combined.pointerBases = activePointerBases(result.pointerBases);
+                combined.unknownPointerBases = unionUnknownPointerBases(
+                  result.unknownPointerBases,
+                  condition.pointerBases,
+                  condition.unknownPointerBases,
+                );
+              } else if (isInteger(value.type)) {
+                propagateIntegerPointerOperation('?:', conditionResult, materialize(result, at), value);
+                const conditionPointerBases = isPointer(conditionResult.type)
+                  ? unionUnknownPointerBases(condition.pointerBases, condition.unknownPointerBases) : new Set<number>();
+                if (conditionPointerBases.size) {
+                  const origins = integerPointerOrigins(value);
+                  rememberIntegerPointerBases(value, origins.known, unionUnknownPointerBases(origins.unknown, conditionPointerBases));
+                }
+              }
               operands.push(combined);
             });
-            evaluate(conditionValue ? node.then : node.else, frame, depth + 1, used);
+            evaluate(conditionBranch ? node.then : node.else, frame, depth + 1, used);
           });
           evaluate(node.condition, frame, depth + 1);
         } else if (node.kind === 'binary') {
@@ -2106,6 +2585,10 @@ function createRuntimeSession(
             const leftValue = materialize(left, at);
             if ((node.operator === '&&' && !truthValue(leftValue)) || (node.operator === '||' && truthValue(leftValue))) {
               left.value = integer(node.operator === '||' ? 1 : 0);
+              propagateIntegerPointerOperation(node.operator, leftValue, undefined, left.value);
+              if (isPointer(leftValue.type)) {
+                rememberIntegerPointerBases(left.value, [], unionUnknownPointerBases(left.pointerBases, left.unknownPointerBases));
+              }
               left.pendingWrites.clear();
               operands.push(left);
               return;
@@ -2122,10 +2605,32 @@ function createRuntimeSession(
                   : operateBinary(node.operator, leftValue, rightValue, at);
               const combined = mergeEffects(left, right, at, sequenced);
               combined.value = result;
-              if (node.operator === ',') combined.pointerBases = activePointerBases(right.pointerBases);
-              else if (isPointer(result.type) && (node.operator === '+' || node.operator === '-')) {
-                combined.pointerBases = isPointer(leftValue.type)
-                  ? activePointerBases(left.pointerBases) : activePointerBases(right.pointerBases);
+              if (node.operator === ',') {
+                combined.pointerBases = activePointerBases(right.pointerBases);
+                combined.unknownPointerBases = activeUnknownPointerBases(right.unknownPointerBases);
+              } else {
+                propagateIntegerPointerOperation(node.operator, leftValue, rightValue, result);
+                if (isInteger(result.type)) {
+                  const pointerOrigins = unionUnknownPointerBases(
+                    isPointer(leftValue.type) ? unionPointerBases(left.pointerBases, right.pointerBases) : undefined,
+                    isPointer(rightValue.type) ? unionPointerBases(left.pointerBases, right.pointerBases) : undefined,
+                  );
+                  if (pointerOrigins.size) {
+                    const origins = integerPointerOrigins(result);
+                    rememberIntegerPointerBases(result, origins.known, unionUnknownPointerBases(origins.unknown, pointerOrigins));
+                  }
+                }
+                if (isPointer(result.type) && (node.operator === '+' || node.operator === '-')) {
+                  const pointerSource = isPointer(leftValue.type) ? left : right;
+                  const offsetValue = isPointer(leftValue.type) ? rightValue : leftValue;
+                  const offsetOrigins = integerPointerOrigins(offsetValue);
+                  combined.pointerBases = activePointerBases(pointerSource.pointerBases);
+                  combined.unknownPointerBases = unionUnknownPointerBases(
+                    pointerSource.unknownPointerBases,
+                    offsetOrigins.known,
+                    offsetOrigins.unknown,
+                  );
+                }
               }
               operands.push(combined);
             });
@@ -2200,12 +2705,15 @@ function createRuntimeSession(
             }
             const args: CValue[] = [];
             const argumentPointerBases: ReadonlySet<number>[] = [];
+            const argumentUnknownPointerBases: ReadonlySet<number>[] = [];
             for (const item of evaluated) {
               const argument = materialize(item, at);
               effects = mergeEffects(effects, item, at);
               args.push(argument);
               argumentPointerBases.push(isPointer(argument.type)
                 ? activePointerBases(item.pointerBases) : new Set<number>());
+              argumentUnknownPointerBases.push(isPointer(argument.type)
+                ? activeUnknownPointerBases(item.unknownPointerBases) : new Set<number>());
             }
             effects.pendingWrites.clear();
             let functionIndex = node.functionIndex;
@@ -2240,8 +2748,10 @@ function createRuntimeSession(
             });
             const callArgumentPointerBases = callArgs.map((argument, index) =>
               isPointer(argument.type) ? argumentPointerBases[index] ?? new Set<number>() : new Set<number>());
+            const callArgumentUnknownPointerBases = callArgs.map((argument, index) =>
+              isPointer(argument.type) ? argumentUnknownPointerBases[index] ?? new Set<number>() : new Set<number>());
             if (builtinTarget && functionName) {
-              const runtimeArgs = isFloatingClassificationBuiltin(functionName) ? args : callArgs;
+              const runtimeArgs = isFloatingMathBuiltin(functionName) ? args : callArgs;
               const result = invokeBuiltin(functionName, runtimeArgs, node.type, at, frame);
               if (isBuiltinContinuation(result)) {
                 continueLibraryGenerator(result, effects, at);
@@ -2257,9 +2767,10 @@ function createRuntimeSession(
                 if (!result) failure('ENGINE_STACK_ERROR', 'The call did not produce a result.', at);
                 effects.value = result.value;
                 effects.pointerBases = activePointerBases(result.pointerBases);
+                effects.unknownPointerBases = activeUnknownPointerBases(result.unknownPointerBases);
                 operands.push(effects);
               });
-              invoke(functions[functionIndex], callArgs, at, used, callArgumentPointerBases);
+              invoke(functions[functionIndex], callArgs, at, used, callArgumentPointerBases, callArgumentUnknownPointerBases);
             }
           });
           for (let index = node.args.length - 1; index >= 0; index--) evaluate(node.args[index], frame, depth + 1);
@@ -2335,7 +2846,16 @@ function createRuntimeSession(
         return { type: 'void', value: 0n };
       }
       const library = dispatchLibraryBuiltin(name, args, resultType, libraryContext);
-      if (library) return library;
+      if (library) {
+        if (!isBuiltinContinuation(library) && isInteger(library.type) &&
+            ['atoi', 'atol', 'atoll', 'strtol', 'strtoul', 'strtoll', 'strtoull', 'strtoimax', 'strtoumax'].includes(name)) {
+          const origins = integerPointerOrigins(library);
+          if (!hasIntegerPointerOrigins(origins)) {
+            rememberIntegerPointerBases(library, [], activeRestrictBases.keys());
+          }
+        }
+        return library;
+      }
       if (name === 'malloc') {
         if (args.length !== 1) failure('ARGUMENT_COUNT', 'malloc requires one argument.', at);
         const amount = args[0].value;
@@ -2370,7 +2890,14 @@ function createRuntimeSession(
         if (shouldTraceDelete && reference) commitDebugObjectDelete(reference, at, null, null);
         return { type: 'void', value: 0n };
       }
-      return callBuiltin(name, args, at);
+      return callBuiltin(name, args, at, {
+        writeOutput: (index, value) => {
+          const pointer = args[index];
+          if (!pointer) failure('ENGINE_INTERNAL_ERROR', `Math builtin «${name}» requested a missing output argument.`, at);
+          libraryContext.writeScalar(pointer, value, at);
+        },
+        setErrno: (value) => libraryContext.errno.set(value),
+      });
     }
 
     function defaultArgumentPromotion(value: CValue, at: Location): CValue {
@@ -2386,7 +2913,7 @@ function createRuntimeSession(
       enforceLimit('maxDepth', scopeDepth + 1, limits.maxDepth, layout.location);
       const scopeId = debugEvents ? nextDebugScopeId++ : 0;
       debugEvents?.reserve(layout.location);
-      const runtimeScope: RuntimeScope = { layout, token: {}, scopeId, cells: [], restrictBases: [] };
+      const runtimeScope: RuntimeScope = { layout, token: {}, scopeId, cells: [], vlaTypeKeys: [], restrictBases: [] };
       frame.scopes.push(runtimeScope);
       scopeDepth++;
       debugEvents?.commit({
@@ -2395,6 +2922,7 @@ function createRuntimeSession(
       });
       for (const binding of layout.bindings) {
         if (binding.linkage === 'external' || binding.globalBinding !== undefined) continue;
+        if (!hasPersistentDuration(binding) && hasVariableLengthObjectSize(binding.type)) continue;
         let reference: ObjectReference;
         if (hasPersistentDuration(binding)) {
           const duration = binding.storageDuration === 'thread-local' ? 'thread-local' : 'static';
@@ -2427,13 +2955,29 @@ function createRuntimeSession(
         registerRestrictPointer(runtimeScope, binding, reference);
       }
       if (frame.scopes.length === 1) {
-        frame.compiled.fn.parameters.forEach((parameter, index) => {
+        const parameters = frame.compiled.fn.parameters;
+        const hasVariableLengthParameter = parameters.some((parameter) => parameter.variableLengthBounds?.length);
+        parameters.forEach((parameter, index) => {
           const target = localCell(frame, parameter.binding!, parameter.location);
           const argument = frame.args[index];
           if (!argument) failure('ARGUMENT_COUNT', 'Missing function argument for «' + parameter.name + '».', parameter.location);
-          if (debugEvents) publishAutomaticBinding(frame, runtimeScope, target.binding, target.reference);
-          memory.write(target.reference, valueForType(argument, parameter.type, parameter.location), parameter.location, true);
-          if (isPointer(parameter.type)) setPointerBasesForObject(target.reference, frame.argumentPointerBases?.[index]);
+          const converted = valueForType(argument, parameter.type, parameter.location);
+          memory.write(target.reference, converted, parameter.location, true);
+          if (isPointer(parameter.type)) {
+            setPointerBasesForObject(
+              target.reference,
+              frame.argumentPointerBases?.[index] ?? (typeof converted.value === 'object' && converted.value !== null && converted.value.kind === 'object-pointer'
+                ? pointerValueBases.get(converted.value) : undefined),
+              frame.argumentUnknownPointerBases?.[index] ?? (typeof converted.value === 'object' && converted.value !== null && converted.value.kind === 'object-pointer'
+                ? unknownPointerValueBases.get(converted.value) : undefined),
+            );
+          }
+          if (isInteger(parameter.type)) {
+            setIntegerPointerBasesForObject(target.reference, integerValueBases.get(converted), unknownIntegerValueBases.get(converted));
+          }
+          if (debugEvents && !hasVariableLengthParameter) {
+            publishAutomaticBinding(frame, runtimeScope, target.binding, target.reference);
+          }
         });
       }
     }
@@ -2463,6 +3007,7 @@ function createRuntimeSession(
           if (target && !hasPersistentDuration(target.binding)) memory.release(target.reference, target.binding.location);
           frame.cells.delete(bindingId);
         }
+        for (const type of scope.vlaTypeKeys) frame.vlaLengths.delete(type);
         return;
       }
 
@@ -2485,6 +3030,7 @@ function createRuntimeSession(
           if (target && !hasPersistentDuration(target.binding)) memory.release(target.reference, target.binding.location);
           frame.cells.delete(bindingId);
         }
+        for (const type of scope.vlaTypeKeys) frame.vlaLengths.delete(type);
       } catch (error) {
         let committed = 0;
         for (const reference of uniqueReferences) {
@@ -2522,6 +3068,25 @@ function createRuntimeSession(
     }
     const sameDebugLine = (left: Location | undefined, right: Location): boolean =>
       !!left && left.file === right.file && left.line === right.line;
+    function evaluateParameterBounds(frame: Frame, parameters: readonly Parameter[], index = 0): void {
+      if (index >= parameters.length) return;
+      const parameter = parameters[index];
+      const bindingId = parameter.binding;
+      if (bindingId === undefined) failure('ENGINE_INTERNAL_ERROR', 'A function parameter has no runtime binding.', parameter.location);
+      const target = localCell(frame, bindingId, parameter.location);
+      evaluateVariableBounds(parameter.variableLengthBounds ?? [], frame, parameter.location, () => {
+        const runtimeBinding = hasVariableLengthBound(target.binding.type)
+          ? { ...target.binding, type: resolveVariableType(target.binding.type, frame, parameter.location) }
+          : target.binding;
+        const reference = runtimeBinding !== target.binding && isPointer(runtimeBinding.type)
+          ? memory.retypePointer(target.reference, runtimeBinding.type, parameter.location)
+          : target.reference;
+        if (runtimeBinding !== target.binding) frame.cells.set(bindingId, { binding: runtimeBinding, reference });
+        const owner = frame.scopes[0];
+        if (debugEvents && owner) publishAutomaticBinding(frame, owner, runtimeBinding, reference);
+        evaluateParameterBounds(frame, parameters, index + 1);
+      });
+    }
     function step(frame: Frame): void {
       work.push(() => {
         if (frame.returned || frame.pc >= frame.compiled.code.length) return;
@@ -2562,24 +3127,59 @@ function createRuntimeSession(
         instruction(node.location);
         work.push(() => step(frame));
         if (node.op === 'enter') enter(frame, node.scope);
+        else if (node.op === 'parameterBounds') evaluateParameterBounds(frame, node.parameters);
         else if (node.op === 'leave') leave(frame);
+        else if (node.op === 'typeDeclaration') {
+          evaluateVariableBounds(variableLengthArrayTypes(node.type), frame, node.location, () => {});
+        }
         else if (node.op === 'declaration') {
-          const target = localCell(frame, node.binding, node.location);
-          if (debugEvents && !hasPersistentDuration(target.binding)) {
+          const binding = frame.compiled.fn.bindings[node.binding];
+          if (!binding) failure('ENGINE_INTERNAL_ERROR', 'The declaration has no function binding.', node.location);
+          evaluateVariableBounds(variableLengthArrayTypes(binding.type), frame, node.location, () => {
+            const resolvedType = resolveVariableType(binding.type, frame, node.location);
+            let target = frame.cells.get(node.binding);
             let ownerScope: RuntimeScope | undefined;
             for (let index = frame.scopes.length - 1; index >= 0; index--) {
-              if (frame.scopes[index].cells.includes(node.binding)) {
+              if (frame.scopes[index].layout.bindings.some((candidate) => candidate.id === node.binding)) {
                 ownerScope = frame.scopes[index];
                 break;
               }
             }
             if (!ownerScope) failure('INACTIVE_OBJECT', 'The declaration does not belong to an active scope.', node.location);
-            publishAutomaticBinding(frame, ownerScope, target.binding, target.reference);
-          }
-          if (node.initializer && (!hasPersistentDuration(target.binding) || !initializedStaticBindings.has(target.binding))) {
-            if (hasPersistentDuration(target.binding)) initializedStaticBindings.add(target.binding);
-            initializeObject(target.reference, target.binding.type, node.initializer, frame);
-          }
+            if (target) {
+              if (hasVariableLengthBound(binding.type)) {
+                const reference = isPointer(resolvedType)
+                  ? memory.retypePointer(target.reference, resolvedType, node.location)
+                  : target.reference;
+                target = { binding: { ...target.binding, type: resolvedType }, reference };
+                frame.cells.set(node.binding, target);
+              }
+            } else {
+              const options = {
+                isConst: binding.isConst === true || qualifiersOf(resolvedType).const || binding.qualifiers?.const === true,
+                ...(binding.alignment === undefined ? {} : { alignment: binding.alignment }),
+              };
+              const allocate = () => memory.allocate(resolvedType, 'automatic', binding.location, options);
+              const reference = debugEvents
+                ? allocateDebugObject(allocate, {
+                  duration: 'automatic', origin: 'variable', typeSummary: debugTypeSummary(resolvedType, ir.aggregates),
+                  location: binding.location, frameId: frame.frameId, scopeId: ownerScope.scopeId,
+                  name: binding.name, readOnly: options.isConst,
+                })
+                : allocate();
+              target = { binding: { ...binding, type: resolvedType }, reference };
+              frame.cells.set(node.binding, target);
+              ownerScope.cells.push(node.binding);
+              registerRestrictPointer(ownerScope, target.binding, reference);
+            }
+            if (debugEvents && !hasPersistentDuration(target.binding)) {
+              publishAutomaticBinding(frame, ownerScope, target.binding, target.reference);
+            }
+            if (node.initializer && (!hasPersistentDuration(target.binding) || !initializedStaticBindings.has(target.binding))) {
+              if (hasPersistentDuration(target.binding)) initializedStaticBindings.add(target.binding);
+              initializeObject(target.reference, target.binding.type, node.initializer, frame);
+            }
+          });
         } else if (node.op === 'expression') {
           evaluateFullExpression(node.value, frame, () => {
             const result = operands.pop();
@@ -2594,6 +3194,8 @@ function createRuntimeSession(
             frame.result = value;
             frame.resultPointerBases = result && isPointer(value.type)
               ? activePointerBases(result.pointerBases) : undefined;
+            frame.resultUnknownPointerBases = result && isPointer(value.type)
+              ? activeUnknownPointerBases(result.unknownPointerBases) : undefined;
             frame.returned = true;
           };
           if (node.value) evaluateFullExpression(node.value, frame, consume);
@@ -2621,6 +3223,7 @@ function createRuntimeSession(
       at: Location,
       used = true,
       argumentPointerBases?: readonly ReadonlySet<number>[],
+      argumentUnknownPointerBases?: readonly ReadonlySet<number>[],
     ): void {
       if (!compiled?.fn.body) failure('UNDEFINED_FUNCTION', 'The called function has no definition in this file.', at);
       const parameterCount = compiled.fn.parameters.length;
@@ -2634,7 +3237,8 @@ function createRuntimeSession(
       const frame: Frame = {
         compiled, frameId, args, variadicArgs: args.slice(parameterCount), vaCursorIds: new Set(), temporaryObjects: [],
         ...(argumentPointerBases === undefined ? {} : { argumentPointerBases }),
-        pc: 0, cells: new Map(), scopes: [], returned: false,
+        ...(argumentUnknownPointerBases === undefined ? {} : { argumentUnknownPointerBases }),
+        pc: 0, cells: new Map(), vlaLengths: new Map(), scopes: [], returned: false,
       };
       activeDebugFrames?.push(frame);
       debugEvents?.commit({
@@ -2679,7 +3283,10 @@ function createRuntimeSession(
           else failure('MISSING_RETURN', 'Function «' + compiled.fn.name + '» ends without returning a value.', compiled.fn.location);
         }
         const result = plain(value);
-        if (isPointer(value.type)) result.pointerBases = activePointerBases(frame.resultPointerBases);
+        if (isPointer(value.type)) {
+          result.pointerBases = activePointerBases(frame.resultPointerBases);
+          result.unknownPointerBases = activeUnknownPointerBases(frame.resultUnknownPointerBases);
+        }
         operands.push(result);
       });
       step(frame);
@@ -2698,6 +3305,7 @@ function createRuntimeSession(
       if (!termination || termination.completed) return;
       const handler = termination.pending.pop();
       if (!handler) {
+        if (termination.mode === 'normal') io?.flushAllOutputStreams(at);
         termination.completed = true;
         return;
       }
@@ -2737,10 +3345,12 @@ function createRuntimeSession(
       const next = generator.next(response);
       if (next.done) {
         effects.value = next.value;
-        if (isPointer(next.value.type)) effects.pointerBases = activePointerBases(
-          typeof next.value.value === 'object' && next.value.value !== null && next.value.value.kind === 'object-pointer'
-            ? pointerValueBases.get(next.value.value) : undefined,
-        );
+        if (isPointer(next.value.type)) {
+          const pointer = typeof next.value.value === 'object' && next.value.value !== null && next.value.value.kind === 'object-pointer'
+            ? next.value.value : undefined;
+          effects.pointerBases = activePointerBases(pointer ? pointerValueBases.get(pointer) : undefined);
+          effects.unknownPointerBases = activeUnknownPointerBases(pointer ? unknownPointerValueBases.get(pointer) : undefined);
+        }
         operands.push(effects);
         return;
       }
@@ -2763,12 +3373,15 @@ function createRuntimeSession(
         const argumentBases = request.args.map((argument) =>
           typeof argument.value === 'object' && argument.value !== null && argument.value.kind === 'object-pointer'
             ? activePointerBases(pointerValueBases.get(argument.value)) : new Set<number>());
+        const argumentUnknownBases = request.args.map((argument) =>
+          typeof argument.value === 'object' && argument.value !== null && argument.value.kind === 'object-pointer'
+            ? activeUnknownPointerBases(unknownPointerValueBases.get(argument.value)) : new Set<number>());
         work.push(() => {
           const callbackResult = operands.pop();
           if (!callbackResult) failure('ENGINE_STACK_ERROR', 'The C callback did not produce a result.', at);
           continueLibraryGenerator(generator, effects, at, callbackResult.value);
         });
-        invoke(target, callbackArgs, at, true, argumentBases);
+        invoke(target, callbackArgs, at, true, argumentBases, argumentUnknownBases);
         return;
       }
       if (request.kind === 'register-termination-handler') {
@@ -2847,7 +3460,7 @@ function createRuntimeSession(
     }
     const initializationFrame: Frame = {
       compiled: functions[ir.mainIndex], frameId: null, args: [], variadicArgs: [], vaCursorIds: new Set(), temporaryObjects: [],
-      pc: 0, cells: new Map(), scopes: [], returned: false,
+      pc: 0, cells: new Map(), vlaLengths: new Map(), scopes: [], returned: false,
     };
     const entryFunction = functions[ir.mainIndex];
     if (!entryFunction?.fn.body) failure('UNDEFINED_ENTRY', 'main has no executable definition.', entryFunction?.fn.location ?? location);

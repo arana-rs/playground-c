@@ -3,6 +3,13 @@ import { sameArrayElement } from './arraySnapshots.ts';
 
 type DebugAggregateMemberSnapshot = DebugAggregateSnapshot['members'][number];
 
+/** Detect an anonymous aggregate member without treating unnamed bit-fields as aggregate roots. */
+export function hasAnonymousAggregateMember(aggregate: DebugAggregateSnapshot): boolean {
+  return aggregate.members.some(member => member.name === ''
+    && member.kind === 'unsupported'
+    && member.unsupportedReason === 'aggregate');
+}
+
 /** Compare a bounded aggregate DTO, including visible member values and padding extents. */
 export function sameMemoryViewerAggregateSnapshot(
   left: DebugAggregateSnapshot,

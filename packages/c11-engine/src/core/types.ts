@@ -1,6 +1,7 @@
 import { STDIO_FUNCTIONS, STDIO_MACROS } from './stdio-metadata.ts';
 import { ERRNO_MACROS } from './errno-metadata.ts';
 import { STDLIB_FUNCTIONS, STDLIB_MACROS, TIME_FUNCTIONS, TIME_MACROS } from './stdlib-time-metadata.ts';
+import { MATH_CLASSIFICATION_FUNCTIONS, MATH_COMPARISON_MACROS, MATH_FUNCTIONS } from './math-metadata.ts';
 
 export interface SourceFile { readonly name: string; readonly source: string }
 /** A virtual project. `files` contains translation units and headers; only names
@@ -181,8 +182,8 @@ export interface DebugStaticObjectInspectionOptions {
   /** Include full C-escaped string-literal previews; defaults to true for compatibility. */
   readonly includeStringLiterals?: boolean;
 }
-/** One arithmetic cell in a bounded one-dimensional array inspection. */
-export interface DebugArrayElementSnapshot {
+/** Shared data for one cell in a bounded one-dimensional array inspection. */
+interface DebugArrayElementSnapshotBase {
   /** Stable within the allocation; `${rootId}:${index}`. */
   readonly key: string;
   readonly index: number;
@@ -190,11 +191,27 @@ export interface DebugArrayElementSnapshot {
   readonly address: string;
   readonly type: string;
   readonly initialized: boolean;
-  /** Engine-formatted scalar value, or `?` when the element is indeterminate. */
+  /** Engine-formatted scalar or pointer value, or `?` when the element is indeterminate. */
   readonly displayValue: string;
-  /** True when `displayValue` was shortened by `maxValueChars`. */
+  /** True when an arithmetic value was shortened by `maxValueChars`; pointer addresses are never truncated. */
   readonly valueTruncated: boolean;
 }
+/** One arithmetic cell or pointer value in a bounded one-dimensional array inspection. */
+export type DebugArrayElementSnapshot = DebugArrayElementSnapshotBase & (
+  | {
+    /** Omitted on arithmetic cells to preserve their existing serialized shape. */
+    readonly kind?: undefined;
+    readonly pointerStatus?: undefined;
+    readonly target?: undefined;
+  }
+  | {
+    readonly kind: 'pointer';
+    /** Pointer state and destination identity reuse the scalar pointer inspector's semantics. */
+    readonly pointerStatus: DebugPointerStatus;
+    /** Direct destination identity only; the inspector never follows or reads it. */
+    readonly target?: DebugPointerTargetSnapshot;
+  }
+);
 export type DebugArrayStatus = 'available' | 'too-many-elements' | 'multidimensional' | 'unsupported-element-type';
 /** One observed declared array or string literal; descriptors remain visible when cells are unsupported. */
 export interface DebugArraySnapshot {
@@ -365,7 +382,7 @@ export interface DebugExecutionSession {
   inspectPointers(): readonly DebugPointerSnapshot[];
   /** Inspect observed static arithmetic objects and string literals without reading or changing VM state. */
   inspectStaticObjects(options?: DebugStaticObjectInspectionOptions): readonly DebugStaticObjectSnapshot[];
-  /** Inspect bounded one-dimensional arithmetic arrays and observed string-literal characters without changing VM state. */
+  /** Inspect bounded one-dimensional arithmetic or pointer arrays and observed string-literal characters without changing VM state. */
   inspectArrays(): DebugArrayInspection;
   /** Inspect bounded direct struct members and opaque union roots without reading C values. */
   inspectAggregates(): DebugAggregateInspection;
@@ -385,15 +402,18 @@ export const TARGET_PROFILE = Object.freeze({
   signedRightShift: 'arithmetic', floatEvaluationMethod: 0,
 });
 export const CAPABILITIES = Object.freeze({
-  phase: 'P5', cStandard: 'C11', completeC11: false, entry: 'int main(void), int main(), or int main(int, char **)',
+  phase: 'P6', cStandard: 'C11', completeC11: false, entry: 'int main(void), int main(), or int main(int, char **)',
   integerTypes: Object.freeze(['_Bool', 'char', 'signed char', 'unsigned char', 'short', 'unsigned short', 'int', 'unsigned int', 'long', 'unsigned long', 'long long', 'unsigned long long']),
   floatingTypes: Object.freeze(['float', 'double', 'long double']),
   pointerTypes: Object.freeze(['object-pointers', 'function-pointers', 'void-pointer-conversions', 'null-pointer-constants']),
   objectTypes: Object.freeze(['arrays', 'structs', 'unions', 'compound-literals', 'file-scope-objects']),
+  stringLiteralProfile: 'char-arrays-with-terminator; narrow-UCNs-encode-as-UTF-8; u8-raw-Unicode-and-UCNs-encode-as-UTF-8; ordinary-raw-non-ASCII-and-wide-literal-prefixes-unsupported',
+  characterConstantProfile: 'single-byte-values-use-signed-char-profile; multicharacter-bytes-pack-left-to-right-into-int-low-32-bits',
+  variableLengthArrays: 'captured-runtime-bounds; dynamic-sizeof-for-array-operands-and-type-names; nested-dimensions; typedefs; adjusted-parameters; pointer-to-VLA-strides; scoped-lifetimes',
   enumerations: 'distinct-enum-types-with-int-compatible-representation-int-promotions-int-enumerators-and-integer-constant-expressions-in-int-range',
   aggregateMembers: Object.freeze(['named', 'anonymous-struct', 'anonymous-union', 'bit-fields', 'flexible-array-members']),
   qualifiers: Object.freeze(['const', 'volatile', 'restrict']),
-  restrictProfile: 'observed dynamic diagnostics cover independent restrict bases and modified restrict/plain overlaps; same-chain derivations, read-only/no-access cases and disjoint subobjects are accepted; bytewise/library overlap is not analyzed and unknown provenance is conservative',
+  restrictProfile: 'observed dynamic diagnostics cover independent restrict bases and modified restrict/plain overlaps across typed, byte-wise and library accesses; same-chain derivations, common pointer/integer round-trips, read-only/no-access cases, disjoint subobjects and distinct bit-fields are accepted; arbitrary integer transformations and values parsed from library text can have unresolved provenance, producing RESTRICT_PROVENANCE_UNKNOWN only after an observed modified overlap',
   operators: Object.freeze(['+', '-', '*', '/', '%', '<<', '>>', '&', '^', '|', '~', '!', '<', '<=', '>', '>=', '==', '!=', '&&', '||', '?:', ',', '=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '^=', '|=', '++', '--', 'cast', 'sizeof', '[]', '.', '->', '&address', 'pointer-difference', '_Generic', '_Alignas', '_Alignof', '_Static_assert', 'offsetof']),
   statements: Object.freeze(['block', 'declaration', 'expression', 'return', 'empty', 'if', 'switch', 'while', 'do', 'for', 'break', 'continue', 'goto', 'label', 'static-assert']),
   genericSelection: true,
@@ -445,7 +465,7 @@ export const CAPABILITIES = Object.freeze({
   }),
   stdioFunctions: STDIO_FUNCTIONS,
   stdioMacros: STDIO_MACROS,
-  stdioBufferingProfile: 'synchronous-output; setvbuf accepts _IONBF and rejects _IOFBF/_IOLBF; setbuf is a no-op',
+  stdioBufferingProfile: 'default-_IONBF-immediate-output; setvbuf-supports-_IOFBF-_IOLBF-_IONBF-before-stream-operation; buffered-modes-require-positive-representable-capacity; caller-buffer-range-validated-but-engine-owns-internal-queue; setbuf-nonnull-selects-_IOFBF-and-null-selects-_IONBF; flush-on-capacity-newline-before-stdin-read-fflush-close-reposition-and-normal-return-or-exit-after-atexit; quick_exit-_Exit-abort-runtime-errors-and-cancellation-do-not-auto-flush',
   stdioFileProfile: 'virtual files only; tmpfile is deleted on close or termination; tmpnam uses a per-execution reusable buffer; fpos_t is long byte offset',
   interactiveStdinFunctions: Object.freeze(['scanf', 'fscanf', 'getchar', 'getc', 'fgetc', 'fgets', 'fread']),
   debugSession: Object.freeze({
@@ -457,6 +477,7 @@ export const CAPABILITIES = Object.freeze({
       liveAutomaticScalars: true, liveStaticScalars: true, stringLiteralContents: true,
       liveHeapAllocations: true,
       oneDimensionalArithmeticArrays: 'bounded-by-debug-session-options',
+      oneDimensionalPointerArrays: 'bounded-by-debug-session-options-and-default-array-cell-maximum; direct-pointer-status-and-target-identity',
       stringLiteralCharacters: 'bounded-by-debug-session-options',
       aggregates: 'bounded-direct-struct-members; unions-opaque',
       pointers: 'basic-identity-aware-binding-snapshots',
@@ -464,14 +485,20 @@ export const CAPABILITIES = Object.freeze({
     }),
     history: false, reverseExecution: false,
   }),
-  stdioFormatLimitations: Object.freeze(['printf floating precision cap: 100 decimal / 100000 hexadecimal digits']),
+  stdioFormatLimitations: Object.freeze(['printf hexadecimal precision cap: 100000 digits']),
   stringFunctions: Object.freeze(['memcpy', 'memmove', 'memset', 'memcmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp', 'strchr', 'strrchr', 'strspn', 'strcspn', 'strpbrk', 'strstr', 'strtok', 'strlen', 'strerror']),
   ctypeFunctions: Object.freeze(['isalnum', 'isalpha', 'isblank', 'iscntrl', 'isdigit', 'isgraph', 'islower', 'isprint', 'ispunct', 'isspace', 'isupper', 'isxdigit', 'tolower', 'toupper']),
   inttypesFunctions: Object.freeze(['imaxabs', 'imaxdiv', 'strtoimax', 'strtoumax']),
-  mathFunctions: Object.freeze([
-    ...['sqrt', 'fabs', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh', 'asinh', 'acosh', 'atanh', 'exp', 'exp2', 'expm1', 'log', 'log2', 'log10', 'log1p', 'floor', 'ceil', 'trunc', 'round', 'cbrt', 'fmod', 'pow', 'atan2', 'hypot', 'fmin', 'fmax', 'fdim', 'copysign'].flatMap((name) => [name, `${name}f`]),
-    'isnan', 'isinf', 'isfinite', 'isnormal', 'signbit', 'fpclassify',
+  mathFunctions: MATH_FUNCTIONS,
+  mathClassificationMacros: MATH_CLASSIFICATION_FUNCTIONS,
+  mathComparisonMacros: MATH_COMPARISON_MACROS,
+  mathTypes: Object.freeze(['float_t', 'double_t']),
+  mathConstants: Object.freeze([
+    'INFINITY', 'HUGE_VAL', 'HUGE_VALF', 'HUGE_VALL', 'NAN', 'FP_NAN', 'FP_INFINITE',
+    'FP_ZERO', 'FP_SUBNORMAL', 'FP_NORMAL', 'FP_ILOGB0', 'FP_ILOGBNAN',
+    'MATH_ERRNO', 'MATH_ERREXCEPT', 'math_errhandling',
   ]),
+  mathErrorHandling: 'MATH_ERRNO-only; domain errors set EDOM; pole and range errors set ERANGE; floating-point exception flags are not exposed',
 });
 export const DEFAULT_PREPARE_LIMITS: Readonly<PrepareLimits> = Object.freeze({ maxSourceChars: 1_000_000, maxTokens: 200_000, maxPreprocessSteps: 5_000_000, maxDepth: 128 });
 export const DEFAULT_EXECUTE_LIMITS: Readonly<ExecuteLimits> = Object.freeze({ maxInstructions: 1_000_000, maxMemoryBytes: 16 * 1024 * 1024, maxIOBytes: 4 * 1024 * 1024, maxDepth: 128 });

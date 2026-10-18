@@ -37,10 +37,13 @@ The console sits below the editor, separated by a fine line and a resizable divi
 ## Memory Viewer
 
 Regions appear in the order Static → Stack → Heap. Static and Heap keep their lists, and Stack grows horizontally to the right. Scopes appear when entered and progress from left to right, oldest to newest. The current scope uses the yellow from `--mark-active`; active ancestor scopes use a paler shade. Scopes that exit may retain a temporary indicator while their removed objects are shown.
+The active body scope of a `for` loop uses a subdued gray marker, including while it is current.
 
 Hide only the visual marker for the root scope of `main`, which serves as the entry point. Preserve its variables, pointers, arrays, and structs; also preserve markers and data for its nested scopes and for other functions. The root scope's accessible identity must remain available even when its marker is not drawn.
 
 The viewer retains Minimal, Normal, and Debug modes and Previous/Next history. Addresses and values use monospace type; metadata has lower visual priority. Change, pointer target, initialization, and scope-exit cues must remain clearly legible, including when focused, and must not rely on color alone. Cell sizes and inspection limits remain those defined by the code and engine API.
+
+Aggregate roots retain their name, type, address, and size metadata. Unions, structs with more than ten direct members, and structs with anonymous direct members use one root-level placeholder. In other structs, numeric, character, and enum fields show their values; pointer, array, flexible-array, and nested aggregate fields use individual placeholders. Arrays whose elements are aggregates remain unsupported; future support should show a placeholder labeled with each struct field's type inside each array element. Standalone pointers keep their address, status, and target behavior. Pointer elements in supported arrays use the same pointer states, with each cell's storage address shown separately from the stored address. Pointer targets resolve only to displayed aggregate roots, scalar fields, or visible cells in supported arrays.
 
 ## References
 

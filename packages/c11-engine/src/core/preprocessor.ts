@@ -4,7 +4,7 @@ import { EngineFailure, failure, enforceLimit } from './internal.ts';
 import type { Location, Token } from './internal.ts';
 import { lexPreprocessingToken } from './lexer.ts';
 import type { EngineMetrics, PrepareLimits, SourceProject } from './types.ts';
-import { parseLiteral } from './numeric.ts';
+import { encodeUtf8Bytes, parseLiteral } from './numeric.ts';
 
 export interface PreprocessedUnit {
   readonly name: string;
@@ -164,13 +164,6 @@ function decodeIdentifier(spelling: string, at: Location): string {
   return spelling.replace(/\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8}/g, (match) => String.fromCodePoint(universalValue(match, at)!));
 }
 
-function utf8Bytes(codePoint: number): number[] {
-  if (codePoint <= 0x7f) return [codePoint];
-  if (codePoint <= 0x7ff) return [0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f)];
-  if (codePoint <= 0xffff) return [0xe0 | (codePoint >> 12), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f)];
-  return [0xf0 | (codePoint >> 18), 0x80 | ((codePoint >> 12) & 0x3f), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f)];
-}
-
 function translateLiteralUCNs(text: string, at: Location): string {
   const prefix = /^(?:u8|[LuU])?/.exec(text)![0];
   const quote = text[prefix.length];
@@ -178,11 +171,19 @@ function translateLiteralUCNs(text: string, at: Location): string {
   const body = text.slice(prefix.length + 1, -1);
   let translated = '';
   for (let index = 0; index < body.length;) {
+    // The second slash in an escaped backslash is not the start of a UCN.
+    if (body[index] === '\\' && body[index + 1] === '\\') {
+      translated += body.slice(index, index + 2);
+      index += 2;
+      continue;
+    }
     const match = /^\\u[0-9a-fA-F]{4}|^\\U[0-9a-fA-F]{8}/.exec(body.slice(index));
     if (!match) { translated += body[index++]; continue; }
     const codePoint = universalValue(match[0], at)!;
     if (quote === "'" && codePoint > 0x7f) preprocessError('The 8-bit char profile cannot represent a non-ASCII UCN in a character constant.', at, 'UNSUPPORTED_FEATURE');
-    translated += utf8Bytes(codePoint).map((byte) => `\\x${byte.toString(16).toUpperCase()}`).join('');
+    // Fixed-width octal escapes keep the next source character from extending
+    // the byte value, as can happen with a variable-width hexadecimal escape.
+    translated += encodeUtf8Bytes(codePoint).map((byte) => `\\${byte.toString(8).padStart(3, '0')}`).join('');
     index += match[0].length;
   }
   return `${prefix}${quote}${translated}${quote}`;
@@ -329,7 +330,7 @@ function predefinedMacros(at: Location, dateText: string, timeText: string): Map
   const macros = new Map<string, Macro>();
   const fixed: Record<string, string> = {
     __STDC__: '1', __STDC_VERSION__: '201112L', __STDC_HOSTED__: '1',
-    __STDC_NO_VLA__: '1', __STDC_NO_COMPLEX__: '1', __STDC_NO_ATOMICS__: '1', __STDC_NO_THREADS__: '1',
+    __STDC_NO_COMPLEX__: '1', __STDC_NO_ATOMICS__: '1', __STDC_NO_THREADS__: '1',
     __DATE__: quoteC(dateText), __TIME__: quoteC(timeText),
   };
   for (const [name, value] of Object.entries(fixed)) {
@@ -374,7 +375,7 @@ function stringifyArgument(tokens: readonly PPToken[], at: Location, leadingSpac
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
     if (index && token.leadingSpace) contents += ' ';
-    contents += token.text;
+    contents += token.spelling;
   }
   const escaped = contents.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const text = `"${escaped}"`;
@@ -685,7 +686,7 @@ class TranslationPreprocessor {
     if (directive === 'line') {
       const expanded = this.expand(rest);
       const number = expanded[0];
-      if (!number || number.kind !== 'number' || !/^(?:0|[1-9][0-9]*)$/.test(number.text) || expanded.length > 2) preprocessError('#line requires a positive decimal number and an optional file name.', number?.at ?? at);
+      if (!number || number.kind !== 'number' || !/^[0-9]+$/.test(number.text) || expanded.length > 2) preprocessError('#line requires a positive decimal number and an optional file name.', number?.at ?? at);
       const requested = BigInt(number.text);
       if (requested < 1n || requested > 2147483647n) preprocessError('#line must be between 1 and 2147483647.', number.at);
       let logicalFile = at.file;

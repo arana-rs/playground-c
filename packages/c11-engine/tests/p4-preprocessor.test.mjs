@@ -1,13 +1,37 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execute, prepare } from '../dist/core/index.js';
-import { executeTerminated, fixtureProject, prepareProject } from './p4-test-helpers.mjs';
+import { decodeBytes, executeTerminated, fixtureProject, prepareProject } from './p4-test-helpers.mjs';
 
 test('object, function and variadic macros rescan tokens, stringify, paste and honor undef', () => {
   const project = fixtureProject('preprocessor', 'main.c', [
     'main.c', 'include/value.h', 'include/nested/config.h',
   ]);
   executeTerminated(execute, prepareProject(prepare, project));
+});
+
+test('stringification preserves UCN spelling while literal UCNs and escapes still translate', () => {
+  const program = prepareProject(prepare, {
+    entry: 'main.c',
+    files: [{
+      name: 'main.c',
+      source: [
+        '#include <stdio.h>',
+        '#define STRINGIFY(value) #value',
+        'int main(void) {',
+        '    puts(STRINGIFY(\\u00E9));',
+        '    puts(STRINGIFY("\\u00E9"));',
+        '    puts(STRINGIFY("\\\\u00E9"));',
+        '    puts(STRINGIFY(alpha   beta));',
+        '    puts("\\u00E9");',
+        '    return 0;',
+        '}',
+      ].join('\n'),
+    }],
+  });
+
+  const result = executeTerminated(execute, program, undefined, 0);
+  assert.equal(decodeBytes(result.stdout), '\\u00E9\n"\\u00E9"\n"\\\\u00E9"\nalpha beta\né\n');
 });
 
 test('trigraphs, line splicing, universal character names and adjacent strings translate before parsing', () => {
@@ -24,6 +48,40 @@ test('trigraphs, line splicing, universal character names and adjacent strings t
 test('line controls update predefined file and line macros', () => {
   const program = prepareProject(prepare, fixtureProject('preprocessor', 'builtin-macros.c'));
   executeTerminated(execute, program);
+});
+
+test('#line accepts leading-zero decimal digits and preserves expanded provenance', () => {
+  const direct = prepareProject(prepare, {
+    entry: 'main.c',
+    files: [{
+      name: 'main.c',
+      source: '#line 0007\nint main(void) { return __LINE__ == 7 ? 0 : 1; }\n',
+    }],
+  });
+  executeTerminated(execute, direct, undefined, 0);
+
+  const expanded = prepare({
+    entry: 'main.c',
+    files: [{
+      name: 'main.c',
+      source: '#define TARGET_LINE 0009\n#line TARGET_LINE "synthetic/expanded.c"\n#error expanded line provenance',
+    }],
+  });
+  assert.equal(expanded.kind, 'prepare-error', JSON.stringify(expanded));
+  assert.equal(expanded.diagnostics[0].file, 'synthetic/expanded.c');
+  assert.equal(expanded.diagnostics[0].line, 9);
+  assert.match(expanded.diagnostics[0].message, /expanded line provenance/);
+});
+
+test('#line still rejects zero and values above its supported range', () => {
+  for (const number of ['0000', '2147483648']) {
+    const result = prepare({
+      entry: 'main.c',
+      files: [{ name: 'main.c', source: `#line ${number}\nint main(void) { return 0; }` }],
+    });
+    assert.equal(result.kind, 'prepare-error', `#line ${number} should be rejected`);
+    assert.match(result.diagnostics[0].message, /#line must be between 1 and 2147483647/);
+  }
 });
 
 test('#error diagnostics retain #line file and line provenance', () => {

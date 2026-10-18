@@ -5,11 +5,13 @@ import type {
   DebugScalarSnapshot,
   DebugStaticObjectSnapshot,
 } from '@playground/c11-engine/core';
+import { hasAnonymousAggregateMember } from './aggregateSnapshots.ts';
 
 type DebugScalarObjectSnapshot = DebugScalarSnapshot | DebugStaticObjectSnapshot;
 
 export type MemoryViewerPointerIdentity =
   | { readonly kind: 'object-pointer'; readonly id: number }
+  | { readonly kind: 'array-element-pointer'; readonly rootId: number; readonly index: number }
   | { readonly kind: 'aggregate-member-pointer'; readonly rootId: number; readonly memberKey: string };
 
 export type MemoryViewerPointerTarget =
@@ -37,6 +39,13 @@ export function memoryViewerPointerIdentity(pointer: DebugPointerSnapshot): Memo
   return { kind: 'object-pointer', id: pointer.id };
 }
 
+export function memoryViewerArrayElementPointerIdentity(
+  rootId: number,
+  index: number,
+): MemoryViewerPointerIdentity {
+  return { kind: 'array-element-pointer', rootId, index };
+}
+
 export function memoryViewerAggregateMemberPointerIdentity(
   aggregate: DebugAggregateSnapshot,
   memberKey: string,
@@ -47,7 +56,9 @@ export function memoryViewerAggregateMemberPointerIdentity(
 export function memoryViewerPointerIdentityKey(identity: MemoryViewerPointerIdentity): string {
   return identity.kind === 'object-pointer'
     ? `pointer:${identity.id}`
-    : `aggregate-pointer:${identity.rootId}:${identity.memberKey}`;
+    : identity.kind === 'array-element-pointer'
+      ? `array-pointer:${identity.rootId}:${identity.index}`
+      : `aggregate-pointer:${identity.rootId}:${identity.memberKey}`;
 }
 
 export function sameMemoryViewerPointerIdentity(
@@ -137,14 +148,20 @@ export function resolveMemoryViewerPointerTarget(
   const pointer = identity.kind === 'object-pointer'
     ? pointers.find(candidate => candidate.id === identity.id)
     : undefined;
+  const arrayElementPointer = identity.kind === 'array-element-pointer'
+    ? arrays.find(array => array.rootId === identity.rootId)
+      ?.elements.find(element => element.index === identity.index
+        && element.key === `${identity.rootId}:${identity.index}`
+        && element.kind === 'pointer')
+    : undefined;
   const aggregatePointer = identity.kind === 'aggregate-member-pointer'
     ? aggregates.find(aggregate => aggregate.rootId === identity.rootId)
       ?.members.find(member => member.key === identity.memberKey && member.kind === 'pointer')
     : undefined;
-  const pointerStatus = pointer?.status ?? aggregatePointer?.pointerStatus;
-  const pointerInitialized = pointer?.initialized ?? aggregatePointer?.initialized;
-  const target = pointer?.target ?? aggregatePointer?.target;
-  if ((!pointer && !aggregatePointer) || pointerStatus !== 'live' || pointerInitialized !== true || !target
+  const pointerStatus = pointer?.status ?? arrayElementPointer?.pointerStatus ?? aggregatePointer?.pointerStatus;
+  const pointerInitialized = pointer?.initialized ?? arrayElementPointer?.initialized ?? aggregatePointer?.initialized;
+  const target = pointer?.target ?? arrayElementPointer?.target ?? aggregatePointer?.target;
+  if ((!pointer && !arrayElementPointer && !aggregatePointer) || pointerStatus !== 'live' || pointerInitialized !== true || !target
     || !Number.isSafeInteger(target.byteOffset) || target.byteOffset < 0) {
     return null;
   }
@@ -197,10 +214,12 @@ export function resolveMemoryViewerPointerTarget(
     };
   }
   const targetAddress = rootAddress + BigInt(target.byteOffset);
-  const member = targetAggregate.members.find(candidate => candidate.kind !== 'unsupported'
+  const member = targetAggregate.status === 'available' && !hasAnonymousAggregateMember(targetAggregate)
+    ? targetAggregate.members.find(candidate => candidate.kind === 'arithmetic'
     && candidate.offset === target.byteOffset
     && candidate.type === target.type
-    && parseExactAddress(candidate.address) === targetAddress);
+    && parseExactAddress(candidate.address) === targetAddress)
+    : undefined;
   if (!member) return null;
   return {
     kind: 'aggregate-field',

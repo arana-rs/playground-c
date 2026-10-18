@@ -3,10 +3,7 @@
 #include <string.h>
 
 int main(void) {
-  if (setvbuf(stdout, 0, _IONBF, 0) != 0) return 1;
-  if (setvbuf(stdout, 0, _IOFBF, BUFSIZ) == 0) return 2;
-  if (setvbuf(stdout, 0, _IOLBF, BUFSIZ) == 0) return 3;
-  setbuf(stdout, 0);
+  if (setvbuf(stdout, 0, _IOFBF, BUFSIZ) != 0) return 1;
 
   FILE *input = freopen("stdin.dat", "r", stdin);
   if (input != stdin || getchar() != '4') return 4;

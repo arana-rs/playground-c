@@ -19,16 +19,20 @@ import type {
   MemoryViewerActiveScope,
   MemoryViewerLifecycleBatch,
 } from './useMemoryViewer.ts';
-import { MEMORY_VIEWER_SCOPE_NAME_MAX_CHARACTERS, truncateMemoryViewerScopeName } from './scopeName.ts';
+import {
+  MEMORY_VIEWER_SCOPE_NAME_MAX_CHARACTERS,
+  isForBodyMemoryViewerScope,
+  truncateMemoryViewerScopeName,
+} from './scopeName.ts';
 import { truncateMemoryViewerScalarValue } from './scalarValue.ts';
 import {
   filterMemoryViewerStaticScalars,
   findMemoryViewerChangedArrayElementKeys,
 } from './arraySnapshots.ts';
-import { findMemoryViewerChangedAggregateMemberKeys } from './aggregateSnapshots.ts';
+import { findMemoryViewerChangedAggregateMemberKeys, hasAnonymousAggregateMember } from './aggregateSnapshots.ts';
 import {
   findMemoryViewerChangedPointerIds,
-  memoryViewerAggregateMemberPointerIdentity,
+  memoryViewerArrayElementPointerIdentity,
   memoryViewerPointerIdentityKey,
   memoryViewerPointerIdentity,
   resolveMemoryViewerPointerTarget,
@@ -126,7 +130,7 @@ interface MemoryViewerCardRecord {
   readonly arrayElementIndex: number | null;
   readonly aggregateMemberKey: string | null;
   readonly aggregateMemberName: string | null;
-  readonly aggregateUnsupportedReason?: DebugAggregateSnapshot['members'][number]['unsupportedReason'];
+  readonly aggregateUnsupportedReason?: DebugAggregateSnapshot['members'][number]['unsupportedReason'] | 'pointer';
   readonly address: string;
   readonly size: number;
   readonly origin: string;
@@ -347,8 +351,7 @@ function pointerCardRecord(
   isPointerTarget: boolean,
   t: Translate,
 ): MemoryViewerCardRecord {
-  const isUninitialized = !pointer.initialized || pointer.status === 'uninitialized';
-  const valueTitle = pointerValueTitle(pointer, t);
+  const pointerValue = pointerCardValueRecord(pointer, t);
   return {
     id: pointer.id,
     arrayElementKey: null,
@@ -361,12 +364,7 @@ function pointerCardRecord(
     duration: pointer.duration,
     label: pointer.name,
     typeLabel: pointer.type,
-    valueTitle,
-    uninitializedVisualLabel: isUninitialized ? t('memoryViewer.uninitialized') : undefined,
-    valueContent: isUninitialized
-      ? '—'
-      : pointer.status === 'null' ? 'NULL' : truncateMemoryViewerScalarValue(pointer.displayValue),
-    initialized: !isUninitialized,
+    ...pointerValue,
     valueChanged,
     isParameter: pointer.origin === 'parameter',
     isStringLiteral: false,
@@ -374,8 +372,27 @@ function pointerCardRecord(
     isArrayElement: false,
     isPointer: true,
     isPointerTarget,
-    pointerStatus: pointer.status,
     pointerIdentity: memoryViewerPointerIdentity(pointer),
+  };
+}
+
+function pointerCardValueRecord(pointer: {
+  readonly initialized: boolean | null;
+  readonly status: DebugPointerSnapshot['status'] | undefined;
+  readonly displayValue: string;
+  readonly target?: DebugPointerSnapshot['target'];
+}, t: Translate): Pick<MemoryViewerCardRecord,
+  'valueTitle' | 'uninitializedVisualLabel' | 'valueContent' | 'initialized' | 'pointerStatus'> {
+  const isUninitialized = !pointer.initialized || pointer.status === 'uninitialized';
+  const valueTitle = pointerValueTitle(pointer, t);
+  return {
+    valueTitle,
+    uninitializedVisualLabel: isUninitialized ? t('memoryViewer.uninitialized') : undefined,
+    valueContent: isUninitialized
+      ? '—'
+      : pointer.status === 'null' ? 'NULL' : truncateMemoryViewerScalarValue(pointer.displayValue),
+    initialized: !isUninitialized,
+    pointerStatus: pointer.status ?? null,
   };
 }
 
@@ -388,6 +405,7 @@ function arrayElementContent(elementType: string, displayValue: string): string 
 }
 
 interface MemoryViewerArrayElementCardContext {
+  readonly rootId: number;
   readonly name: string;
   readonly origin: string;
   readonly duration: MemoryViewerCardRecord['duration'];
@@ -401,12 +419,21 @@ function arrayElementCardRecord(
   t: Translate,
   isPointerTarget = false,
 ): MemoryViewerCardRecord {
-  const valueTitle = element.initialized
+  const isPointer = element.kind === 'pointer';
+  const pointerValue = isPointer
+    ? pointerCardValueRecord({
+      initialized: element.initialized,
+      status: element.pointerStatus,
+      displayValue: element.displayValue,
+      target: element.target,
+    }, t)
+    : null;
+  const valueTitle = pointerValue?.valueTitle ?? (element.initialized
     ? element.valueTruncated ? t('memoryViewer.truncatedValue', { value: element.displayValue }) : element.displayValue
-    : t('memoryViewer.uninitialized');
-  const valueContent = element.initialized
+    : t('memoryViewer.uninitialized'));
+  const valueContent = pointerValue?.valueContent ?? (element.initialized
     ? truncateMemoryViewerScalarValue(arrayElementContent(element.type, element.displayValue))
-    : '—';
+    : '—');
   return {
     id: null,
     arrayElementKey: element.key,
@@ -419,18 +446,22 @@ function arrayElementCardRecord(
     duration: array.duration,
     label: `${array.name}[${element.index}]`,
     typeLabel: element.type,
+    ...pointerValue,
     valueTitle,
     valueContent,
-    initialized: element.initialized,
+    initialized: pointerValue?.initialized ?? element.initialized,
+    uninitializedVisualLabel: pointerValue?.uninitializedVisualLabel,
     valueChanged,
     isParameter: false,
     isStringLiteral: array.origin === 'string-literal',
     isHeapBlock: false,
     isArrayElement: true,
-    isPointer: false,
+    isPointer,
     isPointerTarget,
-    pointerStatus: null,
-    pointerIdentity: null,
+    pointerStatus: pointerValue?.pointerStatus ?? null,
+    pointerIdentity: isPointer
+      ? memoryViewerArrayElementPointerIdentity(array.rootId, element.index)
+      : null,
   };
 }
 
@@ -545,7 +576,8 @@ function MemoryViewerScalarCard({
           <span className="memory-viewer-aggregate-member-placeholder" title={record.valueTitle}>
             {record.aggregateUnsupportedReason === 'array'
               ? 'array'
-              : record.aggregateUnsupportedReason === 'flexible-array' ? 'FAM' : 'aggregate'}
+              : record.aggregateUnsupportedReason === 'flexible-array' ? 'FAM'
+                : record.aggregateUnsupportedReason === 'pointer' ? 'pointer' : 'aggregate'}
           </span>
         ) : record.valueContent}
         {record.valueChanged && <span className="memory-viewer-scalar-change-marker" aria-hidden="true">Δ</span>}
@@ -576,6 +608,8 @@ interface MemoryViewerArrayBlockProps {
   pointerTargetElementKey?: string | null;
   exiting?: boolean;
   fading?: boolean;
+  onPointerHoverChange?: (pointerIdentity: MemoryViewerPointerIdentity, isHovered: boolean) => void;
+  onPointerFocusChange?: (pointerIdentity: MemoryViewerPointerIdentity, isFocused: boolean) => void;
 }
 
 function arrayStatusMessage(array: DebugArraySnapshot, t: Translate): string | null {
@@ -587,12 +621,14 @@ function arrayStatusMessage(array: DebugArraySnapshot, t: Translate): string | n
   }
 }
 
-function MemoryViewerArrayBlock({
+export function MemoryViewerArrayBlock({
   array,
   changedElementKeys,
   pointerTargetElementKey = null,
   exiting = false,
   fading = false,
+  onPointerHoverChange,
+  onPointerFocusChange,
 }: MemoryViewerArrayBlockProps) {
   const { t } = useI18n();
   const name = array.name ?? t('memoryViewer.stringLiteral');
@@ -626,6 +662,7 @@ function MemoryViewerArrayBlock({
                 <MemoryViewerScalarCard
                   record={arrayElementCardRecord(
                     {
+                      rootId: array.rootId,
                       name: array.name ?? t('memoryViewer.stringLiteral'),
                       origin: array.origin,
                       duration: array.duration,
@@ -636,6 +673,8 @@ function MemoryViewerArrayBlock({
                     t,
                     element.key === pointerTargetElementKey,
                   )}
+                  onPointerHoverChange={onPointerHoverChange}
+                  onPointerFocusChange={onPointerFocusChange}
                 />
                 <span
                   className="memory-viewer-scalar-address memory-viewer-array-cell-address"
@@ -678,55 +717,47 @@ function aggregateMemberCardRecord(
   t: Translate,
 ): MemoryViewerCardRecord {
   const isPointer = member.kind === 'pointer';
-  const isUninitialized = member.initialized === false || member.pointerStatus === 'uninitialized';
-  const reasonLabel = member.unsupportedReason === 'array'
-    ? t('memoryViewer.pendingArrayField')
-    : member.unsupportedReason === 'flexible-array' ? t('memoryViewer.flexibleArrayMember') : t('memoryViewer.pendingAggregateField');
+  const isUnsupported = member.kind === 'unsupported' || isPointer;
+  const isUninitialized = !isUnsupported && (member.initialized === false || member.pointerStatus === 'uninitialized');
+  const reasonLabel = isPointer
+    ? t('memoryViewer.pendingPointerField')
+    : member.unsupportedReason === 'array'
+      ? t('memoryViewer.pendingArrayField')
+      : member.unsupportedReason === 'flexible-array' ? t('memoryViewer.flexibleArrayMember') : t('memoryViewer.pendingAggregateField');
   const bitRange = member.bitWidth === undefined || member.bitOffset === undefined
     ? null
     : `${member.bitOffset}–${member.bitOffset + member.bitWidth - 1}`;
-  const valueTitle = member.kind === 'pointer'
-    ? pointerValueTitle({
-      initialized: member.initialized,
-      status: member.pointerStatus,
-      displayValue: member.displayValue ?? '?',
-      target: member.target,
-    }, t)
-    : member.kind === 'unsupported'
-      ? member.flexibleArray
-        ? t('memoryViewer.flexibleArrayDetails', {
-          reason: reasonLabel,
-          length: member.flexibleArray.length,
-          capacity: member.flexibleArray.capacityBytes,
-          elementSize: member.flexibleArray.elementSize,
-          offset: member.offset,
-        })
-        : t('memoryViewer.memberDetails', { reason: reasonLabel, offset: member.offset, size: member.size })
-      : member.bitWidth !== undefined
-        ? t('memoryViewer.bitField', {
-          value: member.initialized === true ? member.displayValue ?? '?' : t('memoryViewer.uninitialized'),
-          width: member.bitWidth,
-          positions: bitRange === null ? '' : t('memoryViewer.bitPositions', { positions: bitRange }),
-          unitSize: member.storageUnitSize ?? member.size,
-          offset: member.offset,
-        })
+  const valueTitle = isUnsupported
+    ? member.flexibleArray
+      ? t('memoryViewer.flexibleArrayDetails', {
+        reason: reasonLabel,
+        length: member.flexibleArray.length,
+        capacity: member.flexibleArray.capacityBytes,
+        elementSize: member.flexibleArray.elementSize,
+        offset: member.offset,
+      })
+      : t('memoryViewer.memberDetails', { reason: reasonLabel, offset: member.offset, size: member.size })
+    : member.bitWidth !== undefined
+      ? t('memoryViewer.bitField', {
+        value: member.initialized === true ? member.displayValue ?? '?' : t('memoryViewer.uninitialized'),
+        width: member.bitWidth,
+        positions: bitRange === null ? '' : t('memoryViewer.bitPositions', { positions: bitRange }),
+        unitSize: member.storageUnitSize ?? member.size,
+        offset: member.offset,
+      })
       : member.initialized === true
         ? member.displayValue ?? '?'
         : t('memoryViewer.uninitialized');
-  const valueContent = isUninitialized
+  const valueContent = isUninitialized || isUnsupported
     ? '—'
-    : isPointer && member.pointerStatus === 'null'
-      ? 'NULL'
-      : member.kind === 'unsupported'
-        ? '—'
-        : truncateMemoryViewerScalarValue(member.displayValue ?? '?');
+    : truncateMemoryViewerScalarValue(member.displayValue ?? '?');
   return {
     id: null,
     arrayElementKey: null,
     arrayElementIndex: null,
     aggregateMemberKey: member.key,
     aggregateMemberName: member.name,
-    aggregateUnsupportedReason: member.kind === 'unsupported' ? member.unsupportedReason : undefined,
+    aggregateUnsupportedReason: isPointer ? 'pointer' : member.kind === 'unsupported' ? member.unsupportedReason : undefined,
     address: member.address,
     size: member.size,
     origin: aggregate.origin,
@@ -736,16 +767,16 @@ function aggregateMemberCardRecord(
     valueTitle,
     uninitializedVisualLabel: isUninitialized ? t('memoryViewer.uninitialized') : undefined,
     valueContent,
-    initialized: member.kind === 'unsupported' ? null : member.initialized,
+    initialized: isUnsupported ? null : member.initialized,
     valueChanged,
     isParameter: false,
     isStringLiteral: false,
     isHeapBlock: false,
     isArrayElement: false,
-    isPointer,
-    isPointerTarget,
-    pointerStatus: isPointer ? member.pointerStatus ?? 'uninitialized' : null,
-    pointerIdentity: isPointer ? memoryViewerAggregateMemberPointerIdentity(aggregate, member.key) : null,
+    isPointer: false,
+    isPointerTarget: !isPointer && isPointerTarget,
+    pointerStatus: null,
+    pointerIdentity: null,
   };
 }
 
@@ -758,6 +789,7 @@ function aggregateFlexibleArrayElementCardRecord(
   const flexibleArray = member.flexibleArray;
   if (!flexibleArray) throw new Error('Expected a flexible array member snapshot.');
   return arrayElementCardRecord({
+    rootId: aggregate.rootId,
     name: `${aggregate.name ?? aggregate.type}.${member.name}`,
     origin: aggregate.origin,
     duration: aggregate.duration,
@@ -828,7 +860,8 @@ export function MemoryViewerAggregateBlock({
   const name = aggregate.name ?? (aggregate.region === 'heap'
     ? t('memoryViewer.aggregateOnHeap')
     : t('memoryViewer.temporaryAggregate'));
-  const placeholder = aggregateStatusMessage(aggregate, t);
+  const placeholder = aggregateStatusMessage(aggregate, t)
+    ?? (aggregate.status === 'available' && hasAnonymousAggregateMember(aggregate) ? t('memoryViewer.anonymousAggregatePending') : null);
   const flexibleArrayMember = aggregate.members.find(member => member.flexibleArray !== undefined);
   const flexibleArray = flexibleArrayMember?.flexibleArray;
   const hasFlexibleArrayValues = flexibleArray !== undefined && flexibleArray.length > 0;
@@ -910,7 +943,7 @@ export function MemoryViewerAggregateBlock({
         ) : (
           <div className="memory-viewer-array-placeholder" role="status">{placeholder}</div>
         )}
-        {hasFlexibleArrayValues && flexibleArray && flexibleArrayMember && (
+        {placeholder === null && hasFlexibleArrayValues && flexibleArray && flexibleArrayMember && (
           <div
             className="memory-viewer-aggregate-fam-view"
             data-memory-viewer-fam-member={flexibleArrayMember.name}
@@ -1013,9 +1046,14 @@ function memoryViewerPointerInteractionTargetKey(
 function hasMemoryViewerPointerIdentity(
   identity: MemoryViewerPointerIdentity,
   pointers: readonly DebugPointerSnapshot[],
+  arrays: readonly DebugArraySnapshot[],
   aggregates: readonly DebugAggregateSnapshot[],
 ): boolean {
   if (identity.kind === 'object-pointer') return pointers.some(pointer => pointer.id === identity.id);
+  if (identity.kind === 'array-element-pointer') return arrays.some(array => array.rootId === identity.rootId
+    && array.elements.some(element => element.kind === 'pointer'
+      && element.index === identity.index
+      && element.key === `${identity.rootId}:${identity.index}`));
   return aggregates.some(aggregate => aggregate.rootId === identity.rootId
     && aggregate.members.some(member => member.key === identity.memberKey && member.kind === 'pointer'));
 }
@@ -1068,9 +1106,9 @@ function MemoryViewerRegions({
   );
   // Keep interaction on the live pointer object while its selected snapshot changes target.
   const activePointerIdentity = hoveredPointerIdentity !== null
-    && hasMemoryViewerPointerIdentity(hoveredPointerIdentity, pointers, aggregates)
+    && hasMemoryViewerPointerIdentity(hoveredPointerIdentity, pointers, arrays, aggregates)
     ? hoveredPointerIdentity
-    : focusedPointerIdentity !== null && hasMemoryViewerPointerIdentity(focusedPointerIdentity, pointers, aggregates)
+    : focusedPointerIdentity !== null && hasMemoryViewerPointerIdentity(focusedPointerIdentity, pointers, arrays, aggregates)
       ? focusedPointerIdentity
       : null;
   const highlightedPointerTarget = useMemo(
@@ -1120,13 +1158,13 @@ function MemoryViewerRegions({
       setFocusedPointerIdentity(null);
       return;
     }
-    if (hoveredPointerIdentity !== null && !hasMemoryViewerPointerIdentity(hoveredPointerIdentity, pointers, aggregates)) {
+    if (hoveredPointerIdentity !== null && !hasMemoryViewerPointerIdentity(hoveredPointerIdentity, pointers, arrays, aggregates)) {
       setHoveredPointerIdentity(null);
     }
-    if (focusedPointerIdentity !== null && !hasMemoryViewerPointerIdentity(focusedPointerIdentity, pointers, aggregates)) {
+    if (focusedPointerIdentity !== null && !hasMemoryViewerPointerIdentity(focusedPointerIdentity, pointers, arrays, aggregates)) {
       setFocusedPointerIdentity(null);
     }
-  }, [aggregates, focusedPointerIdentity, hoveredPointerIdentity, pointers, status, stepIndex]);
+  }, [aggregates, arrays, focusedPointerIdentity, hoveredPointerIdentity, pointers, status, stepIndex]);
 
   useLayoutEffect(() => {
     if (status === 'starting' && stepIndex === 0) {
@@ -1510,15 +1548,18 @@ function MemoryViewerRegions({
               const isFunctionRoot = functionRootScopeId === undefined
                 ? scope.scopeName === scope.functionName
                 : functionRootScopeId === scope.id;
+              const isForBodyScope = isForBodyMemoryViewerScope(scope.scopeName);
               const isAnonymousScope = scope.scopeName === 'block' && !isFunctionRoot;
               const accessibleScopeName = isAnonymousScope ? 'scope' : scope.scopeName;
-              const visibleScopeName = isAnonymousScope
-                ? mode === 'minimal' ? null : 'scope'
-                : truncateMemoryViewerScopeName(scope.scopeName);
+              const visibleScopeName = isForBodyScope
+                ? null
+                : isAnonymousScope
+                  ? mode === 'minimal' ? null : 'scope'
+                  : truncateMemoryViewerScopeName(scope.scopeName);
               const objects = objectsByScope.get(scope.id) ?? [];
               return (
                 <li
-                  className={`memory-viewer-scope${isAncestorScope ? ' memory-viewer-scope--ancestor' : ''}${isExitingScope ? ' memory-viewer-scope--exiting' : ''}${isFadingScope ? ' memory-viewer-scope--fading' : ''}`}
+                  className={`memory-viewer-scope${isForBodyScope ? ' memory-viewer-scope--for-body' : ''}${isAncestorScope ? ' memory-viewer-scope--ancestor' : ''}${isExitingScope ? ' memory-viewer-scope--exiting' : ''}${isFadingScope ? ' memory-viewer-scope--fading' : ''}`}
                   key={scope.id}
                   aria-label={isEntrypointMainRoot
                     ? t('memoryViewer.mainRootDescription')
@@ -1591,6 +1632,8 @@ function MemoryViewerRegions({
                         pointerTargetElementKey={highlightedPointerTargetElementKey}
                         exiting={isExitingArray}
                         fading={isExitingArray && exitPresentation.phase === 'fading'}
+                        onPointerHoverChange={updatePointerHover}
+                        onPointerFocusChange={updatePointerFocus}
                       />
                     );
                   })}
@@ -1640,6 +1683,8 @@ function MemoryViewerRegions({
                 array={item.snapshot}
                 changedElementKeys={changedArrayElementKeys}
                 pointerTargetElementKey={highlightedPointerTargetElementKey}
+                onPointerHoverChange={updatePointerHover}
+                onPointerFocusChange={updatePointerFocus}
               />
             ) : (
               <MemoryViewerAggregateBlock

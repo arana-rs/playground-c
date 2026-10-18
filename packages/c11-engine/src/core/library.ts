@@ -2,13 +2,15 @@ import type { AggregateValue, CType, CValue, Location, ObjectPointerValue } from
 import { binary80FromNumber, binary80ToRational, formatBinary80Hex, parseBinary80 } from './binary80.ts';
 import type { Binary80Value } from './binary80.ts';
 import { ERRNO_CODES, ERRNO_MESSAGES } from './errno-metadata.ts';
+import { parseFloatingToken } from './float-parsing.ts';
 import { dispatchStdlibConversionBuiltin, digitForBase } from './stdlib-conversions.ts';
 import { dispatchStdlibBuiltin } from './stdlib-library.ts';
 import { dispatchTimeBuiltin } from './time-library.ts';
 import type { StdlibTimeRuntimeContext } from './stdlib-time-context.ts';
+import { STDIO_CONSTANTS } from './stdio-metadata.ts';
 import { isValidVirtualOpenMode } from './virtual-io.ts';
 import { normalizeVirtualPath } from './virtual-path.ts';
-import type { VirtualByteRead, VirtualIO, VirtualStream } from './virtual-io.ts';
+import type { VirtualBufferMode, VirtualByteRead, VirtualIO, VirtualStream } from './virtual-io.ts';
 import type { LibraryBuiltinGenerator, LibraryBuiltinRequest } from './library-requests.ts';
 
 const EOF_VALUE = -1;
@@ -52,9 +54,14 @@ function returnPointer(pointer: CValue, resultType?: CType): CValue {
 
 function returnVoid(): CValue { return { type: 'void', value: 0n }; }
 
-function cString(value: CValue, at: Location, context: LibraryRuntimeContext): Uint8Array {
+function cString(value: CValue, at: Location, context: LibraryRuntimeContext, maxBytes?: number): Uint8Array {
   if (value.value === null) invalid(context, 'Cannot read a string from a null pointer.', at);
-  return context.readCString(value, at);
+  return context.readCString(value, at, maxBytes);
+}
+
+function cStringByte(value: CValue, index: number, at: Location, context: LibraryRuntimeContext): number {
+  if (value.value === null) invalid(context, 'Cannot read a string from a null pointer.', at);
+  return context.readBytes(context.offsetPointer(value, index, at), 1, at)[0] ?? 0;
 }
 
 function makePointerAt(pointer: CValue, offset: number, resultType: CType | undefined, at: Location, context: LibraryRuntimeContext): CValue {
@@ -118,15 +125,21 @@ function strtokBuiltin(args: readonly CValue[], resultType: CType | undefined, c
     source = strtokState.get(context.io) ?? { type: args[0].type, value: null };
   }
   if (source.value === null) return { type: resultType ?? args[0].type, value: null };
-  const bytes = cString(source, at, context);
-  context.chargeWork(bytes.length, at);
   let start = 0;
-  while (start < bytes.length && delimiters.has(bytes[start])) start++;
-  if (start === bytes.length) { strtokState.delete(context.io); return { type: resultType ?? args[0].type, value: null }; }
+  let byte = cStringByte(source, start, at, context);
+  context.chargeWork(1, at);
+  while (byte !== 0 && delimiters.has(byte)) {
+    byte = cStringByte(source, ++start, at, context);
+    context.chargeWork(1, at);
+  }
+  if (byte === 0) { strtokState.delete(context.io); return { type: resultType ?? args[0].type, value: null }; }
   let end = start;
-  while (end < bytes.length && !delimiters.has(bytes[end])) end++;
+  while (byte !== 0 && !delimiters.has(byte)) {
+    byte = cStringByte(source, ++end, at, context);
+    context.chargeWork(1, at);
+  }
   const token = context.offsetPointer(source, start, at);
-  if (end < bytes.length) {
+  if (byte !== 0) {
     context.writeBytes(context.offsetPointer(source, end, at), new Uint8Array([0]), at);
     strtokState.set(context.io, context.offsetPointer(source, end + 1, at));
   } else strtokState.delete(context.io);
@@ -142,7 +155,7 @@ export interface LibraryRuntimeContext {
   readonly io: VirtualIO;
   readBytes(pointer: CValue, count: number, at: Location): Uint8Array;
   writeBytes(pointer: CValue, bytes: Uint8Array, at: Location): void;
-  readCString(pointer: CValue, at: Location): Uint8Array;
+  readCString(pointer: CValue, at: Location, maxBytes?: number): Uint8Array;
   copyBytes(destination: CValue, source: CValue, count: number, at: Location): void;
   writeScalar(pointer: CValue, value: CValue, at: Location): void;
   formatPointer(value: CValue, at: Location): string;
@@ -250,21 +263,22 @@ export function dispatchLibraryBuiltin(
   }
   if (name === 'strcpy' || name === 'strcat' || name === 'strncpy' || name === 'strncat') {
     argCount(args, name.endsWith('ncpy') || name === 'strncat' ? 3 : 2, name.endsWith('ncpy') || name === 'strncat' ? 3 : 2, name, context, at);
-    const source = cString(args[1], at, context);
     const bounded = name === 'strncpy' || name === 'strncat';
-    const count = bounded ? checkedSize(args[2], name, context, at) : source.length;
-    context.chargeWork(Math.min(count, source.length) + 1, at);
+    const count = bounded ? checkedSize(args[2], name, context, at) : undefined;
+    const source = cString(args[1], at, context, count);
+    const copyCount = count ?? source.length;
+    context.chargeWork(Math.min(copyCount, source.length) + 1, at);
     if (name === 'strcpy') {
       const output = new Uint8Array(source.length + 1); output.set(source);
       writeBytes(args[0], output, at, context);
     } else if (name === 'strncpy') {
-      context.preflightMemoryWrite(args[0], count, at);
-      const output = new Uint8Array(count);
-      output.set(source.subarray(0, count));
+      context.preflightMemoryWrite(args[0], copyCount, at);
+      const output = new Uint8Array(copyCount);
+      output.set(source.subarray(0, copyCount));
       context.writeBytes(args[0], output, at);
     } else {
       const destination = cString(args[0], at, context);
-      const append = name === 'strcat' ? source : source.subarray(0, count);
+      const append = name === 'strcat' ? source : source.subarray(0, copyCount);
       const padded = name === 'strncat' ? append.subarray(0, append.findIndex((byte) => byte === 0) < 0 ? append.length : append.findIndex((byte) => byte === 0)) : append;
       const output = new Uint8Array(padded.length + 1); output.set(padded);
       writeBytes(context.offsetPointer(args[0], destination.length, at), output, at, context);
@@ -273,50 +287,68 @@ export function dispatchLibraryBuiltin(
   }
   if (name === 'strcmp' || name === 'strncmp') {
     argCount(args, name === 'strcmp' ? 2 : 3, name === 'strcmp' ? 2 : 3, name, context, at);
-    const left = cString(args[0], at, context), right = cString(args[1], at, context);
-    const count = name === 'strncmp' ? checkedSize(args[2], name, context, at) : Math.max(left.length, right.length) + 1;
-    context.chargeWork(Math.min(count, Math.max(left.length, right.length) + 1), at);
-    return returnInteger(compareCStringBytes(left, right, count), resultType, context);
+    const count = name === 'strncmp' ? checkedSize(args[2], name, context, at) : undefined;
+    const compared = compareCStringPointers(args[0], args[1], count, context, at);
+    context.chargeWork(compared.work, at);
+    return returnInteger(compared.result, resultType, context);
   }
   if (name === 'strchr' || name === 'strrchr') {
     argCount(args, 2, 2, name, context, at);
-    const source = cString(args[0], at, context), needle = Number(BigInt.asUintN(8, integerValue(args[1], at, context)));
-    context.chargeWork(source.length, at);
+    const needle = Number(BigInt.asUintN(8, integerValue(args[1], at, context)));
+    if (name === 'strchr') {
+      for (let index = 0; ; index++) {
+        const byte = context.readBytes(context.offsetPointer(args[0], index, at), 1, at)[0] ?? 0;
+        context.chargeWork(1, at);
+        if (byte === needle) return makePointerAt(args[0], index, resultType, at, context);
+        if (byte === 0) return { type: resultType ?? args[0].type, value: null };
+      }
+    }
+    const source = cString(args[0], at, context);
+    context.chargeWork(source.length + 1, at);
     let found = -1;
     for (let index = 0; index <= source.length; index++) if ((source[index] ?? 0) === needle) {
       found = index;
-      if (name === 'strchr') break;
     }
     return found < 0 ? { type: resultType ?? args[0].type, value: null } : makePointerAt(args[0], found, resultType, at, context);
   }
   if (name === 'strspn' || name === 'strcspn') {
     argCount(args, 2, 2, name, context, at);
-    const source = cString(args[0], at, context), set = new Set(cString(args[1], at, context));
+    const set = new Set(cString(args[1], at, context));
     let index = 0;
-    while (index < source.length && (name === 'strspn' ? set.has(source[index]) : !set.has(source[index]))) index++;
-    context.chargeWork(index, at);
+    let byte = cStringByte(args[0], index, at, context);
+    while (byte !== 0 && (name === 'strspn' ? set.has(byte) : !set.has(byte))) {
+      context.chargeWork(1, at);
+      byte = cStringByte(args[0], ++index, at, context);
+    }
+    context.chargeWork(1, at);
     return returnInteger(index, resultType, context);
   }
   if (name === 'strpbrk') {
     argCount(args, 2, 2, name, context, at);
-    const source = cString(args[0], at, context), set = new Set(cString(args[1], at, context));
-    let index = 0; while (index < source.length && !set.has(source[index])) index++;
-    context.chargeWork(index + 1, at);
-    return index === source.length ? { type: resultType ?? args[0].type, value: null } : makePointerAt(args[0], index, resultType, at, context);
+    const set = new Set(cString(args[1], at, context));
+    let index = 0;
+    let byte = cStringByte(args[0], index, at, context);
+    while (byte !== 0 && !set.has(byte)) {
+      context.chargeWork(1, at);
+      byte = cStringByte(args[0], ++index, at, context);
+    }
+    context.chargeWork(1, at);
+    return byte === 0 ? { type: resultType ?? args[0].type, value: null } : makePointerAt(args[0], index, resultType, at, context);
   }
   if (name === 'strstr') {
     argCount(args, 2, 2, name, context, at);
-    const source = cString(args[0], at, context), needle = cString(args[1], at, context);
-    context.chargeWork(source.length + needle.length, at);
-    let found = 0;
-    if (needle.length) {
-      found = -1;
-      outer: for (let index = 0; index + needle.length <= source.length; index++) {
-        for (let part = 0; part < needle.length; part++) if (source[index + part] !== needle[part]) continue outer;
-        found = index; break;
+    const needle = cString(args[1], at, context);
+    if (!needle.length) return makePointerAt(args[0], 0, resultType, at, context);
+    for (let start = 0; ; start++) {
+      let matched = true;
+      for (let part = 0; part < needle.length; part++) {
+        const byte = cStringByte(args[0], start + part, at, context);
+        context.chargeWork(1, at);
+        if (byte === 0) return { type: resultType ?? args[0].type, value: null };
+        if (byte !== needle[part]) { matched = false; break; }
       }
+      if (matched) return makePointerAt(args[0], start, resultType, at, context);
     }
-    return found < 0 ? { type: resultType ?? args[0].type, value: null } : makePointerAt(args[0], found, resultType, at, context);
   }
   if (name === 'strtok') return strtokBuiltin(args, resultType, context, at);
   if (name === 'strerror') {
@@ -392,13 +424,20 @@ function checkedSize(value: CValue, name: string, context: LibraryRuntimeContext
   return Number(amount);
 }
 
-function compareCStringBytes(left: Uint8Array, right: Uint8Array, count: number): number {
-  for (let index = 0; index < count; index++) {
-    const a = left[index] ?? 0, b = right[index] ?? 0;
-    if (a !== b) return a < b ? -1 : 1;
-    if (a === 0) return 0;
+function compareCStringPointers(
+  left: CValue,
+  right: CValue,
+  maxBytes: number | undefined,
+  context: LibraryRuntimeContext,
+  at: Location,
+): { readonly result: number; readonly work: number } {
+  for (let index = 0; maxBytes === undefined || index < maxBytes; index++) {
+    const leftByte = context.readBytes(context.offsetPointer(left, index, at), 1, at)[0] ?? 0;
+    const rightByte = context.readBytes(context.offsetPointer(right, index, at), 1, at)[0] ?? 0;
+    if (leftByte !== rightByte) return { result: leftByte < rightByte ? -1 : 1, work: index + 1 };
+    if (leftByte === 0) return { result: 0, work: index + 1 };
   }
-  return 0;
+  return { result: 0, work: maxBytes ?? 0 };
 }
 
 function fopenBuiltin(args: readonly CValue[], resultType: CType | undefined, context: LibraryRuntimeContext, at: Location): CValue {
@@ -508,6 +547,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
   context.chargeWork(format.length, at);
   let argumentIndex = 0;
   let total = 0;
+  let prechargedOutputWork = 0;
   const pieces: Uint8Array[] = [];
   const reserve = (count: number): void => {
     if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(total + count)) invalid(context, 'Formatted output exceeds the safe range.', at);
@@ -523,6 +563,11 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
     return value;
   };
   const takeInteger = (): bigint => integerValue(take(), at, context);
+  const prechargeOutputWork = (count: number): void => {
+    if (count <= 0) return;
+    context.chargeWork(count, at);
+    prechargedOutputWork += count;
+  };
 
   for (let index = 0; index < format.length;) {
     if (format[index] !== '%') {
@@ -595,45 +640,25 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
       const { prefix, digits, negative, finite } = formatHexFloatValue(value, longDouble, precision, flags.includes('#'), uppercase, context, at);
       const sign = negative ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '';
       core = encodePadded(sign + prefix, digits, width ?? 0, flags, finite, context, at);
-    } else if (length === 'L' && 'fFeEgG'.includes(specifier)) {
-      isNumeric = true;
-      const requestedPrecision = precision ?? 6;
-      if (requestedPrecision > 100) return context.fail('UNSUPPORTED_FEATURE', 'Decimal precision exceeds the implemented maximum (100 digits).', at);
-      const formatted = formatBinary80Decimal(longDouble!, specifier.toLowerCase() as 'f' | 'e' | 'g', requestedPrecision, flags.includes('#'));
-      let digits = formatted.digits;
-      if (specifier === specifier.toUpperCase()) digits = digits.toUpperCase();
-      const sign = formatted.negative ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '';
-      reserve(Math.max(width ?? 0, sign.length + digits.length));
-      core = encodePadded(sign, digits, width ?? 0, flags, formatted.finite, context, at);
     } else if ('fFeEgG'.includes(specifier)) {
       isNumeric = true;
       const numeric = typeof value.value === 'number' ? value.value : typeof value.value === 'bigint' ? Number(value.value) : NaN;
       const requestedPrecision = precision ?? 6;
-      const estimated = Math.max(32, requestedPrecision + 32);
-      reserve(Math.max(width ?? 0, estimated));
-      if (requestedPrecision > 100) return context.fail('UNSUPPORTED_FEATURE', 'Decimal precision exceeds the implemented maximum (100 digits).', at);
-      let digits: string;
-      if (!Number.isFinite(numeric)) {
-        digits = Number.isNaN(numeric) ? 'nan' : 'inf';
-      } else switch (specifier.toLowerCase()) {
-        case 'f': digits = formatFixedFloat(Math.abs(numeric), requestedPrecision); break;
-        case 'e': digits = normalizeDecimalExponent(Math.abs(numeric).toExponential(requestedPrecision)); break;
-        case 'g': digits = formatGeneralFloat(Math.abs(numeric), requestedPrecision === 0 ? 1 : requestedPrecision, flags.includes('#')); break;
-        default: return context.fail('ENGINE_INTERNAL_ERROR', 'Unrecognized floating-point format conversion.', at);
-      }
+      const binary = longDouble ?? binary80FromNumber(numeric);
+      const conversion = specifier.toLowerCase() as 'f' | 'e' | 'g';
+      const alternate = flags.includes('#');
+      const sign = binary.negative ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '';
+      const decimalPrecision = decimalPrecisionForFormat(binary, conversion, requestedPrecision, alternate);
+      const lowerBound = decimalFormatWorkLowerBound(binary, conversion, decimalPrecision, alternate);
+      reserve(Math.max(width ?? 0, lowerBound));
+      prechargeOutputWork(Math.max(width ?? 0, lowerBound));
+      const formatted = formatBinary80Decimal(binary, conversion, requestedPrecision, alternate);
+      let digits = formatted.digits;
       if (specifier === specifier.toUpperCase()) digits = digits.toUpperCase();
-      if (flags.includes('#') && Number.isFinite(numeric) && !digits.includes('.')) {
-        const exponentIndex = digits.search(/[eE]/);
-        digits = exponentIndex < 0 ? `${digits}.` : `${digits.slice(0, exponentIndex)}.${digits.slice(exponentIndex)}`;
-      }
-      const sign = numeric < 0 || Object.is(numeric, -0) ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '';
-      if (sign === '-' && digits.startsWith('-')) digits = digits.slice(1);
-      reserve(Math.max(width ?? 0, sign.length + digits.length));
       core = encodePadded(sign, digits, width ?? 0, flags, true, context, at);
     } else if (specifier === 's') {
-      let bytes = cString(value, at, context);
+      let bytes = cString(value, at, context, precision);
       if (bytes === null) return null;
-      if (precision !== undefined) bytes = bytes.subarray(0, precision);
       core = padBytes(bytes, width ?? 0, flags.includes('-'), context, at, total);
     } else if (specifier === 'c') {
       const byte = Number(BigInt.asUintN(8, integerValue(value, at, context)));
@@ -648,7 +673,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
     append(core);
   }
   context.preflightOutputBytes(total, at);
-  context.chargeWork(total, at);
+  context.chargeWork(total - prechargedOutputWork, at);
   const result = new Uint8Array(total);
   let offset = 0;
   for (const part of pieces) { result.set(part, offset); offset += part.length; }
@@ -696,6 +721,7 @@ function formatBinary80Decimal(
   if (value.classification !== 'finite') {
     return { digits: value.classification === 'nan' ? 'nan' : 'inf', negative: value.negative, finite: false };
   }
+  if (conversion === 'g') precision = decimalPrecisionForFormat(value, conversion, precision, alternate);
   const { numerator, denominator, negative } = binary80ToRational(value);
   if (numerator === 0n) {
     if (conversion === 'f') return { digits: precision === 0 ? alternate ? '0.' : '0' : `0.${'0'.repeat(precision)}`, negative, finite: true };
@@ -707,7 +733,7 @@ function formatBinary80Decimal(
   if (conversion === 'f') return { digits: formatRationalFixed(numerator, denominator, precision, alternate), negative, finite: true };
   if (conversion === 'e') return { digits: formatRationalScientific(numerator, denominator, precision, alternate), negative, finite: true };
 
-  const significantDigits = precision === 0 ? 1 : precision;
+  const significantDigits = precision;
   const rounded = roundedSignificand(numerator, denominator, significantDigits);
   const useScientific = rounded.exponent < -4 || rounded.exponent >= significantDigits;
   if (useScientific) {
@@ -730,6 +756,40 @@ function formatBinary80Decimal(
   if (!alternate) fraction = fraction.replace(/0+$/, '');
   const digits = fraction.length ? `${whole}.${fraction}` : alternate ? `${whole}.` : whole;
   return { digits, negative, finite: true };
+}
+
+function decimalPrecisionForFormat(
+  value: Binary80Value,
+  conversion: 'f' | 'e' | 'g',
+  requestedPrecision: number,
+  alternate: boolean,
+): number {
+  if (conversion !== 'g') return requestedPrecision;
+  const precision = Math.max(1, requestedPrecision);
+  if (alternate || value.classification !== 'finite') return precision;
+  if (value.significand === 0n) return 1;
+  const { numerator, denominator } = binary80ToRational(value);
+  return Math.min(precision, exactDecimalSignificantDigits(numerator, denominator));
+}
+
+function exactDecimalSignificantDigits(numerator: bigint, denominator: bigint): number {
+  if (numerator === 0n) return 1;
+  const denominatorBits = denominator.toString(2).length - 1;
+  const coefficient = numerator * 5n ** BigInt(denominatorBits);
+  const significant = coefficient.toString().replace(/0+$/, '');
+  return Math.max(1, significant.length);
+}
+
+function decimalFormatWorkLowerBound(
+  value: Binary80Value,
+  conversion: 'f' | 'e' | 'g',
+  precision: number,
+  alternate: boolean,
+): number {
+  if (value.classification !== 'finite') return 3;
+  if (conversion === 'f') return 1 + precision + (precision > 0 || alternate ? 1 : 0);
+  if (conversion === 'e') return 5 + precision + (precision === 0 && alternate ? 1 : 0);
+  return Math.max(1, precision);
 }
 
 function formatRationalFixed(numerator: bigint, denominator: bigint, precision: number, alternate: boolean): string {
@@ -794,39 +854,6 @@ function printfCountType(length: string): CType {
   return 'int';
 }
 
-/** Format a finite binary64 value with fixed precision using exact integer arithmetic. */
-function formatFixedFloat(value: number, precision: number): string {
-  if (value === 0) return precision === 0 ? '0' : `0.${'0'.repeat(precision)}`;
-  const view = new DataView(new ArrayBuffer(8));
-  view.setFloat64(0, value, false);
-  const high = view.getUint32(0, false);
-  const low = view.getUint32(4, false);
-  const exponentBits = (high >>> 20) & 0x7ff;
-  let significand = (BigInt(high & 0xfffff) << 32n) | BigInt(low);
-  let exponent2: number;
-  if (exponentBits === 0) exponent2 = -1022 - 52;
-  else {
-    significand |= 1n << 52n;
-    exponent2 = exponentBits - 1023 - 52;
-  }
-  const scaledNumerator = significand * 5n ** BigInt(precision);
-  const shift = exponent2 + precision;
-  let rounded: bigint;
-  if (shift >= 0) rounded = scaledNumerator << BigInt(shift);
-  else {
-    const denominator = 1n << BigInt(-shift);
-    const quotient = scaledNumerator / denominator;
-    const remainder = scaledNumerator % denominator;
-    const twiceRemainder = remainder * 2n;
-    rounded = twiceRemainder > denominator || twiceRemainder === denominator && (quotient & 1n) === 1n
-      ? quotient + 1n : quotient;
-  }
-  let digits = rounded.toString();
-  if (!precision) return digits;
-  digits = digits.padStart(precision + 1, '0');
-  return `${digits.slice(0, -precision)}.${digits.slice(-precision)}`;
-}
-
 function encodePadded(prefix: string, digits: string, width: number, flags: string, numeric: boolean, context: LibraryRuntimeContext, at: Location): Uint8Array {
   const prefixBytes = new TextEncoder().encode(prefix), digitBytes = new TextEncoder().encode(digits);
   const padding = Math.max(0, width - prefixBytes.length - digitBytes.length);
@@ -848,30 +875,6 @@ function padBytes(bytes: Uint8Array, width: number, left: boolean, context: Libr
   if (left) { result.set(bytes); result.fill(32, bytes.length); }
   else { result.fill(32, 0, padding); result.set(bytes, padding); }
   return result;
-}
-
-function normalizeDecimalExponent(value: string): string {
-  return value.replace(/([eE])([+-])(\d+)$/, (_match, marker: string, sign: string, digits: string) => `${marker}${sign}${digits.padStart(2, '0')}`);
-}
-
-function formatGeneralFloat(value: number, precision: number, alternate: boolean): string {
-  if (!Number.isFinite(value)) return Number.isNaN(value) ? 'nan' : 'inf';
-  const absolute = Math.abs(value);
-  const exponential = absolute.toExponential(precision - 1);
-  const marker = exponential.indexOf('e');
-  const exponent = Number(exponential.slice(marker + 1));
-  if (exponent < -4 || exponent >= precision) {
-    const mantissa = exponential.slice(0, marker);
-    const selected = alternate
-      ? mantissa.includes('.') ? mantissa : `${mantissa}.`
-      : mantissa.replace(/0+$/, '').replace(/\.$/, '');
-    return normalizeDecimalExponent(`${selected}e${exponent < 0 ? '-' : '+'}${String(Math.abs(exponent))}`);
-  }
-  const decimals = Math.max(0, precision - 1 - exponent);
-  const fixed = absolute.toFixed(decimals);
-  return alternate
-    ? fixed.includes('.') ? fixed : `${fixed}.`
-    : fixed.includes('.') ? fixed.replace(/0+$/, '').replace(/\.$/, '') : fixed;
 }
 
 function* readStreamByte(stream: VirtualStream, at: Location): Generator<LibraryBuiltinRequest, number, CValue | void> {
@@ -982,17 +985,52 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
     return stream;
   };
   const eof = (): CValue => returnInteger(EOF_VALUE, resultType, context);
+  const configureBuffering = (stream: VirtualStream, bufferValue: CValue, modeValue: bigint, sizeValue: bigint): boolean => {
+    if (modeValue < 0n || modeValue > 2n) {
+      context.errno.set(ERRNO.EINVAL);
+      return false;
+    }
+    const mode = Number(modeValue) as VirtualBufferMode;
+    let capacity = 0;
+    if (mode !== 2) {
+      if (sizeValue <= 0n || sizeValue > BigInt(Number.MAX_SAFE_INTEGER)) {
+        context.errno.set(ERRNO.EINVAL);
+        return false;
+      }
+      const buffer = pointerValue(bufferValue, at, context, true);
+      if (buffer.value !== null) {
+        try {
+          context.preflightMemoryWrite(buffer, Number(sizeValue), at);
+        } catch {
+          context.errno.set(ERRNO.EINVAL);
+          return false;
+        }
+      }
+      capacity = Number(sizeValue);
+    }
+    if (!stream.setBuffering(mode, capacity, at)) {
+      context.errno.set(ERRNO.EINVAL);
+      return false;
+    }
+    return true;
+  };
   if (name === 'fclose') {
     argCount(args, 1, 1, name, context, at);
     const result = context.closeFilePointer(args[0], at);
-    if (result < 0) context.errno.set(ERRNO.EBADF);
+    if (result === -1) context.errno.set(ERRNO.EBADF);
+    else if (result < -1) { context.errno.set(ERRNO.EIO); return eofMinusOne(resultType, context); }
     return returnInteger(result, resultType, context);
   }
   if (name === 'fflush') {
     argCount(args, 0, 1, name, context, at);
-    if (!args.length || args[0].value === null) return returnInteger(0, resultType, context);
+    if (!args.length || args[0].value === null) {
+      const flushed = context.io.flushAllOutputStreams(at);
+      if (!flushed) { context.errno.set(ERRNO.EIO); return eofMinusOne(resultType, context); }
+      return returnInteger(0, resultType, context);
+    }
     const stream = context.streamFor(args[0], at);
     if (!stream || stream.isClosed) { context.errno.set(ERRNO.EBADF); return eofMinusOne(resultType, context); }
+    if (!stream.flush(at)) { context.errno.set(ERRNO.EIO); return eofMinusOne(resultType, context); }
     return returnInteger(0, resultType, context);
   }
   if (name === 'fputc' || name === 'putc' || name === 'putchar') {
@@ -1030,6 +1068,7 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
   if (name === 'fseek') {
     argCount(args, 3, 3, name, context, at);
     const stream = requireStream(args[0]);
+    stream.markOperation();
     const offset = integerValue(args[1], at, context);
     const originValue = Number(integerValue(args[2], at, context));
     if (originValue < 0 || originValue > 2 || !stream.seek(offset, originValue as 0 | 1 | 2, at)) {
@@ -1064,6 +1103,7 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
     argCount(args, 2, 2, name, context, at);
     const stream = context.streamFor(args[0], at);
     if (!stream) { context.errno.set(ERRNO.EBADF); return returnInteger(1, resultType, context); }
+    stream.markOperation();
     const bytes = context.readBytes(args[1], 8, at);
     let encoded = 0n;
     for (let index = bytes.length - 1; index >= 0; index--) encoded = encoded << 8n | BigInt(bytes[index]);
@@ -1076,26 +1116,25 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
   }
   if (name === 'setbuf') {
     argCount(args, 2, 2, name, context, at);
-    requireStream(args[0]);
-    // Virtual streams expose writes immediately so interactive prompts remain visible.
+    const stream = requireStream(args[0]);
+    const buffer = pointerValue(args[1], at, context, true);
+    const mode = buffer.value === null ? 2n : 0n;
+    const size = buffer.value === null ? 0n : BigInt(STDIO_CONSTANTS.BUFSIZ);
+    configureBuffering(stream, buffer, mode, size);
     return returnVoid();
   }
   if (name === 'setvbuf') {
     argCount(args, 4, 4, name, context, at);
-    requireStream(args[0]);
-    const mode = Number(integerValue(args[2], at, context));
-    if (![0, 1, 2].includes(mode)) {
-      context.errno.set(ERRNO.EINVAL);
-      return returnInteger(1, resultType, context);
-    }
-    // The virtual profile keeps every stream synchronous; only _IONBF is honored.
-    return returnInteger(mode === 2 ? 0 : 1, resultType, context);
+    const stream = requireStream(args[0]);
+    const mode = integerValue(args[2], at, context);
+    const size = integerValue(args[3], at, context);
+    return returnInteger(configureBuffering(stream, args[1], mode, size) ? 0 : 1, resultType, context);
   }
   if (name === 'ungetc') {
     argCount(args, 2, 2, name, context, at);
     const byte = Number(integerValue(args[0], at, context));
-    if (byte === EOF_VALUE) return eof();
     const stream = requireStream(args[1]);
+    if (byte === EOF_VALUE) { stream.markOperation(); return eof(); }
     return stream.ungetByte(Number(BigInt.asUintN(8, BigInt(byte))), at) ? returnInteger(Number(BigInt.asUintN(8, BigInt(byte))), resultType, context) : eof();
   }
   if (name === 'feof' || name === 'ferror') {
@@ -1342,7 +1381,7 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     let parsed: bigint | number | Binary80Value | undefined;
     if (integerConversion) parsed = parseScannedInteger(token, specifier);
     else if (length === 'L') parsed = parseScannedBinary80(token);
-    else parsed = parseScannedFloat(token);
+    else parsed = parseScannedFloat(token, length === 'l' ? 64 : 32);
     if (parsed === undefined) { mismatch(bytes.length === 0 && (yield* scanPeek(input)) < 0); break; }
     if (!suppress) {
       const destination = takeDestination();
@@ -1411,30 +1450,8 @@ function isScannedIntegerPrefix(text: string, specifier: string): boolean {
   return false;
 }
 
-function parseScannedFloat(text: string): number | undefined {
-  if (/^[+-]?inf(?:inity)?$/i.test(text)) return text.startsWith('-') ? -Infinity : Infinity;
-  if (/^[+-]?nan(?:\([a-z0-9_]*\))?$/i.test(text)) return text.startsWith('-') ? -NaN : NaN;
-  const decimal = /^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|inf(?:inity)?)$/i;
-  if (decimal.test(text)) return Number(text);
-  const hexadecimal = /^([+-]?)0x((?:[0-9a-f]+(?:\.[0-9a-f]*)?|\.[0-9a-f]+))[pP]([+-]?\d+)$/i.exec(text);
-  if (!hexadecimal) return undefined;
-  const sign = hexadecimal[1] === '-' ? -1 : 1;
-  const explicitExponent = Number(hexadecimal[3]);
-  if (!Number.isFinite(explicitExponent)) return sign < 0 ? -Infinity : Infinity;
-  const [whole = '', fractional = ''] = hexadecimal[2].split('.');
-  const significant = BigInt(`0x${whole}${fractional}` || '0x0');
-  if (significant === 0n) return sign < 0 ? -0 : 0;
-  const bitLength = significant.toString(2).length;
-  const shift = Math.max(0, bitLength - 53);
-  let leading = significant >> BigInt(shift);
-  if (shift > 0) {
-    const remainder = significant - (leading << BigInt(shift));
-    const halfway = 1n << BigInt(shift - 1);
-    if (remainder > halfway || remainder === halfway && (leading & 1n) === 1n) leading++;
-  }
-  const power = explicitExponent - 4 * fractional.length + shift;
-  const magnitude = power > 1023 ? Infinity : power < -1075 ? 0 : Number(leading) * 2 ** power;
-  return sign < 0 ? -magnitude : magnitude;
+function parseScannedFloat(text: string, format: 32 | 64): number | undefined {
+  return parseFloatingToken(text, format);
 }
 
 function isScannedFloatPrefix(text: string): boolean {

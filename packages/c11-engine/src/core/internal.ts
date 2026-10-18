@@ -16,7 +16,13 @@ export interface PointerCType {
   readonly baseConst?: boolean;
   readonly baseVolatile?: boolean;
 }
-export interface ArrayCType { readonly kind: 'array'; readonly element: CType; readonly length: number | null }
+export interface ArrayCType {
+  readonly kind: 'array';
+  readonly element: CType;
+  readonly length: number | null;
+  /** Present for a variable-length array bound that must be evaluated at runtime. */
+  readonly lengthExpression?: Expression;
+}
 export interface AggregateCType { readonly kind: 'aggregate'; readonly id: number }
 export interface EnumCType {
   readonly kind: 'enum';
@@ -217,6 +223,7 @@ export type Statement =
   | { kind: 'block'; statements: Statement[]; bindings?: number[]; location: Location; endLocation: Location }
   | { kind: 'sequence'; statements: Statement[]; location: Location }
   | { kind: 'declaration'; name: string; type: CType; binding?: number; initializer?: Initializer; static?: boolean; const?: boolean; extern?: boolean; threadLocal?: boolean; register?: boolean; alignment?: number; requestedAlignment?: number; symbolKey?: string; location: Location }
+  | { kind: 'typeDeclaration'; type: CType; location: Location }
   | { kind: 'staticAssert'; condition: Expression; message: string; location: Location }
   | { kind: 'return'; value?: Expression; location: Location }
   | { kind: 'expression'; value: Expression; location: Location }
@@ -238,6 +245,10 @@ export interface Parameter {
   register?: boolean;
   /** Minimum element count promised by an array parameter declared with static. */
   minimumArrayBound?: number;
+  /** Array bounds evaluated at function entry before the body starts. */
+  variableLengthBounds?: readonly ArrayCType[];
+  /** Records the prototype-scope-only `[*]` array bound for definition checks. */
+  prototypeVariableLengthBound?: boolean;
   location: Location;
 }
 export interface FunctionIR {

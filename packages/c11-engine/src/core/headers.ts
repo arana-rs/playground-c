@@ -1,6 +1,12 @@
 import { STDIO_FUNCTIONS, STDIO_HEADER_BODY } from './stdio-metadata.ts';
 import { ERRNO_MACROS } from './errno-metadata.ts';
 import { STDLIB_FUNCTIONS, STDLIB_HEADER_BODY, TIME_FUNCTIONS, TIME_HEADER_BODY } from './stdlib-time-metadata.ts';
+import {
+  MATH_BINARY_FUNCTIONS, MATH_CLASSIFICATION_BUILTINS, MATH_CLASSIFICATION_FUNCTIONS,
+  MATH_COMPARISON_BUILTINS, MATH_COMPARISON_MACROS,
+  MATH_FMA_FUNCTIONS, MATH_INTEGER_RETURN_TYPES, MATH_NAN_FUNCTIONS, MATH_NEXTTOWARD_FUNCTIONS,
+  MATH_OUT_UNARY_FUNCTIONS, MATH_REMQUO_FUNCTIONS, MATH_SCALING_FUNCTIONS, MATH_UNARY_FUNCTIONS,
+} from './math-metadata.ts';
 
 const guarded = (name: string, body: string): string => {
   const guard = `__C11_VIRTUAL_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
@@ -21,7 +27,7 @@ const floatMacros: Record<string, string> = {
   DBL_MANT_DIG: '53', DBL_DIG: '15', DBL_DECIMAL_DIG: '17', DBL_MIN_EXP: '(-1021)', DBL_MAX_EXP: '1024', DBL_MIN_10_EXP: '(-307)', DBL_MAX_10_EXP: '308',
   DBL_EPSILON: '0x1p-52', DBL_MIN: '0x1p-1022', DBL_MAX: '0x1.fffffffffffffp1023', DBL_TRUE_MIN: '0x1p-1074', DBL_HAS_SUBNORM: '1',
   LDBL_MANT_DIG: '64', LDBL_DIG: '18', LDBL_DECIMAL_DIG: '21', LDBL_MIN_EXP: '(-16381)', LDBL_MAX_EXP: '16384', LDBL_MIN_10_EXP: '(-4931)', LDBL_MAX_10_EXP: '4932',
-  LDBL_EPSILON: '0x1p-63L', LDBL_MIN: '0x1p-16382L', LDBL_MAX: '0x1.ffffffffffffffffp16383L', LDBL_TRUE_MIN: '0x1p-16445L', LDBL_HAS_SUBNORM: '1',
+  LDBL_EPSILON: '0x1p-63L', LDBL_MIN: '0x1p-16382L', LDBL_MAX: '0x1.fffffffffffffffep16383L', LDBL_TRUE_MIN: '0x1p-16445L', LDBL_HAS_SUBNORM: '1',
 };
 
 const integerTypes: Record<string, string> = {};
@@ -53,6 +59,45 @@ Object.assign(integerMacros, {
 const ctypeFunctions = [
   'isalnum', 'isalpha', 'isblank', 'iscntrl', 'isdigit', 'isgraph', 'islower', 'isprint', 'ispunct', 'isspace', 'isupper', 'isxdigit', 'tolower', 'toupper',
 ];
+
+const mathFloatVariantDeclarations = (name: string, parameterTypes: readonly [string, string, string], returnTypes: readonly [string, string, string] = ['double', 'float', 'long double']): string =>
+  `${returnTypes[0]} ${name}(${parameterTypes[0]});\n${returnTypes[1]} ${name}f(${parameterTypes[1]});\n${returnTypes[2]} ${name}l(${parameterTypes[2]});`;
+
+const mathUnaryDeclarations = MATH_UNARY_FUNCTIONS
+  .map((name) => mathFloatVariantDeclarations(name, ['double', 'float', 'long double'])).join('\n');
+const mathBinaryDeclarations = MATH_BINARY_FUNCTIONS
+  .map((name) => mathFloatVariantDeclarations(name, ['double, double', 'float, float', 'long double, long double'])).join('\n');
+const mathScalingDeclarations = MATH_SCALING_FUNCTIONS.map((name) => {
+  const exponentType = name === 'scalbln' ? 'long' : 'int';
+  return mathFloatVariantDeclarations(name, [`double, ${exponentType}`, `float, ${exponentType}`, `long double, ${exponentType}`]);
+}).join('\n');
+const mathOutUnaryDeclarations = MATH_OUT_UNARY_FUNCTIONS.map((name) => name === 'frexp'
+  ? mathFloatVariantDeclarations(name, ['double, int *', 'float, int *', 'long double, int *'])
+  : mathFloatVariantDeclarations(name, ['double, double *', 'float, float *', 'long double, long double *'])).join('\n');
+const mathRemquoDeclarations = MATH_REMQUO_FUNCTIONS.map((name) => {
+  const type = name === 'remquo' ? 'double' : name === 'remquof' ? 'float' : 'long double';
+  return `${type} ${name}(${type}, ${type}, int *);`;
+}).join('\n');
+const mathNexttowardDeclarations = MATH_NEXTTOWARD_FUNCTIONS.map((name) => {
+  const type = name === 'nexttoward' ? 'double' : name === 'nexttowardf' ? 'float' : 'long double';
+  return `${type} ${name}(${type}, long double);`;
+}).join('\n');
+const mathIntegerReturnDeclarations = Object.entries(MATH_INTEGER_RETURN_TYPES).flatMap(([name, returnType]) => [
+  `${returnType} ${name}(double);`, `${returnType} ${name}f(float);`, `${returnType} ${name}l(long double);`,
+]).join('\n');
+const mathNanDeclarations = MATH_NAN_FUNCTIONS.map((name) => {
+  const type = name === 'nan' ? 'double' : name === 'nanf' ? 'float' : 'long double';
+  return `${type} ${name}(const char *);`;
+}).join('\n');
+const mathClassificationFunctionDeclarations = MATH_CLASSIFICATION_FUNCTIONS.map((name) => `int ${name}(double);`).join('\n');
+const mathClassificationDeclarations = MATH_CLASSIFICATION_BUILTINS.map((name) => `int ${name}(double);`).join('\n');
+const mathClassificationMacros = MATH_CLASSIFICATION_FUNCTIONS.map((name, index) =>
+  `#define ${name}(x) ${MATH_CLASSIFICATION_BUILTINS[index]!}((x))`,
+).join('\n');
+const mathComparisonDeclarations = MATH_COMPARISON_BUILTINS.map((name) => `int ${name}(double, double);`).join('\n');
+const mathComparisonMacros = MATH_COMPARISON_MACROS.map((name, index) =>
+  `#define ${name}(x, y) ${MATH_COMPARISON_BUILTINS[index]!}((x), (y))`,
+).join('\n');
 const stringFunctions = [
   'memcpy', 'memmove', 'memset', 'memcmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp', 'strchr', 'strrchr', 'strspn', 'strcspn', 'strpbrk', 'strstr', 'strtok', 'strlen', 'strerror',
 ];
@@ -197,22 +242,34 @@ float __c11_nan(void);
 #define INFINITY (__c11_inf())
 #define HUGE_VAL ((double)__c11_inf())
 #define HUGE_VALF (__c11_inf())
+#define HUGE_VALL ((long double)__c11_inf())
 #define NAN (__c11_nan())
 #define FP_NAN 0
 #define FP_INFINITE 1
 #define FP_ZERO 2
 #define FP_SUBNORMAL 3
 #define FP_NORMAL 4
-${[
-  'sqrt', 'fabs', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh', 'asinh', 'acosh', 'atanh', 'exp', 'exp2', 'expm1', 'log', 'log2', 'log10', 'log1p', 'floor', 'ceil', 'trunc', 'round', 'cbrt',
-].map((name) => `double ${name}(double);\nfloat ${name}f(float);`).join('\n')}
-${['fmod', 'pow', 'atan2', 'hypot', 'fmin', 'fmax', 'fdim', 'copysign'].map((name) => `double ${name}(double, double);\nfloat ${name}f(float, float);`).join('\n')}
-int isnan(double);
-int isinf(double);
-int isfinite(double);
-int isnormal(double);
-int signbit(double);
-int fpclassify(double);`),
+#define FP_ILOGB0 (-2147483647-1)
+#define FP_ILOGBNAN (-2147483647-1)
+#define MATH_ERRNO 1
+#define MATH_ERREXCEPT 2
+#define math_errhandling MATH_ERRNO
+typedef float float_t;
+typedef double double_t;
+${mathUnaryDeclarations}
+${mathBinaryDeclarations}
+${mathScalingDeclarations}
+${mathOutUnaryDeclarations}
+${mathRemquoDeclarations}
+${mathNexttowardDeclarations}
+${mathIntegerReturnDeclarations}
+${mathNanDeclarations}
+${MATH_FMA_FUNCTIONS.map((name) => `${name === 'fma' ? 'double' : name === 'fmaf' ? 'float' : 'long double'} ${name}(${name === 'fma' ? 'double, double, double' : name === 'fmaf' ? 'float, float, float' : 'long double, long double, long double'});`).join('\n')}
+${mathClassificationFunctionDeclarations}
+${mathClassificationDeclarations}
+${mathComparisonDeclarations}
+${mathClassificationMacros}
+${mathComparisonMacros}`),
   'stdarg.h': guarded('stdarg.h', stdargBody),
   'stdalign.h': guarded('stdalign.h', `
 #define alignas _Alignas

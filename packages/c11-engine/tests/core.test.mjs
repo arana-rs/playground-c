@@ -38,7 +38,7 @@ test('P1 executes its 42 acceptance example and publishes a truthful versioned t
   assert.equal(TARGET_PROFILE.intBits, 32);
   assert.equal(CAPABILITIES.completeC11, false);
   assert.equal(CAPABILITIES.library, 'partial');
-  assert.equal(CAPABILITIES.phase, 'P5');
+  assert.equal(CAPABILITIES.phase, 'P6');
   assert.ok(Object.isFrozen(CAPABILITIES.operators));
   assert.ok(Object.isFrozen(DEFAULT_PREPARE_LIMITS));
   assert.ok(Object.isFrozen(DEFAULT_EXECUTE_LIMITS));

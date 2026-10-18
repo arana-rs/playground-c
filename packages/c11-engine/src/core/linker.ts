@@ -178,7 +178,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
         ...(type.baseConst === undefined ? {} : { baseConst: type.baseConst }),
         ...(type.baseVolatile === undefined ? {} : { baseVolatile: type.baseVolatile }),
       }));
-      else if (type.kind === 'array') typeMemo.set(type, arrayOf(rewriteType(type.element), type.length));
+      else if (type.kind === 'array') typeMemo.set(type, arrayOf(rewriteType(type.element), type.length, type.lengthExpression));
       else typeMemo.set(type, functionOf(rewriteType(type.returnType), type.parameters.map(rewriteType), !!type.variadic, type.prototype !== false));
     }
     return typeMemo.get(root)!;

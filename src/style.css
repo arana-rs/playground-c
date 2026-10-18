@@ -1360,6 +1360,10 @@ body,
   background: color-mix(in srgb, var(--mark-active) 72%, var(--fg));
 }
 
+.memory-viewer-scope--for-body .memory-viewer-scope-bar {
+  background: var(--dim);
+}
+
 .memory-viewer-scope--exiting .memory-viewer-scope-name {
   border-style: dashed;
   border-color: var(--memory-scope-exit);
