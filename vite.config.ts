@@ -24,8 +24,8 @@ function getBuildCommit(): string {
   }
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   define: {
-    __BUILD_COMMIT__: JSON.stringify(getBuildCommit()),
+    __BUILD_COMMIT__: JSON.stringify(command === 'build' ? getBuildCommit() : ''),
   },
-});
+}));

@@ -93,6 +93,22 @@ test('P5 accepts the nine implemented families with aliases, conversions and pro
   }
 });
 
+test('preserves C conditional and comma precedence and associativity', () => {
+  run('int main(void) { int value = 0; return (1 ? 4 : 5, ++value); }', 1);
+  run('int main(void) { int object = 0; int *pointer = &object; (void)(1 ? 2 : 3, pointer); return 0; }', 0);
+  run('int main(void) { return 0 ? 1 : 1 ? 2 : 3; }', 2);
+  run('int main(void) { return 1 ? (0 ? 2 : 3) : 4; }', 3);
+  run('int main(void) { int value = 0; return 1 ? value = 1, value = 2 : 3; }', 2);
+  run('int main(void) { int value = 0; return 0 ? 1 : (value = 2, value = 5); }', 5);
+  run(`int main(void) {
+  int index = 0, result = 0;
+  char byte = 0;
+  char *pointer = &byte;
+  for (; index < 1; ++index ? (result = 1) : (pointer[0] = 2), 0 ? pointer++ : 0) { }
+  return result;
+}`, 1);
+});
+
 test('diagnoses bitfield, FAM, qualifier, generic, alignment and typedef constraints', async (t) => {
   const cases = [
     'struct Bad { unsigned int too_wide : 33; }; int main(void) { return 0; }',

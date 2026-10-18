@@ -27,7 +27,7 @@ const declarationWords = new Set([...scalarWords, 'struct', 'union', 'enum', 'st
 const declarationOnlySpecifiers = new Set(['static', 'extern', 'typedef', 'auto', 'register', 'inline', '_Noreturn', '_Thread_local', '_Alignas']);
 const unsupportedWords = new Set(['_Atomic', '_Complex', '_Imaginary']);
 const operators: Record<string, number> = {
-  ',': 1, '=': 2, '+=': 2, '-=': 2, '*=': 2, '/=': 2, '%=': 2, '&=': 2, '|=': 2, '^=': 2, '<<=': 2, '>>=': 2,
+  ',': 1, '=': 2, '+=': 2, '-=': 2, '*=': 2, '/=': 2, '%=': 2, '&=': 2, '|=': 2, '^=': 2, '<<=': 2, '>>=': 2, '?:': 3,
   '||': 4, '&&': 5, '|': 6, '^': 7, '&': 8, '==': 9, '!=': 9, '<': 10, '>': 10, '<=': 10, '>=': 10,
   '<<': 11, '>>': 11, '+': 12, '-': 12, '*': 13, '/': 13, '%': 13,
 };
