@@ -2,6 +2,7 @@ import { STDIO_FUNCTIONS, STDIO_MACROS } from './stdio-metadata.ts';
 import { ERRNO_MACROS } from './errno-metadata.ts';
 import { STDLIB_FUNCTIONS, STDLIB_MACROS, TIME_FUNCTIONS, TIME_MACROS } from './stdlib-time-metadata.ts';
 import { MATH_CLASSIFICATION_FUNCTIONS, MATH_COMPARISON_MACROS, MATH_FUNCTIONS } from './math-metadata.ts';
+import { STRING_FUNCTIONS } from './string-metadata.ts';
 
 export interface SourceFile { readonly name: string; readonly source: string }
 /** A virtual project. `files` contains translation units and headers; only names
@@ -486,7 +487,7 @@ export const CAPABILITIES = Object.freeze({
     history: false, reverseExecution: false,
   }),
   stdioFormatLimitations: Object.freeze(['printf hexadecimal precision cap: 100000 digits']),
-  stringFunctions: Object.freeze(['memcpy', 'memmove', 'memset', 'memcmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp', 'strchr', 'strrchr', 'strspn', 'strcspn', 'strpbrk', 'strstr', 'strtok', 'strlen', 'strerror']),
+  stringFunctions: STRING_FUNCTIONS,
   ctypeFunctions: Object.freeze(['isalnum', 'isalpha', 'isblank', 'iscntrl', 'isdigit', 'isgraph', 'islower', 'isprint', 'ispunct', 'isspace', 'isupper', 'isxdigit', 'tolower', 'toupper']),
   inttypesFunctions: Object.freeze(['imaxabs', 'imaxdiv', 'strtoimax', 'strtoumax']),
   mathFunctions: MATH_FUNCTIONS,

@@ -23,6 +23,12 @@ export interface ArrayCType {
   /** Present for a variable-length array bound that must be evaluated at runtime. */
   readonly lengthExpression?: Expression;
 }
+/** A lexical variably-modified identifier used to end only the VM lifetimes left by goto. */
+export interface VariablyModifiedIdentifier {
+  readonly arrayTypes: readonly ArrayCType[];
+  /** A VLA object whose storage lifetime ends when control leaves its identifier scope. */
+  readonly vlaBinding?: number;
+}
 export interface AggregateCType { readonly kind: 'aggregate'; readonly id: number }
 export interface EnumCType {
   readonly kind: 'enum';
@@ -233,7 +239,11 @@ export type Statement =
   | { kind: 'switch'; value: Expression; scopeName: string; body: Statement; location: Location }
   | { kind: 'case'; value?: Expression; constant?: CValue; statement: Statement; location: Location }
   | { kind: 'label'; name: string; statement: Statement; location: Location }
-  | { kind: 'goto'; target: string; location: Location }
+  | {
+      kind: 'goto'; target: string; location: Location;
+      vmScopeExit?: readonly VariablyModifiedIdentifier[];
+      vmScopeTarget?: readonly VariablyModifiedIdentifier[];
+    }
   | { kind: 'break' | 'continue'; location: Location }
   | { kind: 'empty'; location: Location };
 export interface Parameter {

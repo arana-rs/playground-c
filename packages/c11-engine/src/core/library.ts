@@ -261,6 +261,20 @@ export function dispatchLibraryBuiltin(
     context.chargeWork(count, at);
     return returnInteger(compareBytes(left, right, count), resultType, context);
   }
+  if (name === 'memchr') {
+    argCount(args, 3, 3, name, context, at);
+    const count = integerValue(args[2], at, context);
+    if (count < 0n) invalid(context, `${name} received a size outside the safe range.`, at);
+    if (count === 0n) return { type: resultType ?? args[0].type, value: null };
+    const needle = Number(BigInt.asUintN(8, integerValue(args[1], at, context)));
+    for (let index = 0n; index < count; index++) {
+      const offset = Number(index);
+      const byte = context.readBytes(context.offsetPointer(args[0], offset, at), 1, at)[0] ?? 0;
+      context.chargeWork(1, at);
+      if (byte === needle) return makePointerAt(args[0], offset, resultType, at, context);
+    }
+    return { type: resultType ?? args[0].type, value: null };
+  }
   if (name === 'strcpy' || name === 'strcat' || name === 'strncpy' || name === 'strncat') {
     argCount(args, name.endsWith('ncpy') || name === 'strncat' ? 3 : 2, name.endsWith('ncpy') || name === 'strncat' ? 3 : 2, name, context, at);
     const bounded = name === 'strncpy' || name === 'strncat';

@@ -5,7 +5,7 @@
   "description": "Incremental C11 interpreter with an x86-64 Linux data model for browsers and Node.js",
   "type": "module",
   "sideEffects": false,
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "docs"],
   "exports": {
     ".": { "types": "./dist/core/index.d.ts", "import": "./dist/core/index.js" },
     "./core": { "types": "./dist/core/index.d.ts", "import": "./dist/core/index.js" },

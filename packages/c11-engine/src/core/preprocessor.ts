@@ -46,6 +46,8 @@ interface Conditional { readonly parentActive: boolean; active: boolean; branchT
 const TRIGRAPHS: Readonly<Record<string, string>> = Object.freeze({
   '??=': '#', '??/': '\\', "??'": '^', '??(': '[', '??)': ']', '??!': '|', '??<': '{', '??>': '}', '??-': '~',
 });
+// C11 permits only these UCN values below U+00A0.
+const BASIC_UCN_EXCEPTIONS = new Set([0x24, 0x40, 0x60]);
 const MAX_INTERNAL_DEPTH = 2048;
 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const quoteC = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
@@ -156,7 +158,9 @@ function universalValue(spelling: string, at: Location): number | undefined {
   const match = /^\\u([0-9a-fA-F]{4})$/.exec(spelling) ?? /^\\U([0-9a-fA-F]{8})$/.exec(spelling);
   if (!match) return undefined;
   const value = Number.parseInt(match[1], 16);
-  if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) preprocessError(`Invalid universal character name: «${spelling}».`, at, 'INVALID_UNIVERSAL_CHARACTER_NAME');
+  if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) || (value < 0xa0 && !BASIC_UCN_EXCEPTIONS.has(value))) {
+    preprocessError(`Invalid universal character name: «${spelling}».`, at, 'INVALID_UNIVERSAL_CHARACTER_NAME');
+  }
   return value;
 }
 
@@ -400,6 +404,13 @@ function stringifyPragmaText(text: string): string[] {
   return text.trim().split(/[\t \v\f\r\n]+/).filter(Boolean);
 }
 
+function rejectVaArgsOutsideVariadicReplacement(tokens: readonly PPToken[]): void {
+  const occurrence = tokens.find((token) => token.kind === 'identifier' && token.text === '__VA_ARGS__');
+  if (occurrence) {
+    preprocessError('__VA_ARGS__ may only appear in the replacement list of a variadic function-like macro.', occurrence.at);
+  }
+}
+
 class TranslationPreprocessor {
   readonly context: PPContext;
 
@@ -530,6 +541,7 @@ class TranslationPreprocessor {
 
   private evaluateIf(tokens: readonly PPToken[], at: Location): boolean {
     if (!tokens.length) preprocessError('The #if directive requires an expression.', at);
+    rejectVaArgsOutsideVariadicReplacement(tokens);
     const expanded = this.stringifyCondition(tokens);
     return evaluatePreprocessorExpression(expanded, this.context.limits);
   }
@@ -538,6 +550,7 @@ class TranslationPreprocessor {
     const words = stringifyPragmaText(text);
     if (words.length === 1 && words[0] === 'once') { this.context.onceFiles.add(currentFile); return; }
     if (words.length === 3 && words[0] === 'STDC' && ['FP_CONTRACT', 'FENV_ACCESS', 'CX_LIMITED_RANGE'].includes(words[1]) && ['ON', 'OFF', 'DEFAULT'].includes(words[2])) return;
+    if (words[0] !== 'STDC') return;
     preprocessError(`Pragma no implementado: «${text.trim()}».`, at, 'UNSUPPORTED_FEATURE');
   }
 
@@ -590,6 +603,7 @@ class TranslationPreprocessor {
   private defineMacro(tokens: readonly PPToken[], at: Location): void {
     const nameToken = tokens[0];
     if (!nameToken || nameToken.kind !== 'identifier') preprocessError('#define requires a macro name.', at);
+    if (nameToken.text === '__VA_ARGS__') rejectVaArgsOutsideVariadicReplacement([nameToken]);
     const name = nameToken.text;
     let cursor = 1;
     let parameters: string[] | undefined;
@@ -601,7 +615,8 @@ class TranslationPreprocessor {
         while (cursor < tokens.length) {
           if (tokens[cursor].text === '...') { variadic = true; cursor++; if (tokens[cursor]?.text !== ')') preprocessError('... must be the last parameter of a variadic macro.', tokens[cursor]?.at ?? at); break; }
           const parameter = tokens[cursor];
-          if (parameter.kind !== 'identifier' || parameter.text === '__VA_ARGS__') preprocessError('Expected a macro parameter name.', parameter.at);
+          if (parameter.kind !== 'identifier') preprocessError('Expected a macro parameter name.', parameter.at);
+          if (parameter.text === '__VA_ARGS__') rejectVaArgsOutsideVariadicReplacement([parameter]);
           if (parameters.includes(parameter.text)) preprocessError(`Duplicate macro parameter: «${parameter.text}».`, parameter.at);
           parameters.push(parameter.text);
           cursor++;
@@ -615,6 +630,7 @@ class TranslationPreprocessor {
       cursor++;
     }
     const replacement = tokens.slice(cursor);
+    if (parameters === undefined || !variadic) rejectVaArgsOutsideVariadicReplacement(replacement);
     for (let index = 0; index < replacement.length; index++) {
       if (replacement[index].text === '##' && (index === 0 || index === replacement.length - 1)) preprocessError('## cannot appear at the start or end of a macro replacement list.', replacement[index].at);
       if (replacement[index].text === '#' && parameters !== undefined) {
@@ -638,6 +654,7 @@ class TranslationPreprocessor {
       if (parentActive) {
         if (directive === 'if') condition = this.evaluateIf(rest, at);
         else {
+          rejectVaArgsOutsideVariadicReplacement(rest);
           if (!rest[0] || rest[0].kind !== 'identifier' || rest.length !== 1) preprocessError(`#${directive} requires a single macro name.`, at);
           condition = this.context.macros.has(rest[0].text);
           if (directive === 'ifndef') condition = !condition;
@@ -673,6 +690,7 @@ class TranslationPreprocessor {
     }
     if (!activeBefore) return { output };
     if (directive === 'define') { this.defineMacro(rest, at); return { output }; }
+    rejectVaArgsOutsideVariadicReplacement(rest);
     if (directive === 'undef') {
       if (rest.length !== 1 || rest[0].kind !== 'identifier') preprocessError('#undef requires a single macro name.', at);
       this.context.macros.delete(rest[0].text);
@@ -717,6 +735,7 @@ class TranslationPreprocessor {
     const conditionalStack: Conditional[] = [];
     const flush = (): void => {
       if (!pending.length) return;
+      rejectVaArgsOutsideVariadicReplacement(pending);
       const expanded = this.expand(pending);
       output.push(...this.applyPragmaOperator(expanded, file));
       pending = [];

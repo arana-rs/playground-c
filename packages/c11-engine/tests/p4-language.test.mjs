@@ -7,6 +7,14 @@ import {
   prepareProject,
 } from './p4-test-helpers.mjs';
 
+test('a function body may begin with an empty statement', () => {
+  const source = 'int main(void) { ; return 0; }';
+  executeTerminated(execute, prepareProject(prepare, {
+    entry: 'main.c',
+    files: [{ name: 'main.c', source }],
+  }), undefined, 0);
+});
+
 test('multiple translation units link external objects while retaining per-file static linkage', () => {
   const project = fixtureProject('multifile', 'main.c', [
     'main.c', 'value.h', 'value.c', 'private.c',

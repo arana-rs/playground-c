@@ -34,6 +34,44 @@ test('stringification preserves UCN spelling while literal UCNs and escapes stil
   assert.equal(decodeBytes(result.stdout), '\\u00E9\n"\\u00E9"\n"\\\\u00E9"\nalpha beta\né\n');
 });
 
+test('__VA_ARGS__ is limited to variadic macro replacement lists', () => {
+  const valid = prepare({
+    entry: 'main.c',
+    files: [{
+      name: 'main.c',
+      source: [
+        '#if 0',
+        '#define SKIPPED(value) __VA_ARGS__',
+        '#endif',
+        '#define UNUSED(...) __VA_ARGS__',
+        '#define STRINGIFY(...) #__VA_ARGS__',
+        '#define TEXT(...) "__VA_ARGS__" /* __VA_ARGS__ */',
+        '#define STRING "__VA_ARGS__"',
+        '#define COMMENT /* __VA_ARGS__ */ 0',
+        'int main(void) { return UNUSED(COMMENT); }',
+      ].join('\n'),
+    }],
+  });
+  assert.equal(valid.kind, 'prepared', JSON.stringify(valid));
+  executeTerminated(execute, valid.program, undefined, 0);
+
+  const invalidSources = [
+    '#define OBJECT __VA_ARGS__\nint main(void) { return 0; }',
+    '#define FUNCTION(value) __VA_ARGS__\nint main(void) { return 0; }',
+    '#define __VA_ARGS__ 0\nint main(void) { return 0; }',
+    'int main(void) { return __VA_ARGS__; }',
+    '#if __VA_ARGS__\nint value;\n#endif\nint main(void) { return 0; }',
+    '#ifdef __VA_ARGS__\nint value;\n#endif\nint main(void) { return 0; }',
+    '#undef __VA_ARGS__\nint main(void) { return 0; }',
+    '#pragma vendor __VA_ARGS__\nint main(void) { return 0; }',
+  ];
+  for (const source of invalidSources) {
+    const result = prepare({ entry: 'main.c', files: [{ name: 'main.c', source }] });
+    assert.equal(result.kind, 'prepare-error', source);
+    assert.match(result.diagnostics[0].message, /__VA_ARGS__ may only appear in the replacement list of a variadic function-like macro/);
+  }
+});
+
 test('trigraphs, line splicing, universal character names and adjacent strings translate before parsing', () => {
   const trigraphs = prepareProject(prepare, fixtureProject('preprocessor', 'trigraph.c'));
   executeTerminated(execute, trigraphs);
@@ -142,4 +180,34 @@ test('missing quoted includes fail in the virtual project without host lookup', 
 test('STDC pragmas and the _Pragma operator accept supported modes', () => {
   const program = prepareProject(prepare, fixtureProject('preprocessor', 'pragma.c'));
   executeTerminated(execute, program);
+});
+
+test('unknown non-STDC pragmas are ignored while malformed STDC pragmas keep their diagnostic', () => {
+  const program = prepare({
+    entry: 'main.c',
+    files: [
+      {
+        name: 'main.c',
+        source: [
+          '#include "once.h"',
+          '#include "once.h"',
+          '#pragma vendor unknown_token',
+          'int main(void) {',
+          '    _Pragma("vendor another_unknown_token");',
+          '    return retained();',
+          '}',
+        ].join('\n'),
+      },
+      { name: 'once.h', source: '#pragma once\nstatic int retained(void) { return 0; }' },
+    ],
+  });
+  assert.equal(program.kind, 'prepared', JSON.stringify(program));
+  executeTerminated(execute, program.program, undefined, 0);
+
+  const invalidStdc = prepare({
+    entry: 'main.c',
+    files: [{ name: 'main.c', source: '#pragma STDC UNKNOWN ON\nint main(void) { return 0; }' }],
+  });
+  assert.equal(invalidStdc.kind, 'prepare-error', JSON.stringify(invalidStdc));
+  assert.equal(invalidStdc.diagnostics[0].code, 'UNSUPPORTED_FEATURE');
 });

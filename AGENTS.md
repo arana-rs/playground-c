@@ -35,12 +35,15 @@
 - Rerenders and Run must preserve the user's edits.
 - In Memory Viewer, Stack grows to the right and scopes appear when entered. Hide only the root scope marker for `main`; preserve its variables, nested scopes, and scopes from other functions. Use yellow for the current scope and a paler shade for earlier scopes.
 
-## Engine and phases
+## C engine
 
-- Consult `docs/c11-engine-roadmap.md` when expanding capabilities.
-- Consult `packages/c11-engine/README.md` for the API and semantics.
+- Start with `packages/c11-engine/README.md` for the package overview, development, and validation commands, then read the relevant guide for the task.
+- For C11 coverage, profile limits, clause references, or `Unplanned` status, read `packages/c11-engine/docs/coverage.md`.
+- For LP64 representation, integer and floating conversions, or numeric precision, read `packages/c11-engine/docs/numeric-profile.md`.
+- For public APIs, execution, I/O, virtual files, or budgets, read `packages/c11-engine/docs/runtime-api.md`.
+- For stepping, debug snapshots, inspectors, or the application Memory Viewer, read `packages/c11-engine/docs/debugging.md`.
 - An unimplemented function must produce an explicit diagnostic.
-- When adding capabilities, update tests, CAPABILITIES, and documentation.
+- When adding capabilities, update tests, `CAPABILITIES`, and the relevant documentation.
 
 ## Commands and validation
 

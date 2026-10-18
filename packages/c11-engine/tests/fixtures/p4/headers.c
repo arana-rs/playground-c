@@ -12,7 +12,7 @@ int main(void) {
     bits and_eq 3;
     bits xor_eq 3;
     bits or_eq 4;
-    return CHAR_BIT == 8 && CHAR_MIN == SCHAR_MIN && CHAR_MAX == SCHAR_MAX &&
+    return MB_LEN_MAX >= 1 && CHAR_BIT == 8 && CHAR_MIN == SCHAR_MIN && CHAR_MAX == SCHAR_MAX &&
         SCHAR_MIN == -128 && SCHAR_MAX == 127 && UCHAR_MAX == 255 &&
         SHRT_MIN == -32768 && SHRT_MAX == 32767 && USHRT_MAX == 65535 &&
         INT_MIN == (-2147483647 - 1) && INT_MAX == 2147483647 && UINT_MAX == 4294967295U &&

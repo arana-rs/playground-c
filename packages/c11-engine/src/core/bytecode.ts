@@ -1,5 +1,5 @@
 import { failure } from './internal.ts';
-import type { Binding, CValue, Expression, FunctionIR, Initializer, Location, Parameter, Statement } from './internal.ts';
+import type { Binding, CValue, Expression, FunctionIR, Initializer, Location, Parameter, Statement, VariablyModifiedIdentifier } from './internal.ts';
 
 export interface Scope { id: number; bindings: Binding[]; location: Location; name: string }
 export type Instruction = { location: Location; path: Scope[] } & (
@@ -12,7 +12,11 @@ export type Instruction = { location: Location; path: Scope[] } & (
   | { op: 'expression'; value: Expression }
   | { op: 'return'; value?: Expression }
   | { op: 'branch'; condition: Expression; target: number }
-  | { op: 'jump'; target: number }
+  | {
+      op: 'jump'; target: number;
+      vmScopeExit?: readonly VariablyModifiedIdentifier[];
+      vmScopeTarget?: readonly VariablyModifiedIdentifier[];
+    }
   | { op: 'switch'; value: Expression; cases: { value: CValue; target: number }[]; target: number }
 );
 export interface CompiledFunction { fn: FunctionIR; code: Instruction[] }
@@ -128,7 +132,10 @@ export function compile(fn: FunctionIR): CompiledFunction {
       labels.set(node.name, code.length); emit('tick', node.location, {});
       work.push(() => schedule(node.statement));
     } else if (node.kind === 'goto') {
-      gotos.push({ instruction: jump(node.location), target: node.target });
+      const instruction = jump(node.location);
+      instruction.vmScopeExit = node.vmScopeExit;
+      instruction.vmScopeTarget = node.vmScopeTarget;
+      gotos.push({ instruction, target: node.target });
     } else if (node.kind === 'break' || node.kind === 'continue') {
       const control = node.kind === 'break' ? controls.at(-1) : [...controls].reverse().find(item => item.kind === 'loop');
       if (!control) failure('INVALID_CONTROL_FLOW', `«${node.kind}» is outside its context.`, node.location);

@@ -13,7 +13,7 @@ import {
 import { formatBinary80Hex } from './binary80.ts';
 import type {
   AggregateDefinition, ArrayCType, Binding, CType, CValue, Expression, Initializer, InitializerDesignator,
-  Location, ObjectPointerValue, ObjectReference, ObjectScalarValue, Parameter,
+  Location, ObjectPointerValue, ObjectReference, ObjectScalarValue, Parameter, VariablyModifiedIdentifier,
 } from './internal.ts';
 import { compile } from './bytecode.ts';
 import type { CompiledFunction, Scope } from './bytecode.ts';
@@ -2154,8 +2154,9 @@ function createRuntimeSession(
           const owner = frame.scopes.at(-1);
           if (!owner) failure('INVALID_SCOPE', 'A variable-length array bound requires an active block scope.', at);
           frame.vlaLengths.set(array, Number(value.value));
-          if (retainForScope) owner.vlaTypeKeys.push(array);
-          else ephemeralTypes.push(array);
+          if (retainForScope) {
+            if (!owner.vlaTypeKeys.includes(array)) owner.vlaTypeKeys.push(array);
+          } else ephemeralTypes.push(array);
           evaluateAt(index + 1);
         });
       };
@@ -2683,7 +2684,7 @@ function createRuntimeSession(
             }
             const argument = cursor.args[cursor.index];
             if (!argument) failure('VA_ARG_EXHAUSTED', 'va_arg requested an argument past the end of the list.', at);
-            if (!compatibleType(argument.type, node.valueType) && !sameType(argument.type, node.valueType)) {
+            if (!vaArgTypesMatch(argument, node.valueType)) {
               failure('VA_ARG_TYPE_MISMATCH', `va_arg requested ${String(node.valueType)}, but the promoted argument is ${String(argument.type)}.`, at);
             }
             cursor.index++;
@@ -2900,6 +2901,35 @@ function createRuntimeSession(
       });
     }
 
+    const vaArgSignedUnsignedPairs: readonly (readonly [string, string, bigint])[] = [
+      ['signed char', 'unsigned char', 127n],
+      ['short', 'unsigned short', 32767n],
+      ['int', 'unsigned int', 2147483647n],
+      ['long', 'unsigned long', (1n << 63n) - 1n],
+      ['long long', 'unsigned long long', (1n << 63n) - 1n],
+    ];
+    const isVoidPointerType = (type: CType): boolean =>
+      !!pointerType(type) && unqualifiedType(pointedToType(type)!) === 'void';
+    const isCharacterPointerType = (type: CType): boolean => {
+      if (!pointerType(type)) return false;
+      const base = unqualifiedType(pointedToType(type)!);
+      return base === 'char' || base === 'signed char' || base === 'unsigned char';
+    };
+    const vaArgTypesMatch = (argument: CValue, requestedType: CType): boolean => {
+      if (compatibleType(argument.type, requestedType) || sameType(argument.type, requestedType)) return true;
+      const argumentType = unqualifiedType(argument.type);
+      const requested = unqualifiedType(requestedType);
+      for (const [signedType, unsignedType, signedMaximum] of vaArgSignedUnsignedPairs) {
+        const matchingPair = argumentType === signedType && requested === unsignedType ||
+          argumentType === unsignedType && requested === signedType;
+        if (matchingPair) {
+          return typeof argument.value === 'bigint' && argument.value >= 0n && argument.value <= signedMaximum;
+        }
+      }
+      return isVoidPointerType(argument.type) && isCharacterPointerType(requestedType) ||
+        isCharacterPointerType(argument.type) && isVoidPointerType(requestedType);
+    };
+
     function defaultArgumentPromotion(value: CValue, at: Location): CValue {
       if (unqualifiedType(value.type) === 'float') return valueForType(value, 'double', at);
       if (isInteger(value.type)) {
@@ -3050,7 +3080,51 @@ function createRuntimeSession(
         scopeId: scope.scopeId, functionName: frame.compiled.fn.name, scopeName: scope.layout.name,
       });
     }
-    function jump(frame: Frame, target: number): void {
+    function leaveVariablyModifiedIdentifiers(
+      frame: Frame,
+      identifiers: readonly VariablyModifiedIdentifier[],
+      targetIdentifiers: readonly VariablyModifiedIdentifier[],
+      at: Location,
+    ): void {
+      const retainedArrayTypes = new Set(targetIdentifiers.flatMap((identifier) => identifier.arrayTypes));
+      for (const identifier of identifiers) {
+        for (const arrayType of identifier.arrayTypes) {
+          if (!retainedArrayTypes.has(arrayType)) frame.vlaLengths.delete(arrayType);
+        }
+        if (identifier.vlaBinding === undefined) continue;
+        const cell = frame.cells.get(identifier.vlaBinding);
+        if (!cell) continue;
+
+        const shouldTraceDelete = !!debugEvents && !!debugObjects && debugObjects.has(cell.reference.allocationId);
+        if (shouldTraceDelete) debugEvents!.reserve(at);
+        try {
+          memory.release(cell.reference, at);
+        } catch (error) {
+          if (shouldTraceDelete) debugEvents!.cancel();
+          throw error;
+        }
+        if (shouldTraceDelete) {
+          const owner = frame.scopes.find((scope) => scope.cells.includes(identifier.vlaBinding!));
+          commitDebugObjectDelete(cell.reference, at, frame.frameId, owner?.scopeId ?? null);
+        }
+        frame.cells.delete(identifier.vlaBinding);
+        for (const scope of frame.scopes) {
+          for (let index = scope.cells.length - 1; index >= 0; index--) {
+            if (scope.cells[index] === identifier.vlaBinding) scope.cells.splice(index, 1);
+          }
+        }
+      }
+    }
+    function jump(
+      frame: Frame,
+      target: number,
+      vmScopeExit?: readonly VariablyModifiedIdentifier[],
+      vmScopeTarget?: readonly VariablyModifiedIdentifier[],
+      at: Location = runtimeLocation,
+    ): void {
+      if (vmScopeExit?.length) {
+        leaveVariablyModifiedIdentifiers(frame, vmScopeExit, vmScopeTarget ?? [], at);
+      }
       const path = frame.compiled.code[target]?.path ?? [];
       let shared = 0;
       while (shared < path.length && shared < frame.scopes.length && path[shared] === frame.scopes[shared].layout) shared++;
@@ -3200,7 +3274,9 @@ function createRuntimeSession(
           };
           if (node.value) evaluateFullExpression(node.value, frame, consume);
           else work.push(consume);
-        } else if (node.op === 'jump') jump(frame, node.target);
+        } else if (node.op === 'jump') {
+          jump(frame, node.target, node.vmScopeExit, node.vmScopeTarget, node.location);
+        }
         else if (node.op === 'branch') {
           evaluateFullExpression(node.condition, frame, () => {
             const result = operands.pop();

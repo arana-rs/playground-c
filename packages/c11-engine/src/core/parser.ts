@@ -6,6 +6,7 @@ import {
 import type {
   AggregateDefinition, AggregateMember, ArrayCType, Binding, CType, CValue, EnumDefinition, Expression, FunctionIR, GlobalObject,
   GenericAssociation, Initializer, InitializerDesignator, Location, Parameter, ParsedProgram, ScalarCType, Statement, Token, TypeQualifiers, StaticAssertion,
+  VariablyModifiedIdentifier,
 } from './internal.ts';
 import { BUILTINS, binary, commonType, convert, encodeUtf8Bytes, parseLiteral, promote, truth, unary } from './numeric.ts';
 import {
@@ -41,7 +42,11 @@ type Declarator = {
   parameterArrayQualifiers?: TypeQualifiers; minimumArrayBound?: number; prototypeVariableLengthBound?: boolean; parameterScope?: ParserScopeFrame;
 };
 type TagScope = Map<string, AggregateDefinition>;
-type Scope = { names: Map<string, Binding>; owner?: Block | Extract<Statement, { kind: 'for' }> };
+type Scope = {
+  names: Map<string, Binding>;
+  variablyModifiedIdentifiers: VariablyModifiedIdentifier[];
+  owner?: Block | Extract<Statement, { kind: 'for' }>;
+};
 type TypedefBinding = { type: CType; isConst?: boolean };
 type ParserScopeFrame = {
   tags: TagScope;
@@ -1770,7 +1775,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           oldStyle: !!declarator.oldStyle, inline: isInline, extern: isExtern, noreturn: isNoreturn,
         };
         if (peek().text === '{' || declarator.oldStyle && isDeclarationStart()) {
-          if (!first || peek(1).text === ';') failure('SYNTAX_ERROR', 'A function definition must be a separate external declaration.', peek());
+          if (!first) failure('SYNTAX_ERROR', 'A function definition must be a separate external declaration.', peek());
           if (sourceParameters.some((parameter) => parameter.prototypeVariableLengthBound)) {
             failure('TYPE_ERROR', 'An array declarator using `[*]` is only permitted in function prototype scope.', declarator.location);
           }
@@ -2097,7 +2102,8 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
     visibleFunctions.set(fn.name, signature);
     if (!fn.body) continue;
     type ScopeOwner = Block | Extract<Statement, { kind: 'for' }>;
-    const scopes: Scope[] = [{ names: new Map(), owner: fn.body }];
+    const scopes: Scope[] = [{ names: new Map(), variablyModifiedIdentifiers: [], owner: fn.body }];
+    const activeVariablyModifiedIdentifiers = new Set<VariablyModifiedIdentifier>();
     const globalVisible = new Map<string, GlobalObject>();
     for (const global of globals) {
       if (comesBefore(global.location, fn.location)) globalVisible.set(global.name, globalByName.get(global.name)!);
@@ -2123,6 +2129,25 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       fn.bindings.push(binding); scope.names.set(name, binding);
       if (!parameter) scope.owner?.bindings?.push(binding.id);
       return binding.id;
+    };
+    const markVariablyModifiedIdentifier = (
+      arrayTypes: readonly ArrayCType[],
+      vlaBinding?: number,
+    ): void => {
+      const identifier: VariablyModifiedIdentifier = {
+        arrayTypes,
+        ...(vlaBinding === undefined ? {} : { vlaBinding }),
+      };
+      scopes[scopes.length - 1].variablyModifiedIdentifiers.push(identifier);
+      activeVariablyModifiedIdentifiers.add(identifier);
+    };
+    const snapshotVariablyModifiedIdentifiers = (): ReadonlySet<VariablyModifiedIdentifier> => new Set(activeVariablyModifiedIdentifiers);
+    const entersVariablyModifiedScope = (
+      target: ReadonlySet<VariablyModifiedIdentifier>,
+      source: ReadonlySet<VariablyModifiedIdentifier>,
+    ): boolean => {
+      for (const identifier of target) if (!source.has(identifier)) return true;
+      return false;
     };
     const isLvalue = (node: Expression): boolean => {
       switch (node.kind) {
@@ -2743,16 +2768,28 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       if (!parameter.name) failure('SYNTAX_ERROR', 'Parameters in a definition must have names.', parameter.location);
       parameter.binding = declare(parameter.name, parameter.type, parameter.location, true, parameter.isConst);
       fn.bindings[parameter.binding].register = !!parameter.register;
+      if (hasVariableLengthBound(parameter.type)) {
+        markVariablyModifiedIdentifier(variableLengthArrayTypes(parameter.type));
+      }
     }
     for (const parameter of fn.parameters) analyzeVariableLengthBounds(parameter.variableLengthBounds ?? [], parameter.location);
-    type SwitchContext = { type: CType; cases: Set<string>; hasDefault: boolean };
-    const labels = new Map<string, Location>();
-    const gotos: Extract<Statement, { kind: 'goto' }>[] = [];
+    type SwitchContext = {
+      type: CType;
+      cases: Set<string>;
+      hasDefault: boolean;
+      variablyModifiedIdentifiers: ReadonlySet<VariablyModifiedIdentifier>;
+    };
+    const labels = new Map<string, { location: Location; variablyModifiedIdentifiers: ReadonlySet<VariablyModifiedIdentifier> }>();
+    const gotos: { node: Extract<Statement, { kind: 'goto' }>; variablyModifiedIdentifiers: ReadonlySet<VariablyModifiedIdentifier> }[] = [];
     const pushScope = (owner?: ScopeOwner) => {
       if (owner) owner.bindings = [];
-      scopes.push({ names: new Map(), owner });
+      scopes.push({ names: new Map(), variablyModifiedIdentifiers: [], owner });
     };
-    const popScope = () => { if (scopes.length > 1) scopes.pop(); };
+    const popScope = () => {
+      if (scopes.length <= 1) return;
+      const scope = scopes.pop()!;
+      for (const identifier of scope.variablyModifiedIdentifiers) activeVariablyModifiedIdentifiers.delete(identifier);
+    };
     type StatementWork =
       | { node: Statement; loops: number; switches: SwitchContext[]; root?: boolean }
       | { leaveScope: true }
@@ -2778,6 +2815,9 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
           break;
         case 'typeDeclaration':
           analyzeVariableLengthBounds(variableLengthArrayTypes(node.type), node.location);
+          if (hasVariableLengthBound(node.type)) {
+            markVariablyModifiedIdentifier(variableLengthArrayTypes(node.type));
+          }
           break;
         case 'declaration': {
           analyzeVariableLengthBounds(variableLengthArrayTypes(node.type), node.location);
@@ -2804,6 +2844,12 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
             binding.requestedAlignment = node.requestedAlignment;
             binding.threadLocal = !!node.threadLocal;
             if (node.threadLocal) binding.storageDuration = 'thread-local';
+          }
+          if (hasVariableLengthBound(node.type)) {
+            markVariablyModifiedIdentifier(
+              variableLengthArrayTypes(node.type),
+              hasVariableLengthObjectSize(node.type) ? node.binding : undefined,
+            );
           }
           if (node.initializer) node.initializer = analyzeInitializer(node.type, node.initializer, !!node.static);
           break;
@@ -2846,7 +2892,10 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         }
         case 'switch': {
           const valueType = analyzeExpression(node.value); requireInteger(valueType, node.value.location);
-          const context: SwitchContext = { type: promote(valueType), cases: new Set(), hasDefault: false };
+          const context: SwitchContext = {
+            type: promote(valueType), cases: new Set(), hasDefault: false,
+            variablyModifiedIdentifiers: snapshotVariablyModifiedIdentifiers(),
+          };
           pushScope(); pendingStatements.push({ leaveScope: true });
           pendingStatements.push({ node: node.body, loops, switches: [...switches, context] });
           break;
@@ -2854,6 +2903,9 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         case 'case': {
           const context = switches[switches.length - 1];
           if (!context) failure('INVALID_CASE', 'case and default require an enclosing switch.', node.location);
+          if (entersVariablyModifiedScope(snapshotVariablyModifiedIdentifiers(), context.variablyModifiedIdentifiers)) {
+            failure('TYPE_ERROR', 'A switch statement cannot jump to a case or default label within the scope of an identifier with a variably modified type.', node.location);
+          }
           if (node.value) {
             requireInteger(analyzeExpression(node.value), node.value.location);
             requireIntegerConstantExpression(node.value, 'case', aggregates);
@@ -2870,15 +2922,25 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         }
         case 'label':
           if (labels.has(node.name)) failure('DUPLICATE_LABEL', `Label «${node.name}» already exists in this function.`, node.location);
-          labels.set(node.name, node.location); pendingStatements.push({ node: node.statement, loops, switches });
+          labels.set(node.name, { location: node.location, variablyModifiedIdentifiers: snapshotVariablyModifiedIdentifiers() });
+          pendingStatements.push({ node: node.statement, loops, switches });
           break;
-        case 'goto': gotos.push(node); break;
+        case 'goto': gotos.push({ node, variablyModifiedIdentifiers: snapshotVariablyModifiedIdentifiers() }); break;
         case 'break': if (!loops && !switches.length) failure('INVALID_BREAK', 'break requires an enclosing loop or switch.', node.location); break;
         case 'continue': if (!loops) failure('INVALID_CONTINUE', 'continue requires an enclosing loop.', node.location); break;
         case 'empty': break;
       }
     }
-    for (const node of gotos) if (!labels.has(node.target)) failure('UNKNOWN_LABEL', `Label «${node.target}» does not exist in this function.`, node.location);
+    for (const jump of gotos) {
+      const target = labels.get(jump.node.target);
+      if (!target) failure('UNKNOWN_LABEL', `Label «${jump.node.target}» does not exist in this function.`, jump.node.location);
+      if (entersVariablyModifiedScope(target.variablyModifiedIdentifiers, jump.variablyModifiedIdentifiers)) {
+        failure('TYPE_ERROR', 'A goto statement cannot jump into the scope of an identifier with a variably modified type.', jump.node.location);
+      }
+      jump.node.vmScopeExit = [...jump.variablyModifiedIdentifiers]
+        .filter((identifier) => !target.variablyModifiedIdentifiers.has(identifier));
+      jump.node.vmScopeTarget = [...target.variablyModifiedIdentifiers];
+    }
   }
   return mainDefinition;
 }

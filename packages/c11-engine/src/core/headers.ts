@@ -1,6 +1,7 @@
 import { STDIO_FUNCTIONS, STDIO_HEADER_BODY } from './stdio-metadata.ts';
 import { ERRNO_MACROS } from './errno-metadata.ts';
 import { STDLIB_FUNCTIONS, STDLIB_HEADER_BODY, TIME_FUNCTIONS, TIME_HEADER_BODY } from './stdlib-time-metadata.ts';
+import { STRING_FUNCTIONS } from './string-metadata.ts';
 import {
   MATH_BINARY_FUNCTIONS, MATH_CLASSIFICATION_BUILTINS, MATH_CLASSIFICATION_FUNCTIONS,
   MATH_COMPARISON_BUILTINS, MATH_COMPARISON_MACROS,
@@ -15,6 +16,7 @@ const guarded = (name: string, body: string): string => {
 
 const limitsMacros: Record<string, string> = {
   CHAR_BIT: '8', SCHAR_MIN: '(-127-1)', SCHAR_MAX: '127', UCHAR_MAX: '255', CHAR_MIN: '(-127-1)', CHAR_MAX: '127',
+  MB_LEN_MAX: '1',
   SHRT_MIN: '(-32767-1)', SHRT_MAX: '32767', USHRT_MAX: '65535', INT_MIN: '(-2147483647-1)', INT_MAX: '2147483647', UINT_MAX: '4294967295U',
   LONG_MIN: '(-9223372036854775807L-1L)', LONG_MAX: '9223372036854775807L', ULONG_MAX: '18446744073709551615UL',
   LLONG_MIN: '(-9223372036854775807LL-1LL)', LLONG_MAX: '9223372036854775807LL', ULLONG_MAX: '18446744073709551615ULL',
@@ -98,9 +100,6 @@ const mathComparisonDeclarations = MATH_COMPARISON_BUILTINS.map((name) => `int $
 const mathComparisonMacros = MATH_COMPARISON_MACROS.map((name, index) =>
   `#define ${name}(x, y) ${MATH_COMPARISON_BUILTINS[index]!}((x), (y))`,
 ).join('\n');
-const stringFunctions = [
-  'memcpy', 'memmove', 'memset', 'memcmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp', 'strchr', 'strrchr', 'strspn', 'strcspn', 'strpbrk', 'strstr', 'strtok', 'strlen', 'strerror',
-];
 const stdioFunctions = STDIO_FUNCTIONS;
 const inttypesFunctions = ['imaxabs', 'imaxdiv', 'strtoimax', 'strtoumax'];
 const inttypesFormatFamilies = [
@@ -146,7 +145,7 @@ export const LIBRARY_DECLARATIONS: Readonly<Record<string, readonly string[]>> =
   'stdint.h': Object.freeze([]),
   'stdio.h': Object.freeze(stdioFunctions),
   'stdlib.h': STDLIB_FUNCTIONS,
-  'string.h': Object.freeze(stringFunctions),
+  'string.h': STRING_FUNCTIONS,
   'time.h': TIME_FUNCTIONS,
 });
 export const LIBRARY_FUNCTIONS: readonly string[] = Object.freeze([
@@ -182,6 +181,7 @@ void *memcpy(void * restrict, const void * restrict, size_t);
 void *memmove(void *, const void *, size_t);
 void *memset(void *, int, size_t);
 int memcmp(const void *, const void *, size_t);
+void *memchr(const void *, int, size_t);
 char *strcpy(char * restrict, const char * restrict);
 char *strncpy(char * restrict, const char * restrict, size_t);
 char *strcat(char * restrict, const char * restrict);
@@ -200,13 +200,17 @@ char *strerror(int);
 `;
 
 const standardHeaders: Record<string, string> = {
-  'assert.h': guarded('assert.h', `
+  // Each inclusion must sample the current NDEBUG definition.
+  'assert.h': `
+#undef assert
 #ifdef NDEBUG
 #define assert(expression) ((void)0)
 #else
 void __c11_assert_fail(const char *, const char *, unsigned long);
 #define assert(expression) ((expression) ? (void)0 : __c11_assert_fail(#expression, __FILE__, __LINE__))
-#endif`),
+#endif
+#define static_assert _Static_assert
+`,
   'ctype.h': guarded('ctype.h', ctypeFunctions.map((name) => `int ${name}(int);`).join('\n')),
   'errno.h': guarded('errno.h', `
 extern int *__c11_errno_location(void);
