@@ -1,6 +1,7 @@
-import { forwardRef, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode, UIEvent as ReactUIEvent } from 'react';
 import { Button } from './arc/button/button.tsx';
+import { TerminalPresentation } from './terminalPresentation.ts';
 import { getPlaygroundShortcut } from '../keyboardShortcuts.ts';
 import type { ConsoleOutputSegment, ConsoleStatusTone } from '../execution/useRunner.ts';
 import { useI18n } from '../i18n.tsx';
@@ -53,12 +54,15 @@ export const ConsolePanel = forwardRef<HTMLElement, ConsolePanelProps>(function 
   const { t } = useI18n();
   const outputRef = useRef<HTMLPreElement>(null);
   const stdinRef = useRef<HTMLInputElement>(null);
+  const presentationRef = useRef<TerminalPresentation | null>(null);
   const previousInputRequest = useRef<number | null>(null);
   const previousInputResetKey = useRef(inputResetKey);
   const previousVisible = useRef(visible && !hidden);
   const shouldAutoScroll = useRef(true);
   const [stdinDraft, setStdinDraft] = useState('');
-  const outputText = useMemo(() => segments.map(segment => segment.text).join(''), [segments]);
+  if (!presentationRef.current) presentationRef.current = new TerminalPresentation();
+  const presentation = presentationRef.current.update(segments, inputResetKey);
+  const outputText = [...presentation.screen, ...presentation.protectedSegments].map(segment => segment.text).join('');
 
   useLayoutEffect(() => {
     const shown = visible && !hidden;
@@ -141,8 +145,19 @@ export const ConsolePanel = forwardRef<HTMLElement, ConsolePanelProps>(function 
         </div>
       </div>
       <pre ref={outputRef} className="console-output" role="log" aria-live="off" aria-atomic="true" onScroll={onOutputScroll}>
-        {segments.map((segment, index) => (
-          <span key={index} className={`console-output-${segment.tone}`}>{segment.text}</span>
+        {presentation.screen.map((segment, index) => (
+          <span
+            key={`screen-${index}`}
+            className={`console-output-${segment.tone}`}
+            data-stream={segment.stream}
+            role={segment.stream === 'stderr' ? 'group' : undefined}
+            aria-label={segment.stream === 'stderr' ? t('console.stderrOutput') : undefined}
+          >
+            {segment.text}
+          </span>
+        ))}
+        {presentation.protectedSegments.map((segment, index) => (
+          <span key={`protected-${index}`} className={`console-output-${segment.tone}`} data-stream={segment.stream}>{segment.text}</span>
         ))}
         {inputRequestId !== null && (
           <input

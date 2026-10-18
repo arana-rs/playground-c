@@ -7,6 +7,7 @@ import { SelectedFileTab } from '../components/SelectedFileTab.tsx';
 import { CodeEditor } from '../editor/CodeEditor.tsx';
 import { formatConsoleSegments } from '../execution/useRunner.ts';
 import type { ConsoleEntry, ConsoleStatusTone } from '../execution/useRunner.ts';
+import type { RunConfiguration } from '../execution/configuration.ts';
 import { useMemoryViewer } from './useMemoryViewer.ts';
 import { hasDirectStdioInclude } from './stdioInclude.ts';
 import type {
@@ -60,6 +61,7 @@ import type { Translate } from '../i18n.tsx';
 
 interface MemoryViewerProps {
   source: string;
+  configuration: RunConfiguration;
   onClose: () => void;
 }
 
@@ -1843,7 +1845,7 @@ function MemoryViewerRegions({
   );
 }
 
-export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
+export function MemoryViewer({ source, configuration, onClose }: MemoryViewerProps) {
   const { language, t } = useI18n();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -1881,21 +1883,22 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
     next,
     sendStdinLine,
     sendStdinEOF,
-    setStdinInteractiveEnabled,
+    setConsoleEnabled,
     stop,
-  } = useMemoryViewer(source);
+    transcriptRevision,
+  } = useMemoryViewer(source, configuration, false);
   const hasStdioInclude = useMemo(() => hasDirectStdioInclude(frozenSource), [frozenSource]);
   const [ioPreference, setIoPreference] = useState(false);
   const showIoConsole = hasStdioInclude && ioPreference;
   useEffect(() => {
-    setStdinInteractiveEnabled(showIoConsole);
-  }, [setStdinInteractiveEnabled, showIoConsole]);
+    setConsoleEnabled(showIoConsole);
+  }, [setConsoleEnabled, showIoConsole]);
   const hasMainSourceLocation = location?.file === 'main.c';
   const consoleTranscript = useMemo<readonly ConsoleEntry[]>(
     () => transcript.map(entry => entry.stream === 'system'
-      ? { stream: 'system', text: entry.text, tone: entry.tone }
+      ? { stream: 'system', text: entry.text, tone: entry.tone, role: entry.role }
       : { stream: entry.stream, text: entry.text }),
-    [transcript],
+    [transcript, transcriptRevision],
   );
   const consoleSegments = useMemo(
     () => formatConsoleSegments({ status: 'running', transcript: consoleTranscript, inputRequestId }),

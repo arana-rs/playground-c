@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MemoryViewerController } from '../src/memory/MemoryViewerController.ts';
+import { TerminalPresentation } from '../src/components/terminalPresentation.ts';
+import { formatConsoleSegments } from '../src/execution/useRunner.ts';
 import { RUN_CONFIGURATION } from '../src/execution/configuration.ts';
 
 const metrics = {
@@ -972,11 +974,11 @@ test('the watchdog covers preparation and steps, but not waits between ticks or 
   assert.equal(preparing.workers[0].terminated, true);
 });
 
-test('I/O off responds with EOF to the first input-needed without publishing a hidden wait', () => {
+test('I/O off responds with EOF to the first input-needed without recording console history', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker);
-  controller.setStdinInteractiveEnabled(false);
+  controller.setConsoleEnabled(false);
   controller.next();
 
   worker.emit({
@@ -991,12 +993,15 @@ test('I/O off responds with EOF to the first input-needed without publishing a h
   assert.equal(controller.state.status, 'running');
   assert.equal(controller.state.inputRequestId, null);
   assert.equal(controller.state.stepIndex, 0, 'EOF continues the same step without creating history');
-  assert.ok(controller.state.transcript.some(entry => entry.text === '[EOF]\n'));
+  assert.deepEqual(controller.state.transcript, [], 'automatic EOF is not recorded while console capture is off');
   assert.equal(controller.sendStdinLine('9'), false);
 
   const messageCount = worker.messages.length;
-  controller.setStdinInteractiveEnabled(true);
-  assert.equal(worker.messages.length, messageCount, 'reactivating I/O does not reopen stdin after EOF');
+  controller.setConsoleEnabled(true);
+  assert.equal(worker.messages.length, messageCount + 1, 'reactivating I/O updates capture without reopening stdin');
+  assert.equal(worker.messages.at(-1).type, 'debug-console-enabled');
+  assert.equal(worker.messages.at(-1).enabled, true);
+  assert.equal(controller.sendStdinLine('9'), false, 'EOF remains closed after I/O is reactivated');
 });
 
 test('I/O off closes the wait from history without moving its cursor', () => {
@@ -1015,7 +1020,7 @@ test('I/O off closes the wait from history without moving its cursor', () => {
   assert.equal(controller.state.isViewingHistory, true);
   assert.equal(controller.state.inputRequestId, null, 'the stdin form is hidden in history');
 
-  controller.setStdinInteractiveEnabled(false);
+  controller.setConsoleEnabled(false);
   assert.deepEqual(worker.messages.at(-1), {
     type: 'debug-stdin-eof', jobId, requestId: 2, inputRequestId: 13,
   });
@@ -1024,9 +1029,9 @@ test('I/O off closes the wait from history without moving its cursor', () => {
   assert.equal(controller.state.isViewingHistory, true);
 
   const messageCount = worker.messages.length;
-  controller.setStdinInteractiveEnabled(true);
+  controller.setConsoleEnabled(true);
   assert.equal(controller.sendStdinLine('ignored'), false, 'the internal token is already closed');
-  assert.equal(worker.messages.length, messageCount, 'I/O is shown again without restarting the session');
+  assert.equal(worker.messages.length, messageCount + 1, 'I/O capture is enabled without restarting the session');
 
   worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: terminated(), events: [] });
   assert.equal(controller.state.stepIndex, 0, 'the pending step response retains the history cursor');
@@ -1038,7 +1043,7 @@ test('I/O on retains normal interactive input', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker);
-  controller.setStdinInteractiveEnabled(true);
+  controller.setConsoleEnabled(true);
   controller.next();
   worker.emit({
     type: 'debug-progress', jobId, requestId: 1, inputRequestId: 21, progress: inputNeeded(2), events: [],
@@ -1056,7 +1061,7 @@ test('I/O on retains normal interactive input', () => {
   });
 });
 
-test('stdin retains the same step across repeated waits and keeps output/history monotonic', () => {
+test('stdin retains the same step across waits while history restores the transcript prefix', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1);
@@ -1110,17 +1115,105 @@ test('stdin retains the same step across repeated waits and keeps output/history
   assert.equal(controller.state.lifecycle.eventCount, 3, 'events from both waits and the pause are added without being lost');
   assert.equal(controller.state.heapObjects.length, 1, 'final snapshots replace transient state');
 
-  const transcriptBeforeHistory = controller.state.transcript;
-  const outputText = transcriptBeforeHistory.map(entry => entry.text).join('');
+  const outputText = controller.state.transcript.map(entry => entry.text).join('');
   assert.equal(outputText, 'prompt> 12\npart 12 34\n34\n');
   const messageCount = worker.messages.length;
   controller.previous();
   assert.equal(controller.state.isViewingHistory, true);
   assert.equal(controller.state.inputRequestId, null);
   assert.equal(controller.state.canStop, true, 'Stop remains available while traversing history as the VM runs');
+  assert.deepEqual(controller.state.transcript, [], 'Back restores the console prefix captured before the pending step');
   controller.next();
-  assert.equal(controller.state.transcript, transcriptBeforeHistory, 'navigating snapshots does not re-emit output or stdin');
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), outputText, 'Next restores already-recorded output and input');
   assert.equal(worker.messages.length, messageCount);
+});
+
+test('history checkpoints preserve ordered output and split ANSI sequences without future leakage', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker, 1);
+  const presentation = new TerminalPresentation();
+  const screen = () => presentation.update(formatConsoleSegments({
+    status: 'running', transcript: controller.state.transcript, inputRequestId: null,
+  }));
+
+  controller.next();
+  worker.emit({
+    type: 'debug-output', jobId, requestId: 1, sequence: 1, stream: 'stdout',
+    chunk: new TextEncoder().encode('before\n\u001b['),
+  });
+  worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(2), events: [] });
+  assert.equal(screen().screen.map(segment => segment.text).join(''), 'before\n');
+
+  controller.next();
+  worker.emit({
+    type: 'debug-output', jobId, requestId: 2, sequence: 2, stream: 'stdout',
+    chunk: new TextEncoder().encode('2J\u001b[Hfuture'),
+  });
+  worker.emit({
+    type: 'debug-output', jobId, requestId: 2, sequence: 3, stream: 'stderr',
+    chunk: new TextEncoder().encode('warning'),
+  });
+  worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: paused(3), events: [] });
+  assert.equal(screen().screen.map(segment => segment.text).join(''), 'futurewarning');
+  assert.deepEqual(controller.state.transcript.map(({ stream }) => stream), ['stdout', 'stderr']);
+
+  const messageCount = worker.messages.length;
+  controller.previous();
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'before\n\u001b[', 'the prior checkpoint truncates the coalesced stdout tail');
+  assert.equal(screen().screen.map(segment => segment.text).join(''), 'before\n', 'Back resets and replays the partial CSI prefix');
+  controller.next();
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'before\n\u001b[2J\u001b[Hfuturewarning');
+  assert.equal(screen().screen.map(segment => segment.text).join(''), 'futurewarning', 'Next replays the selected prefix through clear-screen');
+  assert.equal(worker.messages.length, messageCount, 'history navigation does not send another VM step');
+});
+
+test('console capture disabled at start skips deltas and enabling later does not recover old output', () => {
+  const { controller, workers } = setup({ enableConsole: false });
+  const worker = workers[0];
+  const jobId = ready(worker, 1);
+  assert.equal(worker.messages[0].enableConsole, false);
+
+  controller.next();
+  worker.emit({
+    type: 'debug-output', jobId, requestId: 1, sequence: 1, stream: 'stdout',
+    consoleGeneration: 0, chunk: new TextEncoder().encode('hidden'),
+  });
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 1, inputRequestId: 5, progress: inputNeeded(2), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+  assert.equal(worker.messages.at(-1).type, 'debug-stdin-eof', 'stdin still receives EOF while capture is off');
+  assert.deepEqual(controller.state.transcript, []);
+
+  worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: terminated(), events: [] });
+  controller.setConsoleEnabled(true);
+  assert.deepEqual(controller.state.transcript, [], 'turning capture on after termination cannot replay discarded output');
+});
+
+test('console generation rejects output already queued when capture is toggled off and back on', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker, 1);
+  controller.next();
+  controller.setConsoleEnabled(false);
+  controller.setConsoleEnabled(true);
+
+  worker.emit({
+    type: 'debug-output', jobId, requestId: 1, sequence: 1, stream: 'stdout',
+    consoleGeneration: 0, chunk: new TextEncoder().encode('discarded'),
+  });
+  worker.emit({
+    type: 'debug-output', jobId, requestId: 1, sequence: 2, stream: 'stdout',
+    consoleGeneration: 1, chunk: new TextEncoder().encode('also discarded'),
+  });
+  worker.emit({
+    type: 'debug-output', jobId, requestId: 1, sequence: 3, stream: 'stdout',
+    consoleGeneration: 2, chunk: new TextEncoder().encode('captured'),
+  });
+  worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(2), events: [] });
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'captured');
 });
 
 test('EOF uses the wait token once and Stop retains partial output and history', () => {
@@ -1150,6 +1243,33 @@ test('EOF uses the wait token once and Stop retains partial output and history',
   worker.emit({ type: 'debug-output', jobId, requestId: 1, sequence: 2, stream: 'stderr', chunk: new TextEncoder().encode('late') });
   assert.equal(controller.state.transcript, transcript, 'late output after Stop is discarded');
   assert.equal(controller.sendStdinEOF(), false);
+});
+
+test('EOF echo appears at the live frontier and is restored only at its saved history point', () => {
+  const { controller, workers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker, 1);
+  controller.next();
+  worker.emit({
+    type: 'debug-output', jobId, requestId: 1, sequence: 1, stream: 'stdout',
+    chunk: new TextEncoder().encode('prompt> '),
+  });
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 1, inputRequestId: 8, progress: inputNeeded(2), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'prompt> ');
+  assert.equal(controller.sendStdinEOF(), true);
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'prompt> [EOF]\n');
+  worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(3), events: [] });
+
+  const messageCount = worker.messages.length;
+  controller.previous();
+  assert.deepEqual(controller.state.transcript, [], 'Back hides the later prompt and EOF echo');
+  controller.next();
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'prompt> [EOF]\n');
+  assert.equal(worker.messages.length, messageCount, 'restoring an EOF checkpoint does not resend EOF or input');
 });
 
 test('a stdin wait is hidden in old history and reappears when returning to its boundary', () => {

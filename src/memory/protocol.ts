@@ -9,16 +9,23 @@ import type {
   DebugSourceLocation,
   DebugStaticObjectSnapshot,
 } from '@playground/c11-engine/core';
+import type { RunConfiguration } from '../execution/configuration.ts';
 
 export type MemoryViewerCommand =
-  | { type: 'debug-start'; jobId: number; fileName: string; source: string }
+  | {
+    type: 'debug-start'; jobId: number; fileName: string; source: string;
+    configuration: Pick<RunConfiguration, 'options' | 'debug'>;
+    enableConsole?: boolean;
+    consoleGeneration?: number;
+  }
   | { type: 'debug-step'; jobId: number; requestId: number }
+  | { type: 'debug-console-enabled'; jobId: number; enabled: boolean; generation: number }
   | { type: 'debug-stdin'; jobId: number; requestId: number; inputRequestId: number; bytes: Uint8Array }
   | { type: 'debug-stdin-eof'; jobId: number; requestId: number; inputRequestId: number };
 
-/** Paused/waiting progress moves output through debug-output deltas, not cumulative byte snapshots. */
+/** Console bytes move through debug-output deltas, not cumulative progress snapshots. */
 export type MemoryViewerProgress = DebugProgress extends infer Result
-  ? Result extends { kind: 'paused' | 'input-needed' }
+  ? Result extends { stdout: Uint8Array; stderr: Uint8Array }
     ? Omit<Result, 'stdout' | 'stderr'>
     : Result
   : never;
@@ -40,7 +47,7 @@ export type MemoryViewerResponse =
   | {
     /** Sequence follows emitted deltas; byte order is preserved per stream, not globally across stdout/stderr. */
     type: 'debug-output'; jobId: number; requestId: number | null;
-    sequence: number; stream: 'stdout' | 'stderr'; chunk: Uint8Array;
+    sequence: number; stream: 'stdout' | 'stderr'; chunk: Uint8Array; consoleGeneration?: number;
   }
   | {
     type: 'debug-progress'; jobId: number; requestId: number | null;

@@ -27,11 +27,13 @@ export type ConsoleOutputTone = 'program' | ConsoleSystemTone;
 
 export type ConsoleEntry =
   | { stream: 'stdout' | 'stderr' | 'stdin'; text: string }
-  | { stream: 'system'; text: string; tone?: ConsoleSystemTone };
+  | { stream: 'system'; text: string; tone?: ConsoleSystemTone; role?: 'input' | 'protected' };
 
 export interface ConsoleOutputSegment {
   tone: ConsoleOutputTone;
   text: string;
+  role?: 'output' | 'input' | 'protected';
+  stream?: ConsoleEntry['stream'];
 }
 
 export type RunnerState =
@@ -75,6 +77,7 @@ export function getConsoleStatus(state: RunnerState): ConsoleStatus {
 interface ActiveRun {
   jobId: number;
   worker: Worker;
+  configuration: RunConfiguration;
   startedAt: number;
   fileName: string;
   fileSizeBytes: number;
@@ -120,31 +123,34 @@ function appendOutputSegment(
   segments: ConsoleOutputSegment[],
   text: string,
   tone: ConsoleOutputTone,
+  role: ConsoleOutputSegment['role'] = 'output',
+  stream?: ConsoleOutputSegment['stream'],
 ) {
   if (!text) return;
   const previous = segments.at(-1);
-  if (previous?.tone === tone) previous.text += text;
-  else segments.push({ tone, text });
+  if (previous?.tone === tone && previous.role === role && previous.stream === stream) previous.text += text;
+  else segments.push({ tone, text, role, stream });
 }
 
 function appendOutputSection(
   segments: ConsoleOutputSegment[],
-  next: { tone: ConsoleOutputTone; text: string },
+  next: { tone: ConsoleOutputTone; text: string; role?: ConsoleOutputSegment['role']; stream?: ConsoleOutputSegment['stream'] },
 ) {
   if (!next.text) return;
   const previous = segments.at(-1);
   const separator = previous && !previous.text.endsWith('\n') ? '\n' : '';
-  appendOutputSegment(segments, `${separator}${next.text}`, next.tone);
+  appendOutputSegment(segments, `${separator}${next.text}`, next.tone, next.role, next.stream);
 }
 
 function formatTranscriptSegments(transcript: readonly ConsoleEntry[]): ConsoleOutputSegment[] {
   const segments: ConsoleOutputSegment[] = [];
   for (const entry of transcript) {
     if (entry.stream === 'stderr') {
-      appendOutputSection(segments, { tone: 'program', text: `stderr:\n${entry.text}` });
+      appendOutputSegment(segments, entry.text, 'program', 'output', 'stderr');
     } else {
       const tone = entry.stream === 'system' ? entry.tone ?? 'system' : 'program';
-      appendOutputSegment(segments, entry.text, tone);
+      const role = entry.stream === 'system' ? entry.role ?? 'protected' : entry.stream === 'stdin' ? 'input' : 'output';
+      appendOutputSegment(segments, entry.text, tone, role, entry.stream);
     }
   }
   return segments;
@@ -244,13 +250,13 @@ export class RunnerController {
     const diagnosticsReport = this.timeoutReport(current);
     const transcript = addSystemEntry(
       this.flushDecoders(current),
-      `The ${formatDuration(this.configuration.timeoutMs)} time limit expired while starting, reading, preparing, or running "${current.fileName}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
+      `The ${formatDuration(current.configuration.timeoutMs)} time limit expired while starting, reading, preparing, or running "${current.fileName}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
       'warning',
     );
     this.finish(current, {
       status: 'timeout',
       file: current.fileName,
-      timeoutMs: this.configuration.timeoutMs,
+      timeoutMs: current.configuration.timeoutMs,
       diagnosticsReport,
       transcript,
     });
@@ -301,7 +307,7 @@ export class RunnerController {
         sizeBytes: current.fileSizeBytes,
         lineCount: current.sourceLineCount,
       },
-      budgets: diagnosticBudgets(this.configuration),
+      budgets: diagnosticBudgets(current.configuration),
       stages: {
         ...current.stages,
         watchdogActiveMs: this.watchdogActiveMs(current, now),
@@ -312,7 +318,7 @@ export class RunnerController {
       metrics: { ...current.metrics },
       diagnostic: {
         code: 'RUN_TIMEOUT_UI',
-        message: `The interface watchdog stopped the Worker after ${formatDuration(this.configuration.timeoutMs)} of active time; stdin waits are excluded from the budget.`,
+        message: `The interface watchdog stopped the Worker after ${formatDuration(current.configuration.timeoutMs)} of active time; stdin waits are excluded from the budget.`,
       },
     };
   }
@@ -353,7 +359,7 @@ export class RunnerController {
     this.finish(current, { status: 'error', file: current.fileName, reason, message, transcript });
   }
 
-  run(file: File): void {
+  run(file: File, configuration: RunConfiguration = this.configuration): void {
     if (this.active) return;
     const startedAt = performance.now();
     const jobId = ++this.nextJobId;
@@ -375,12 +381,13 @@ export class RunnerController {
     const current: ActiveRun = {
       jobId,
       worker,
+      configuration,
       startedAt,
       fileName: file.name,
       fileSizeBytes: file.size,
       timeout: undefined,
       timeoutStartedAt: null,
-      timeoutRemainingMs: this.configuration.timeoutMs,
+      timeoutRemainingMs: configuration.timeoutMs,
       watchdogActiveElapsedMs: 0,
       inputRequestId: null,
       lastRequestId: 0,
@@ -410,7 +417,7 @@ export class RunnerController {
     };
 
     this.armWatchdog(current);
-    const request: RunRequest = { type: 'run', jobId, file, options: this.configuration.options };
+    const request: RunRequest = { type: 'run', jobId, file, options: configuration.options };
     const dispatchStartedAt = performance.now();
     current.dispatchStartedAt = dispatchStartedAt;
     current.lastStageObservedAt = dispatchStartedAt;
@@ -499,7 +506,7 @@ export class RunnerController {
     if (state.status === 'running') {
       this.publish({
         status: 'running',
-        transcript: appendEntry(state.transcript, { stream: 'system', text: '[EOF]\n' }),
+        transcript: appendEntry(state.transcript, { stream: 'system', text: '[EOF]\n', role: 'input' }),
         inputRequestId: null,
       });
     }
@@ -534,7 +541,7 @@ export function useRunner(configuration: RunConfiguration = RUN_CONFIGURATION) {
   }, [runner]);
   useEffect(() => () => runner.dispose(), [runner]);
 
-  const run = useCallback((file: File) => runner.run(file), [runner]);
+  const run = useCallback((file: File, configuration?: RunConfiguration) => runner.run(file, configuration), [runner]);
   const stop = useCallback(() => runner.stop(), [runner]);
   const sendStdinLine = useCallback((line: string) => runner.sendStdinLine(line), [runner]);
   const sendStdinEOF = useCallback(() => runner.sendStdinEOF(), [runner]);
@@ -558,10 +565,10 @@ function appendConsoleSection(current: string, next: string): string {
 
 function formatOutputSegments(result: RunResult): ConsoleOutputSegment[] {
   const segments: ConsoleOutputSegment[] = [];
-  if ('stdout' in result) appendOutputSection(segments, { tone: 'program', text: new TextDecoder().decode(result.stdout) });
+  if ('stdout' in result) appendOutputSegment(segments, new TextDecoder().decode(result.stdout), 'program', 'output', 'stdout');
   if ('stderr' in result) {
     const stderr = new TextDecoder().decode(result.stderr);
-    if (stderr) appendOutputSection(segments, { tone: 'program', text: `stderr:\n${stderr}` });
+    appendOutputSegment(segments, stderr, 'program', 'output', 'stderr');
   }
   return segments;
 }
@@ -678,22 +685,33 @@ export function formatConsoleSegments(state: RunnerState): readonly ConsoleOutpu
   const transcript = 'transcript' in state ? state.transcript : undefined;
   if (transcript?.length) return formatTranscriptSegments(transcript);
   if (state.status === 'running') return [];
-  if (state.status === 'cancelled') return [{ tone: 'warning', text: 'Execution cancelled by the user.' }];
+  if (state.status === 'cancelled') return [{ tone: 'warning', text: 'Execution cancelled by the user.', role: 'protected', stream: 'system' }];
   if (state.status === 'error') {
-    return [{ tone: 'error', text: errorText(state.file, state.reason, state.message) }];
+    return [{ tone: 'error', text: errorText(state.file, state.reason, state.message), role: 'protected', stream: 'system' }];
   }
   if (state.status === 'timeout') {
     return [{
       tone: 'warning',
+      role: 'protected',
+      stream: 'system',
       text: `The ${formatDuration(state.timeoutMs)} time limit expired while starting, reading, preparing, or running "${state.file}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
     }];
   }
   const segments = formatOutputSegments(state.result);
   const summary = formatResultSummary(state.result);
-  appendOutputSection(segments, summary);
+  appendOutputSection(segments, { ...summary, role: 'protected', stream: 'system' });
   return segments;
 }
 
 export function formatConsole(state: RunnerState): string {
-  return formatConsoleSegments(state).map(segment => segment.text).join('');
+  let text = '';
+  for (const segment of formatConsoleSegments(state)) {
+    if (segment.role === 'output' && segment.stream === 'stderr' && segment.text) {
+      const separator = text && !text.endsWith('\n') ? '\n' : '';
+      text += `${separator}stderr:\n${segment.text}`;
+    } else {
+      text += segment.text;
+    }
+  }
+  return text;
 }

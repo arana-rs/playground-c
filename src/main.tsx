@@ -4,12 +4,15 @@ import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { Button, ButtonSpinner } from './components/arc/button/button.tsx';
 import { ConsolePanel } from './components/ConsolePanel.tsx';
+import { ExecutionSettings } from './components/ExecutionSettings.tsx';
 import { LanguageSwitch } from './components/LanguageSwitch.tsx';
 import { ThemeSwitch } from './components/arc/theme-switch/theme-switch.tsx';
 import { SelectedFileTab } from './components/SelectedFileTab.tsx';
 import { CodeEditor } from './editor/CodeEditor.tsx';
 import { createEditorSourcePersister, readEditorSource } from './editor/sourcePersistence.ts';
 import { useCodeEditor } from './editor/useCodeEditor.ts';
+import { createRunConfiguration, readExecutionSettings, writeExecutionSettings } from './execution/settings.ts';
+import type { ExecutionSettings as ExecutionSettingsValue } from './execution/settings.ts';
 import { formatConsoleSegments, getConsoleStatus, useRunner } from './execution/useRunner.ts';
 import { copyReportText } from './execution/copyReport.ts';
 import { formatTimeoutDiagnosticsReport, readTimeoutBrowserContext } from './execution/diagnosticsReport.ts';
@@ -117,6 +120,10 @@ function useStopLabelPhase(isRunning: boolean) {
 function Playground() {
   const { t } = useI18n();
   const [colorTheme, setColorTheme] = useState<ColorTheme>(initialColorTheme);
+  const [executionSettings, setExecutionSettings] = useState<ExecutionSettingsValue>(
+    () => readExecutionSettings(() => window.localStorage),
+  );
+  const executionConfiguration = useMemo(() => createRunConfiguration(executionSettings), [executionSettings]);
   const requestedColorTheme = useRef(colorTheme);
   const themeTransitionGeneration = useRef(0);
   const [editorInitialSource] = useState(() => readEditorSource(() => window.localStorage, initialSource));
@@ -190,6 +197,10 @@ function Playground() {
       // Theme selection remains available when storage is disabled or full.
     }
   }, [colorTheme]);
+
+  useEffect(() => {
+    writeExecutionSettings(() => window.localStorage, executionSettings);
+  }, [executionSettings]);
 
   const changeColorTheme = useCallback((next: 'light' | 'dark', trigger: HTMLButtonElement) => {
     const requestedTheme = requestedColorTheme.current === colorTheme
@@ -365,9 +376,9 @@ function Playground() {
       runConsoleResetKey.current++;
       shouldFocusConsoleAfterRun.current = true;
       setConsoleVisible(true);
-      run(new File([ref.current?.value ?? ''], 'main.c', { type: 'text/x-c' }));
+      run(new File([ref.current?.value ?? ''], 'main.c', { type: 'text/x-c' }), executionConfiguration);
     }
-  }, [isRunning, ref, run, stop]);
+  }, [executionConfiguration, isRunning, ref, run, stop]);
 
   const openMemoryViewer = useCallback(() => {
     setMemoryViewerSource(ref.current?.value ?? text);
@@ -634,6 +645,7 @@ function Playground() {
       />
       <footer className="footer">
         <div className="footer-links">
+          <ExecutionSettings value={executionSettings} onApply={setExecutionSettings} />
           <a
             className="github-link"
             href={GITHUB_REPOSITORY_URL}
@@ -666,7 +678,7 @@ function Playground() {
         <span className="footer-cursor">{t('editor.cursorPosition', { line: cursor.line, column: cursor.column })}</span>
       </footer>
       {memoryViewerSource !== null && (
-        <MemoryViewer source={memoryViewerSource} onClose={closeMemoryViewer} />
+        <MemoryViewer source={memoryViewerSource} configuration={executionConfiguration} onClose={closeMemoryViewer} />
       )}
     </div>
   );

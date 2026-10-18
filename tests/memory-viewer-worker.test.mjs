@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { RUN_CONFIGURATION } from '../src/execution/configuration.ts';
+import { createRunConfiguration } from '../src/execution/settings.ts';
 
 test('the real Worker prepares main, advances by line, and drains only lifecycle events', async () => {
   const responses = [];
@@ -77,6 +79,39 @@ test('the real Worker prepares main, advances by line, and drains only lifecycle
     assert.equal(responses[4].progress.kind, 'terminated');
     assert.deepEqual(responses[4].stackScalars, [], 'terminal inspection reflects normal scope exit');
     assert.ok(responses.flatMap(response => response.events ?? []).every(event => !('value' in event)));
+  } finally {
+    if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
+    else delete globalThis.self;
+  }
+});
+
+test('the Memory Viewer Worker applies the selected Run budgets to its debug session', async () => {
+  const responses = [];
+  const scope = { onmessage: null, postMessage: response => responses.push(response) };
+  const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
+  Object.defineProperty(globalThis, 'self', { configurable: true, writable: true, value: scope });
+
+  try {
+    await import('../src/memory/memory.worker.ts?memory-viewer-execution-settings-test');
+    const selectedConfiguration = createRunConfiguration({ maxDepth: 512, maxInstructions: 1 });
+    scope.onmessage({ data: {
+      type: 'debug-start',
+      jobId: 76,
+      fileName: 'main.c',
+      source: 'int main(void) {\n    int value = 0;\n    value = value + 1;\n    return value;\n}\n',
+      configuration: {
+        options: selectedConfiguration.options,
+        debug: RUN_CONFIGURATION.debug,
+      },
+    } });
+    assert.equal(responses[0].type, 'debug-ready');
+
+    scope.onmessage({ data: { type: 'debug-step', jobId: 76, requestId: 1 } });
+    const progress = responses.find(response => response.type === 'debug-progress');
+    assert.ok(progress);
+    assert.equal(progress.progress.kind, 'limit');
+    assert.equal(progress.progress.resource, 'maxInstructions');
+    assert.equal(progress.progress.limit, 1);
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
     else delete globalThis.self;
@@ -349,6 +384,107 @@ test('the Worker retains suspended scanf, its partial effects, and incremental o
     requestId += 1;
     scope.onmessage({ data: { type: 'debug-step', jobId: 111, requestId } });
     assert.equal(responses.at(-1).progress.kind, 'terminated');
+  } finally {
+    if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
+    else delete globalThis.self;
+  }
+});
+
+test('disabled console capture omits output events and preserves empty-stdin EOF behavior', async () => {
+  const responses = [];
+  const scope = { onmessage: null, postMessage: response => responses.push(response) };
+  const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
+  Object.defineProperty(globalThis, 'self', { configurable: true, writable: true, value: scope });
+
+  try {
+    await import('../src/memory/memory.worker.ts?memory-viewer-disabled-console-test');
+    const source = [
+      '#include <stdio.h>',
+      'int main(void) {',
+      '    int value = 0;',
+      '    int result = 0;',
+      '    printf("prompt>");',
+      '    result = scanf("%d", &value);',
+      '    printf("after-eof");',
+      '    return result == EOF && value == 0 ? 0 : 1;',
+      '}',
+    ].join('\n');
+    scope.onmessage({ data: {
+      type: 'debug-start', jobId: 130, fileName: 'main.c', source,
+      enableConsole: false, consoleGeneration: 0,
+    } });
+    assert.equal(responses[0].type, 'debug-ready');
+
+    let wait;
+    for (let requestId = 1; requestId <= 8; requestId += 1) {
+      scope.onmessage({ data: { type: 'debug-step', jobId: 130, requestId } });
+      const progress = responses.at(-1);
+      assert.equal(progress.type, 'debug-progress');
+      if (progress.progress.kind === 'input-needed') {
+        wait = progress;
+        break;
+      }
+    }
+    assert.ok(wait, 'empty stdin remains open until scanf requests input');
+    assert.equal(responses.some(response => response.type === 'debug-output'), false);
+    assert.equal('stdout' in wait.progress, false);
+    assert.equal('stderr' in wait.progress, false);
+
+    scope.onmessage({ data: {
+      type: 'debug-stdin-eof', jobId: 130, requestId: wait.requestId, inputRequestId: wait.inputRequestId,
+    } });
+    assert.equal(responses.at(-1).type, 'debug-progress');
+    assert.equal(responses.at(-1).progress.kind, 'paused');
+    assert.equal('stdout' in responses.at(-1).progress, false);
+    assert.equal('stderr' in responses.at(-1).progress, false);
+    assert.equal(responses.some(response => response.type === 'debug-output'), false, 'output before and after EOF stays unpublished');
+  } finally {
+    if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
+    else delete globalThis.self;
+  }
+});
+
+test('console capture toggles discard disabled bytes and resume from the next output delta', async () => {
+  const responses = [];
+  const scope = { onmessage: null, postMessage: response => responses.push(response) };
+  const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
+  Object.defineProperty(globalThis, 'self', { configurable: true, writable: true, value: scope });
+
+  try {
+    await import('../src/memory/memory.worker.ts?memory-viewer-console-toggle-test');
+    const source = [
+      '#include <stdio.h>',
+      'int main(void) {',
+      '    printf("before");',
+      '    printf("hidden");',
+      '    printf("after");',
+      '    return 0;',
+      '}',
+    ].join('\n');
+    scope.onmessage({ data: {
+      type: 'debug-start', jobId: 131, fileName: 'main.c', source,
+      enableConsole: true, consoleGeneration: 0,
+    } });
+    assert.equal(responses[0].type, 'debug-ready');
+
+    scope.onmessage({ data: { type: 'debug-step', jobId: 131, requestId: 1 } });
+    const before = responses.filter(response => response.type === 'debug-output');
+    assert.equal(before.length, 1);
+    assert.equal(new TextDecoder().decode(before[0].chunk), 'before');
+
+    scope.onmessage({ data: { type: 'debug-console-enabled', jobId: 131, enabled: false, generation: 1 } });
+    scope.onmessage({ data: { type: 'debug-step', jobId: 131, requestId: 2 } });
+    assert.equal(responses.filter(response => response.type === 'debug-output').length, 1, 'the disabled write has no UI event');
+
+    scope.onmessage({ data: { type: 'debug-console-enabled', jobId: 131, enabled: true, generation: 2 } });
+    scope.onmessage({ data: { type: 'debug-step', jobId: 131, requestId: 3 } });
+    const outputs = responses.filter(response => response.type === 'debug-output');
+    assert.deepEqual(outputs.map(response => [response.consoleGeneration, new TextDecoder().decode(response.chunk)]), [
+      [0, 'before'],
+      [2, 'after'],
+    ]);
+    assert.ok(responses.filter(response => response.type === 'debug-progress')
+      .every(response => !('stdout' in response.progress) && !('stderr' in response.progress)));
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
     else delete globalThis.self;

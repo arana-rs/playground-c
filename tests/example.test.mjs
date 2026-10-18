@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createDebugSession, execute, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
+import { createDebugSession, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
 import { runFile } from '@playground/c11-engine/browser';
 import { RUN_CONFIGURATION } from '../src/execution/useRunner.ts';
-import { createWorkerRuntimeServices } from '../src/execution/workerRuntimeServices.ts';
 
 const initialExampleSource = readFileSync(new URL('../src/examples/main.c', import.meta.url), 'utf8');
 const heapLifecycleSource = [
@@ -23,54 +22,49 @@ const heapLifecycleSource = [
   '}',
 ].join('\n');
 
-function randomValuesFromOutput(stdout) {
-  const lines = stdout.trimEnd().split('\n');
-  assert.equal(lines[0], 'Array with 10 random numbers between 0 and 99:');
-  const numberLines = lines.filter((line) => line.startsWith('numbers['));
-  assert.equal(numberLines.length, 10);
-  return numberLines.map((line, index) => {
-    const match = new RegExp(`^numbers\\[${index}\\] = (\\d+)$`).exec(line);
-    assert.ok(match, `Invalid output line: ${line}`);
-    const value = Number(match[1]);
-    assert.ok(Number.isInteger(value) && value >= 0 && value <= 99, `Value out of range: ${value}`);
-    return value;
-  });
-}
+const expectedTerminalDemo = [
+  'This message will be cleared by CSI 2J, then the cursor will return home.\n',
+  '\u001b[2J\u001b[H',
+  'Carriage return replaces an equal-length line:\n',
+  'OLD TEXT\rNEW TEXT\n',
+  'Backspace moves left, then C replaces X:\n',
+  'ABX\bC\n',
+  'Carriage return + CSI 2K clears the current line:\n',
+  'Discarded text that will disappear',
+  '\r\u001b[2K',
+  'Clean replacement after CSI 2K.\n',
+].join('');
 
-test('the initial example prints ten random integers in the documented range without stdin', async () => {
+test('the initial example demonstrates terminal controls without stdin and preserves raw output bytes', async () => {
   const file = new File([initialExampleSource], 'main.c', { type: 'text/x-c' });
   const result = await runFile(file, RUN_CONFIGURATION.options);
   assert.equal(result.kind, 'terminated', JSON.stringify(result));
   assert.equal(result.mainReturn, 0);
   assert.equal(result.exitCode, 0);
-  const stdout = new TextDecoder().decode(result.stdout);
-  assert.equal(randomValuesFromOutput(stdout).length, 10);
+  assert.equal(new TextDecoder().decode(result.stdout), expectedTerminalDemo);
   assert.deepEqual(result.stderr, new Uint8Array());
 });
 
-test('the initial example uses the Worker clock to seed rand across controlled seconds', () => {
+test('the initial example emits the same authored output through debug snapshots', () => {
   const prepared = prepare({
     entry: 'main.c',
     files: [{ name: 'main.c', source: initialExampleSource }],
   }, RUN_CONFIGURATION.options.prepare);
   assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));
 
-  const runAt = milliseconds => execute(
-    prepared.program,
-    RUN_CONFIGURATION.options.execute,
-    createWorkerRuntimeServices(() => milliseconds),
-  );
-  const first = runAt(1_704_067_200_000);
-  const repeated = runAt(1_704_067_200_000);
-  const nextSecond = runAt(1_704_067_201_000);
-  for (const result of [first, repeated, nextSecond]) {
-    assert.equal(result.kind, 'terminated', JSON.stringify(result));
-    assert.equal(result.mainReturn, 0);
-    assert.deepEqual(result.stderr, new Uint8Array());
-  };
-  const firstValues = randomValuesFromOutput(new TextDecoder().decode(first.stdout));
-  assert.deepEqual(randomValuesFromOutput(new TextDecoder().decode(repeated.stdout)), firstValues);
-  assert.notDeepEqual(randomValuesFromOutput(new TextDecoder().decode(nextSecond.stdout)), firstValues);
+  const session = createDebugSession(prepared.program, RUN_CONFIGURATION.options.execute);
+  let result;
+  for (let index = 0; index < 100; index += 1) {
+    const progress = session.resume();
+    if (progress.kind !== 'paused') {
+      result = progress;
+      break;
+    }
+  }
+  assert.ok(result, 'The example did not finish within 100 debug steps.');
+  assert.equal(result.kind, 'terminated', JSON.stringify(result));
+  assert.equal(new TextDecoder().decode(result.stdout), expectedTerminalDemo);
+  assert.deepEqual(result.stderr, new Uint8Array());
 });
 
 test('debug tracks heap allocations through free and replacement with a focused fixture', () => {

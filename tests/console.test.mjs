@@ -129,8 +129,18 @@ test('console colors output by source and keeps program text that resembles a di
       { stream: 'system', text: '\n[EOF]\n' },
     ],
   });
-  assert.equal(transcriptSegments.map(({ text }) => text).join(''), 'outputinput\nstderr:\nwarning\n[EOF]\n');
-  assert.deepEqual(transcriptSegments.map(({ tone }) => tone), ['program', 'system']);
+  assert.equal(transcriptSegments.map(({ text }) => text).join(''), 'outputinput\nwarning\n[EOF]\n');
+  assert.equal(formatConsole({
+    status: 'running',
+    inputRequestId: 1,
+    transcript: [
+      { stream: 'stdout', text: 'output' },
+      { stream: 'stdin', text: 'input\n' },
+      { stream: 'stderr', text: 'warning' },
+      { stream: 'system', text: '\n[EOF]\n' },
+    ],
+  }), 'outputinput\nstderr:\nwarning\n[EOF]\n');
+  assert.deepEqual(transcriptSegments.map(({ tone }) => tone), ['program', 'program', 'program', 'system']);
 });
 
 test('console frames preparation diagnostics and distinguishes worker failures, timeout and user cancellation', () => {

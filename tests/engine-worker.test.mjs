@@ -81,3 +81,33 @@ test('worker reports transition timings and counter snapshots around interactive
     else delete globalThis.self;
   }
 });
+
+test('the execution Worker enforces the instruction budget supplied by Run', async () => {
+  const responses = [];
+  const scope = { onmessage: null, postMessage: response => responses.push(response) };
+  const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
+  Object.defineProperty(globalThis, 'self', { configurable: true, writable: true, value: scope });
+
+  try {
+    await import('../src/execution/engine.worker.ts?execution-settings-budget-test');
+    scope.onmessage({ data: {
+      type: 'run',
+      jobId: 53,
+      file: new File(['int main(void) { int value = 0; while (value < 100) { value = value + 1; } return value; }'], 'main.c'),
+      options: {
+        prepare: { limits: { maxDepth: 512 } },
+        execute: { limits: { maxDepth: 512, maxInstructions: 1 } },
+      },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const result = responses.find(response => response.type === 'result');
+    assert.ok(result, 'the Worker returns a result for the configured Run request');
+    assert.equal(result.result.kind, 'limit');
+    assert.equal(result.result.resource, 'maxInstructions');
+    assert.equal(result.result.limit, 1);
+  } finally {
+    if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
+    else delete globalThis.self;
+  }
+});

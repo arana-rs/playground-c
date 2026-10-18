@@ -26,6 +26,7 @@ export interface MemoryViewerTranscriptEntry {
   readonly stream: 'stdout' | 'stderr' | 'stdin' | 'system';
   readonly text: string;
   readonly tone?: 'system' | 'warning' | 'error';
+  readonly role?: 'input' | 'protected';
 }
 
 /** Immutable, persistent batches let later UI replay lifecycle events without copying each prefix. */
@@ -50,8 +51,13 @@ export interface MemoryViewerState {
   readonly location: DebugSourceLocation | null;
   readonly status: MemoryViewerStatus;
   readonly isPlaying: boolean;
-  /** Monotonic session transcript; it is deliberately independent of the selected history point. */
+  /**
+   * Console transcript projected through the selected history point. At the live frontier, this array
+   * may be updated in place; consumers that memoize its contents must also observe transcriptRevision.
+   */
   readonly transcript: readonly MemoryViewerTranscriptEntry[];
+  /** Changes when the visible transcript changes, including an in-place live-tail update. */
+  readonly transcriptRevision: number;
   /** Token for the currently displayed input wait, hidden while browsing cached history. */
   readonly inputRequestId: number | null;
   readonly isViewingHistory: boolean;
@@ -92,6 +98,8 @@ export interface MemoryViewerControllerOptions {
   readonly workerFactory?: () => Worker;
   readonly maxHistoryEntries?: number;
   readonly playbackIntervalMs?: number;
+  /** Whether this session should capture and publish console I/O. */
+  readonly enableConsole?: boolean;
   readonly timers?: {
     setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
     clearTimeout(timer: ReturnType<typeof setTimeout>): void;
@@ -112,7 +120,18 @@ interface HistoryEntry {
   readonly omittedAggregateObjects: number;
   readonly stackSnapshotHistory: PersistentSnapshotBatch<DebugScalarSnapshot> | null;
   readonly staticSnapshotHistory: PersistentSnapshotBatch<DebugStaticObjectSnapshot> | null;
+  readonly consoleCheckpoint: ConsoleCheckpoint;
+  readonly transcriptRevision: number;
 }
+
+interface ConsoleCheckpoint {
+  /** Number of transcript runs at this point. */
+  readonly segmentCount: number;
+  /** Length of the last run, which may later grow by coalescing adjacent output chunks. */
+  readonly tailLength: number;
+}
+
+const EMPTY_CONSOLE_CHECKPOINT: ConsoleCheckpoint = Object.freeze({ segmentCount: 0, tailLength: 0 });
 
 interface ActiveScopeNode {
   readonly scope: MemoryViewerActiveScope;
@@ -196,10 +215,17 @@ export class MemoryViewerController {
   private inputRequestId: number | null = null;
   private lastInputRequestId = 0;
   private inputEnded = false;
-  private stdinInteractiveEnabled = true;
+  private enableConsole: boolean;
+  private consoleGeneration = 0;
   private lastOutputSequence = 0;
   private readonly outputDecoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
-  private transcript: readonly MemoryViewerTranscriptEntry[] = Object.freeze([]);
+  /** Coalesced append-only console runs; history stores only offsets into this journal. */
+  private transcript: MemoryViewerTranscriptEntry[] = [];
+  private transcriptRevision = 0;
+  private historicalTranscriptCache: {
+    readonly checkpoint: ConsoleCheckpoint;
+    readonly transcript: readonly MemoryViewerTranscriptEntry[];
+  } | null = null;
   private lastEventSequence = 0;
   private watchdog: ReturnType<typeof setTimeout> | undefined;
   private playbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -243,6 +269,7 @@ export class MemoryViewerController {
     this.workerFactory = options.workerFactory ?? createWorker;
     this.maxHistoryEntries = Math.max(1, options.maxHistoryEntries ?? this.configuration.memoryViewer.historySteps);
     this.playbackIntervalMs = Math.max(0, options.playbackIntervalMs ?? this.configuration.memoryViewer.playIntervalMs);
+    this.enableConsole = options.enableConsole ?? true;
     this.timers = options.timers ?? defaultTimers();
     this.currentState = this.buildState();
   }
@@ -277,12 +304,14 @@ export class MemoryViewerController {
     const staticBatch = showTransientMemory ? this.staticSnapshotHistory.latestBatch : entry?.staticSnapshotHistory ?? null;
     const viewingHistory = this.cursor < this.history.length - 1
       || (this.pendingOriginStep !== null && !isAtPendingFrontier);
+    const isAtTranscriptFrontier = !entry || this.cursor === this.history.length - 1;
     return {
       source: this.source,
       location: isInputWaitVisible ? this.pendingInputLocation : entry?.location ?? null,
       status,
       isPlaying: this.isPlaying,
-      transcript: this.transcript,
+      transcript: isAtTranscriptFrontier ? this.transcript : this.materializeTranscript(entry.consoleCheckpoint),
+      transcriptRevision: isAtTranscriptFrontier ? this.transcriptRevision : entry.transcriptRevision,
       inputRequestId: isInputWaitVisible ? this.inputRequestId : null,
       isViewingHistory: viewingHistory,
       canStop: this.active !== null && (this.pendingStart || this.pendingRequestId !== null || this.vmAlive),
@@ -327,7 +356,9 @@ export class MemoryViewerController {
     this.lastOutputSequence = 0;
     this.outputDecoders.stdout = new TextDecoder();
     this.outputDecoders.stderr = new TextDecoder();
-    this.transcript = Object.freeze([]);
+    this.transcript = [];
+    this.transcriptRevision += 1;
+    this.historicalTranscriptCache = null;
     this.lastEventSequence = 0;
     this.vmAlive = false;
     this.isPlaying = false;
@@ -381,7 +412,12 @@ export class MemoryViewerController {
     this.armWatchdog(active, null);
 
     try {
-      const command: MemoryViewerCommand = { type: 'debug-start', jobId, fileName: 'main.c', source };
+      const command: MemoryViewerCommand = {
+        type: 'debug-start', jobId, fileName: 'main.c', source,
+        configuration: { options: this.configuration.options, debug: this.configuration.debug },
+        enableConsole: this.enableConsole,
+        consoleGeneration: this.consoleGeneration,
+      };
       worker.postMessage(command);
     } catch (error) {
       this.fail(active, null, `Could not send source to the Worker: ${this.errorText(error)}`);
@@ -417,23 +453,43 @@ export class MemoryViewerController {
     if (wasPlaying) this.publish();
   }
 
-  setStdinInteractiveEnabled(enabled: boolean): void {
-    this.stdinInteractiveEnabled = enabled;
-    if (enabled) return;
+  setConsoleEnabled(enabled: boolean): void {
+    if (this.enableConsole === enabled) return;
+    this.enableConsole = enabled;
+    this.consoleGeneration += 1;
+    if (!enabled) this.clearConsoleHistory();
 
     const active = this.active;
+    if (active) {
+      try {
+        active.worker.postMessage({
+          type: 'debug-console-enabled', jobId: active.jobId,
+          enabled, generation: this.consoleGeneration,
+        });
+      } catch (error) {
+        this.fail(active, this.pendingRequestId, `Could not update console capture: ${this.errorText(error)}`);
+        return;
+      }
+    }
+    if (enabled) {
+      this.publish();
+      return;
+    }
+
     const requestId = this.pendingRequestId;
     const inputRequestId = this.inputRequestId;
     if (active && requestId !== null && inputRequestId !== null) {
       this.sendStdinEOFForRequest(active, requestId, inputRequestId);
+      return;
     }
+    this.publish();
   }
 
   sendStdinLine(line: string): boolean {
     const active = this.active;
     const inputRequestId = this.inputRequestId;
     const requestId = this.pendingRequestId;
-    if (!active || inputRequestId === null || requestId === null || this.inputEnded
+    if (!this.enableConsole || !active || inputRequestId === null || requestId === null || this.inputEnded
       || this.currentState.inputRequestId !== inputRequestId) return false;
 
     this.inputRequestId = null;
@@ -477,7 +533,7 @@ export class MemoryViewerController {
       this.fail(active, requestId, `Could not send end of input: ${this.errorText(error)}`);
       return false;
     }
-    this.appendTranscript({ stream: 'system', text: '[EOF]\n', tone: 'system' });
+    if (this.enableConsole) this.appendTranscript({ stream: 'system', text: '[EOF]\n', tone: 'system', role: 'input' });
     this.armWatchdog(active, requestId);
     this.publish();
     return true;
@@ -570,11 +626,9 @@ export class MemoryViewerController {
     if (response.type === 'debug-output') {
       if (!this.matchesPending(response.requestId) || response.sequence <= this.lastOutputSequence) return;
       this.lastOutputSequence = response.sequence;
+      if (!this.enableConsole || (response.consoleGeneration ?? 0) !== this.consoleGeneration) return;
       const text = this.outputDecoders[response.stream].decode(response.chunk, { stream: true });
-      if (text) {
-        this.appendTranscript({ stream: response.stream, text });
-        this.publish();
-      }
+      if (text) this.appendTranscript({ stream: response.stream, text });
       return;
     }
     if (response.type === 'debug-ready') {
@@ -623,7 +677,7 @@ export class MemoryViewerController {
       this.acceptStackScalars(response.stackScalars);
       this.acceptStaticObjects(response.staticObjects);
       this.vmAlive = true;
-      if (!this.stdinInteractiveEnabled) {
+      if (!this.enableConsole) {
         this.sendStdinEOFForRequest(active, response.requestId, response.inputRequestId);
         return;
       }
@@ -668,7 +722,7 @@ export class MemoryViewerController {
   private entryForProgress(
     progress: MemoryViewerProgress,
     fallbackLocation: DebugSourceLocation | null,
-  ): Omit<HistoryEntry, 'activeScopeTop' | 'heapSnapshotHistory' | 'pointerSnapshotHistory' | 'arraySnapshotHistory' | 'aggregateSnapshotHistory' | 'stackSnapshotHistory' | 'staticSnapshotHistory'> {
+  ): Omit<HistoryEntry, 'activeScopeTop' | 'heapSnapshotHistory' | 'pointerSnapshotHistory' | 'arraySnapshotHistory' | 'aggregateSnapshotHistory' | 'stackSnapshotHistory' | 'staticSnapshotHistory' | 'consoleCheckpoint' | 'transcriptRevision'> {
     return {
       location: progress.kind === 'paused' ? progress.location : fallbackLocation,
       status: statusForProgress(progress),
@@ -770,7 +824,7 @@ export class MemoryViewerController {
     this.acceptError(active, requestId, 'error', message);
   }
 
-  private appendEntry(entry: Omit<HistoryEntry, 'activeScopeTop' | 'heapSnapshotHistory' | 'pointerSnapshotHistory' | 'arraySnapshotHistory' | 'aggregateSnapshotHistory' | 'stackSnapshotHistory' | 'staticSnapshotHistory'>, selectNew?: boolean) {
+  private appendEntry(entry: Omit<HistoryEntry, 'activeScopeTop' | 'heapSnapshotHistory' | 'pointerSnapshotHistory' | 'arraySnapshotHistory' | 'aggregateSnapshotHistory' | 'stackSnapshotHistory' | 'staticSnapshotHistory' | 'consoleCheckpoint' | 'transcriptRevision'>, selectNew?: boolean) {
     const selectedStep = this.historyOffset + this.cursor;
     const wasAtFrontier = this.history.length === 0 || this.cursor === this.history.length - 1;
     this.history.push({
@@ -782,6 +836,8 @@ export class MemoryViewerController {
       aggregateSnapshotHistory: this.aggregateSnapshotHistory.latestBatch,
       stackSnapshotHistory: this.stackSnapshotHistory.latestBatch,
       staticSnapshotHistory: this.staticSnapshotHistory.latestBatch,
+      consoleCheckpoint: this.captureConsoleCheckpoint(),
+      transcriptRevision: this.transcriptRevision,
     });
     if (this.history.length > this.maxHistoryEntries) {
       this.history.shift();
@@ -809,24 +865,57 @@ export class MemoryViewerController {
   }
 
   private appendTranscript(entry: MemoryViewerTranscriptEntry): void {
+    if (!this.enableConsole || !entry.text) return;
     const previous = this.transcript[this.transcript.length - 1];
     if (previous && previous.stream === entry.stream && previous.tone === entry.tone
       && (entry.stream === 'stdout' || entry.stream === 'stderr')) {
-      this.transcript = Object.freeze([
-        ...this.transcript.slice(0, -1),
-        Object.freeze({ ...previous, text: previous.text + entry.text }),
-      ]);
-      return;
+      this.transcript[this.transcript.length - 1] = Object.freeze({ ...previous, text: previous.text + entry.text });
+    } else {
+      this.transcript.push(Object.freeze({ ...entry }));
     }
-    this.transcript = Object.freeze([...this.transcript, Object.freeze({ ...entry })]);
+    this.transcriptRevision += 1;
   }
 
   private flushOutputDecoders(): void {
     for (const stream of ['stdout', 'stderr'] as const) {
-      const tail = this.outputDecoders[stream].decode();
+      const tail = this.enableConsole ? this.outputDecoders[stream].decode() : '';
       if (tail) this.appendTranscript({ stream, text: tail });
       this.outputDecoders[stream] = new TextDecoder();
     }
+  }
+
+  private captureConsoleCheckpoint(): ConsoleCheckpoint {
+    if (!this.enableConsole) return EMPTY_CONSOLE_CHECKPOINT;
+    return {
+      segmentCount: this.transcript.length,
+      tailLength: this.transcript.at(-1)?.text.length ?? 0,
+    };
+  }
+
+  private materializeTranscript(checkpoint: ConsoleCheckpoint): readonly MemoryViewerTranscriptEntry[] {
+    if (this.historicalTranscriptCache?.checkpoint === checkpoint) return this.historicalTranscriptCache.transcript;
+    const transcript = this.transcript.slice(0, checkpoint.segmentCount);
+    const last = transcript.length - 1;
+    const entry = transcript[last];
+    if (entry && entry.text.length > checkpoint.tailLength) {
+      transcript[last] = Object.freeze({ ...entry, text: entry.text.slice(0, checkpoint.tailLength) });
+    }
+    const snapshot = Object.freeze(transcript);
+    this.historicalTranscriptCache = { checkpoint, transcript: snapshot };
+    return snapshot;
+  }
+
+  private clearConsoleHistory(): void {
+    this.transcript = [];
+    this.transcriptRevision += 1;
+    this.historicalTranscriptCache = null;
+    this.outputDecoders.stdout = new TextDecoder();
+    this.outputDecoders.stderr = new TextDecoder();
+    this.history = this.history.map(entry => ({
+      ...entry,
+      consoleCheckpoint: EMPTY_CONSOLE_CHECKPOINT,
+      transcriptRevision: this.transcriptRevision,
+    }));
   }
 
   private schedulePlaybackTick() {

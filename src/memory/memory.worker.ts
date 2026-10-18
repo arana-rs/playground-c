@@ -24,6 +24,8 @@ interface DebugRun {
   activeStepRequestId: number | null;
   inputRequestId: number | null;
   inputEnded: boolean;
+  enableConsole: boolean;
+  consoleGeneration: number;
   readonly outputDeltas: OutputSnapshotDeltas;
   busy: boolean;
   finished: boolean;
@@ -46,8 +48,16 @@ function post(response: MemoryViewerResponse) {
 function emitOutput(run: DebugRun, requestId: number | null, progress: DebugProgress): void {
   if (!('stdout' in progress) || !('stderr' in progress)) return;
   for (const stream of ['stdout', 'stderr'] as const) {
+    if (!run.enableConsole) {
+      run.outputDeltas.discardSnapshot(stream, progress[stream]);
+      continue;
+    }
     const delta = run.outputDeltas.fromSnapshot(stream, progress[stream]);
-    if (delta) post({ type: 'debug-output', jobId: run.jobId, requestId, ...delta });
+    if (delta) post({
+      type: 'debug-output', jobId: run.jobId, requestId,
+      consoleGeneration: run.consoleGeneration,
+      ...delta,
+    });
   }
 }
 
@@ -68,9 +78,7 @@ function publishProgress(run: DebugRun, requestId: number | null, progress: Debu
   post({
     type: 'debug-progress', jobId: run.jobId, requestId,
     ...(inputRequestId === undefined ? {} : { inputRequestId }),
-    progress: progress.kind === 'paused' || progress.kind === 'input-needed'
-      ? stripOutputSnapshots(progress)
-      : progress,
+    progress: stripOutputSnapshots(progress),
     events: run.session.drainEvents(),
     heapObjects: inspectHeapObjects(run),
     pointers: inspectPointers(run),
@@ -164,13 +172,17 @@ function inspectAggregates(run: DebugRun): readonly DebugAggregateSnapshot[] {
 
 function begin(command: Extract<MemoryViewerCommand, { type: 'debug-start' }>) {
   if (activeRun) return;
+  const configuration = command.configuration ?? {
+    options: RUN_CONFIGURATION.options,
+    debug: RUN_CONFIGURATION.debug,
+  };
   const project: SourceProject = {
     entry: command.fileName,
     files: [{ name: command.fileName, source: command.source }],
   };
 
   try {
-    const preparation = prepare(project, RUN_CONFIGURATION.options.prepare);
+    const preparation = prepare(project, configuration.options.prepare);
     if (preparation.kind !== 'prepared') {
       startupError(
         command.jobId,
@@ -183,8 +195,8 @@ function begin(command: Extract<MemoryViewerCommand, { type: 'debug-start' }>) {
 
     const session = createDebugSession(
       preparation.program,
-      RUN_CONFIGURATION.options.execute,
-      RUN_CONFIGURATION.debug,
+      configuration.options.execute,
+      configuration.debug,
       createWorkerRuntimeServices(),
     );
     const run: DebugRun = {
@@ -195,6 +207,8 @@ function begin(command: Extract<MemoryViewerCommand, { type: 'debug-start' }>) {
       activeStepRequestId: null,
       inputRequestId: null,
       inputEnded: false,
+      enableConsole: command.enableConsole !== false,
+      consoleGeneration: command.consoleGeneration ?? 0,
       outputDeltas: new OutputSnapshotDeltas(),
       busy: false,
       finished: false,
@@ -281,9 +295,17 @@ function receiveInput(command: Extract<MemoryViewerCommand, { type: 'debug-stdin
   }
 }
 
+function setConsoleEnabled(command: Extract<MemoryViewerCommand, { type: 'debug-console-enabled' }>) {
+  const run = activeRun;
+  if (!run || run.jobId !== command.jobId || command.generation <= run.consoleGeneration) return;
+  run.enableConsole = command.enabled;
+  run.consoleGeneration = command.generation;
+}
+
 self.onmessage = (event: MessageEvent<MemoryViewerCommand>) => {
   const command = event.data;
   if (command.type === 'debug-start') begin(command);
   else if (command.type === 'debug-step') step(command);
+  else if (command.type === 'debug-console-enabled') setConsoleEnabled(command);
   else receiveInput(command);
 };

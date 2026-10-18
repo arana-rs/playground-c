@@ -18,4 +18,11 @@ export class OutputSnapshotDeltas {
     this.offsets[stream] = snapshot.length;
     return { sequence: ++this.nextSequence, stream, chunk };
   }
+
+  /** Advance a disabled stream without slicing or publishing its newly produced bytes. */
+  discardSnapshot(stream: OutputSnapshotDelta['stream'], snapshot: Uint8Array): void {
+    const offset = this.offsets[stream];
+    if (snapshot.length < offset) throw new Error(`The ${stream} snapshot shrank during execution.`);
+    this.offsets[stream] = snapshot.length;
+  }
 }

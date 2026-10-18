@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { formatConsole, RUN_CONFIGURATION, RunnerController } from '../src/execution/useRunner.ts';
+import { createRunConfiguration } from '../src/execution/settings.ts';
 
 const bytes = text => new TextEncoder().encode(text);
 const pause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -96,6 +97,24 @@ test('runner streams UTF-8 once, echoes lines once, ignores duplicate events, an
   assert.equal(controller.state.status, 'finished');
   assert.equal(formatConsole(controller.state), 'café: 7\nNumber read: 7\nanother line\nexit code: 0');
   assert.equal(formatConsole(controller.state).includes('duplicate'), false);
+});
+
+test('a run sends its selected budgets to the Worker and keeps them in timeout diagnostics', async () => {
+  const { controller, workers, file } = createController();
+  const configuration = { ...createRunConfiguration({ maxDepth: 512, maxInstructions: 337_300 }), timeoutMs: 30 };
+  controller.run(file, configuration);
+
+  const worker = workers[0];
+  const request = worker.messages[0];
+  assert.equal(request.options.prepare.limits.maxDepth, 512);
+  assert.equal(request.options.execute.limits.maxDepth, 512);
+  assert.equal(request.options.execute.limits.maxInstructions, 337_300);
+
+  await pause(45);
+  assert.equal(controller.state.status, 'timeout');
+  assert.equal(controller.state.diagnosticsReport.budgets.prepare.maxDepth, 512);
+  assert.equal(controller.state.diagnosticsReport.budgets.execute.maxDepth, 512);
+  assert.equal(controller.state.diagnosticsReport.budgets.execute.maxInstructions, 337_300);
 });
 
 test('EOF is explicit, blocks later line sends, and remains visible with partial output', () => {

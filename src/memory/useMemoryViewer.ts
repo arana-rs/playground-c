@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MemoryViewerController } from './MemoryViewerController.ts';
 import type { MemoryViewerState } from './MemoryViewerController.ts';
+import { RUN_CONFIGURATION } from '../execution/configuration.ts';
+import type { RunConfiguration } from '../execution/configuration.ts';
 
 export type { DebugAggregateSnapshot, DebugArraySnapshot, DebugScalarSnapshot, DebugStaticObjectSnapshot } from '@playground/c11-engine/core';
 export type { DebugHeapObjectSnapshot } from '@playground/c11-engine/core';
@@ -19,17 +21,23 @@ export interface MemoryViewerActions {
   readonly next: () => void;
   readonly sendStdinLine: (line: string) => boolean;
   readonly sendStdinEOF: () => boolean;
-  readonly setStdinInteractiveEnabled: (enabled: boolean) => void;
+  readonly setConsoleEnabled: (enabled: boolean) => void;
   readonly stop: () => void;
 }
 
 export type MemoryViewerHookValue = MemoryViewerState & MemoryViewerActions;
 
 /** Starts one frozen-source debug session on mount and owns its Worker/timers until unmount. */
-export function useMemoryViewer(source: string): MemoryViewerHookValue {
+export function useMemoryViewer(
+  source: string,
+  configuration: RunConfiguration = RUN_CONFIGURATION,
+  enableConsole = true,
+): MemoryViewerHookValue {
   const frozenSource = useRef(source);
   const controllerRef = useRef<MemoryViewerController | null>(null);
-  if (!controllerRef.current) controllerRef.current = new MemoryViewerController(frozenSource.current);
+  if (!controllerRef.current) {
+    controllerRef.current = new MemoryViewerController(frozenSource.current, { configuration, enableConsole });
+  }
   const controller = controllerRef.current;
   const [state, setState] = useState<MemoryViewerState>(controller.state);
 
@@ -47,11 +55,11 @@ export function useMemoryViewer(source: string): MemoryViewerHookValue {
   const next = useCallback(() => controller.next(), [controller]);
   const sendStdinLine = useCallback((line: string) => controller.sendStdinLine(line), [controller]);
   const sendStdinEOF = useCallback(() => controller.sendStdinEOF(), [controller]);
-  const setStdinInteractiveEnabled = useCallback(
-    (enabled: boolean) => controller.setStdinInteractiveEnabled(enabled),
+  const setConsoleEnabled = useCallback(
+    (enabled: boolean) => controller.setConsoleEnabled(enabled),
     [controller],
   );
   const stop = useCallback(() => controller.stop(), [controller]);
 
-  return { ...state, togglePlay, previous, next, sendStdinLine, sendStdinEOF, setStdinInteractiveEnabled, stop };
+  return { ...state, togglePlay, previous, next, sendStdinLine, sendStdinEOF, setConsoleEnabled, stop };
 }
