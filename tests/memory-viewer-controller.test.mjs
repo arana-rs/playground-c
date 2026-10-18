@@ -900,6 +900,33 @@ test('Play waits 500 ms, prevents overlap, and stops on Back', () => {
   assert.equal(worker.messages.length, 3, 'history future is traversed without advancing the VM again');
 });
 
+test('changing playback speed keeps the pending tick and uses the new delay after its response', () => {
+  const { controller, workers, timers } = setup();
+  const worker = workers[0];
+  const jobId = ready(worker);
+
+  controller.togglePlay();
+  timers.advance(200);
+  assert.equal(controller.setPlaybackIntervalMs(300), false, 'values outside the recommended list are rejected');
+  assert.equal(controller.setPlaybackIntervalMs(250), true);
+  assert.equal(timers.timers.size, 1, 'changing speed does not add another timer');
+
+  timers.advance(299);
+  assert.equal(worker.messages.length, 1, 'the already scheduled 500 ms tick keeps its original due time');
+  timers.advance(1);
+  assert.equal(worker.messages.length, 2, 'exactly one VM step starts at the pending tick');
+
+  worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(2), events: [] });
+  assert.equal(timers.timers.size, 1, 'the response schedules one following tick');
+  timers.advance(249);
+  assert.equal(worker.messages.length, 2, 'the following tick uses the new 250 ms delay');
+  timers.advance(1);
+  assert.equal(worker.messages.length, 3, 'the following step starts once at the new due time');
+  assert.equal(timers.timers.size, 1, 'the outstanding step has only its watchdog timer, not another playback tick');
+
+  controller.dispose();
+});
+
 test('history and events respect the limit, and dispose cancels timers and Worker', () => {
   const { controller, workers, timers } = setup({ maxHistoryEntries: 2 });
   const worker = workers[0];

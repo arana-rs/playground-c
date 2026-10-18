@@ -1,11 +1,27 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createDebugSession, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
+import { analyzeSyntax, createDebugSession, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
 import { runFile } from '@playground/c11-engine/browser';
 import { RUN_CONFIGURATION } from '../src/execution/useRunner.ts';
 
 const initialExampleSource = readFileSync(new URL('../src/examples/main.c', import.meta.url), 'utf8');
+const terminalDemoSource = [
+  '#include <stdio.h>',
+  'int main(void) {',
+  '    printf("This message will be cleared by CSI 2J, then the cursor will return home.\\n");',
+  '    printf("\\x1b[2J\\x1b[H");',
+  '    printf("Carriage return replaces an equal-length line:\\n");',
+  '    printf("OLD TEXT\\rNEW TEXT\\n");',
+  '    printf("Backspace moves left, then C replaces X:\\n");',
+  '    printf("ABX\\bC\\n");',
+  '    printf("Carriage return + CSI 2K clears the current line:\\n");',
+  '    printf("Discarded text that will disappear");',
+  '    printf("\\r\\x1b[2K");',
+  '    printf("Clean replacement after CSI 2K.\\n");',
+  '    return 0;',
+  '}',
+].join('\n');
 const heapLifecycleSource = [
   '#include <stdlib.h>',
   'int main(void) {',
@@ -35,21 +51,48 @@ const expectedTerminalDemo = [
   'Clean replacement after CSI 2K.\n',
 ].join('');
 
-test('the initial example demonstrates terminal controls without stdin and preserves raw output bytes', async () => {
-  const file = new File([initialExampleSource], 'main.c', { type: 'text/x-c' });
-  const result = await runFile(file, RUN_CONFIGURATION.options);
-  assert.equal(result.kind, 'terminated', JSON.stringify(result));
-  assert.equal(result.mainReturn, 0);
-  assert.equal(result.exitCode, 0);
-  assert.equal(new TextDecoder().decode(result.stdout), expectedTerminalDemo);
-  assert.deepEqual(result.stderr, new Uint8Array());
-});
-
-test('the initial example emits the same authored output through debug snapshots', () => {
-  const prepared = prepare({
+test('the initial example reports three independent syntax errors and refuses execution', async () => {
+  const project = {
     entry: 'main.c',
     files: [{ name: 'main.c', source: initialExampleSource }],
-  }, RUN_CONFIGURATION.options.prepare);
+  };
+  const analysis = analyzeSyntax(project, RUN_CONFIGURATION.options.prepare);
+  assert.equal(analysis.kind, 'error', JSON.stringify(analysis));
+  assert.deepEqual(analysis.diagnostics.map(({ code, file, line, column }) => [code, file, line, column]), [
+    ['SYNTAX_ERROR', 'main.c', 2, 31],
+    ['SYNTAX_ERROR', 'main.c', 3, 31],
+    ['SYNTAX_ERROR', 'main.c', 4, 30],
+  ]);
+  assert.deepEqual(analysis.diagnostics.map(diagnostic =>
+    initialExampleSource.split('\n')[diagnostic.line - 1][diagnostic.column - 1]), [';', ';', '4']);
+
+  const prepared = prepare(project, RUN_CONFIGURATION.options.prepare);
+  assert.equal(prepared.kind, 'prepare-error', JSON.stringify(prepared));
+  assert.deepEqual(prepared.diagnostics.map(({ code, file, line, column }) => [code, file, line, column]), [
+    ['SYNTAX_ERROR', 'main.c', 2, 31],
+  ]);
+
+  const file = new File([initialExampleSource], 'main.c', { type: 'text/x-c' });
+  const result = await runFile(file, RUN_CONFIGURATION.options);
+  assert.equal(result.kind, 'prepare-error', JSON.stringify(result));
+  assert.deepEqual(result.diagnostics.map(({ line, column }) => [line, column]), [[2, 31]]);
+  assert.equal(result.metrics.executeMs, 0, 'execution does not start after syntax errors');
+});
+
+test('a separate terminal demonstration preserves raw output bytes and debug snapshots', async () => {
+  const project = {
+    entry: 'main.c',
+    files: [{ name: 'main.c', source: terminalDemoSource }],
+  };
+  const file = new File([terminalDemoSource], 'main.c', { type: 'text/x-c' });
+  const runResult = await runFile(file, RUN_CONFIGURATION.options);
+  assert.equal(runResult.kind, 'terminated', JSON.stringify(runResult));
+  assert.equal(runResult.mainReturn, 0);
+  assert.equal(runResult.exitCode, 0);
+  assert.equal(new TextDecoder().decode(runResult.stdout), expectedTerminalDemo);
+  assert.deepEqual(runResult.stderr, new Uint8Array());
+
+  const prepared = prepare(project, RUN_CONFIGURATION.options.prepare);
   assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));
 
   const session = createDebugSession(prepared.program, RUN_CONFIGURATION.options.execute);

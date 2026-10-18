@@ -16,6 +16,7 @@ import type { PersistentSnapshotBatch } from './PersistentSnapshotHistory.ts';
 import { cloneMemoryViewerArraySnapshot, sameMemoryViewerArraySnapshot } from './arraySnapshots.ts';
 import { cloneMemoryViewerAggregateSnapshot, sameMemoryViewerAggregateSnapshot } from './aggregateSnapshots.ts';
 import { cloneMemoryViewerPointerSnapshot, sameMemoryViewerPointerSnapshot } from './pointerSnapshots.ts';
+import { isMemoryViewerPlaybackInterval } from './playbackSpeed.ts';
 
 export const MEMORY_VIEWER_PLAY_INTERVAL_MS = RUN_CONFIGURATION.memoryViewer.playIntervalMs;
 export const MEMORY_VIEWER_HISTORY_LIMIT = RUN_CONFIGURATION.memoryViewer.historySteps;
@@ -201,7 +202,7 @@ export class MemoryViewerController {
   private readonly configuration: RunConfiguration;
   private readonly workerFactory: () => Worker;
   private readonly maxHistoryEntries: number;
-  private readonly playbackIntervalMs: number;
+  private playbackIntervalMs: number;
   private readonly timers: NonNullable<MemoryViewerControllerOptions['timers']>;
   private readonly listeners = new Set<(state: MemoryViewerState) => void>();
   private active: ActiveWorker | null = null;
@@ -434,6 +435,12 @@ export class MemoryViewerController {
     this.isPlaying = true;
     this.schedulePlaybackTick();
     this.publish();
+  }
+
+  setPlaybackIntervalMs(intervalMs: number): boolean {
+    if (!isMemoryViewerPlaybackInterval(intervalMs)) return false;
+    this.playbackIntervalMs = intervalMs;
+    return true;
   }
 
   previous(): void {

@@ -1,9 +1,9 @@
-import { createDebugSession, createExecutionSession, DEFAULT_DEBUG_AGGREGATE_INSPECTION_LIMITS, DEFAULT_DEBUG_ARRAY_INSPECTION_LIMITS, execute, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
+import { analyzeSyntax, createDebugSession, createExecutionSession, DEFAULT_DEBUG_AGGREGATE_INSPECTION_LIMITS, DEFAULT_DEBUG_ARRAY_INSPECTION_LIMITS, execute, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
 import type {
   DebugAggregateInspection, DebugAggregateMemberSnapshot, DebugAggregateSnapshot,
   DebugArrayElementSnapshot, DebugArrayInspection, DebugArraySnapshot, DebugExecutionSession,
   DebugFlexibleArraySnapshot, DebugHeapObjectSnapshot, DebugObjectDuration, DebugPointerSnapshot, DebugPointerStatus, DebugPointerTargetSnapshot, DebugProgress, DebugScalarSnapshot, DebugSessionOptions, DebugStaticObjectSnapshot,
-  DebugStaticObjectInspectionOptions, ExecuteProgress, ExecutionSession, PrepareResult, SourceProject,
+  DebugStaticObjectInspectionOptions, ExecuteProgress, ExecutionSession, PrepareResult, SourceProject, SyntaxAnalysisResult,
 } from '@playground/c11-engine/core';
 // @ts-expect-error QualifiedCType is an internal compiler representation, not a public DTO.
 type QualifiedTypeMustStayInternal = import('@playground/c11-engine/core').QualifiedCType;
@@ -19,6 +19,8 @@ void arrayInspectionDefault;
 const aggregateMemberLimit: number = DEFAULT_DEBUG_AGGREGATE_INSPECTION_LIMITS.maxMembers;
 void aggregateMemberLimit;
 const prepared: PrepareResult = prepare(project);
+const syntax: SyntaxAnalysisResult = analyzeSyntax(project);
+if (syntax.kind === 'error' && syntax.truncated) void syntax.diagnostics.length;
 if (prepared.kind === 'prepared') {
     const hasHeapAllocationCalls: boolean = prepared.program.hasHeapAllocationCalls;
     void hasHeapAllocationCalls;

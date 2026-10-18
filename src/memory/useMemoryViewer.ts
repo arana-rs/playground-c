@@ -32,11 +32,12 @@ export function useMemoryViewer(
   source: string,
   configuration: RunConfiguration = RUN_CONFIGURATION,
   enableConsole = true,
+  playbackIntervalMs = configuration.memoryViewer.playIntervalMs,
 ): MemoryViewerHookValue {
   const frozenSource = useRef(source);
   const controllerRef = useRef<MemoryViewerController | null>(null);
   if (!controllerRef.current) {
-    controllerRef.current = new MemoryViewerController(frozenSource.current, { configuration, enableConsole });
+    controllerRef.current = new MemoryViewerController(frozenSource.current, { configuration, enableConsole, playbackIntervalMs });
   }
   const controller = controllerRef.current;
   const [state, setState] = useState<MemoryViewerState>(controller.state);
@@ -60,6 +61,10 @@ export function useMemoryViewer(
     [controller],
   );
   const stop = useCallback(() => controller.stop(), [controller]);
+
+  useEffect(() => {
+    controller.setPlaybackIntervalMs(playbackIntervalMs);
+  }, [controller, playbackIntervalMs]);
 
   return { ...state, togglePlay, previous, next, sendStdinLine, sendStdinEOF, setConsoleEnabled, stop };
 }

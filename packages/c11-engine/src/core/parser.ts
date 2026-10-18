@@ -1,5 +1,5 @@
-import type { PrepareLimits } from './types.ts';
-import { enforceLimit, failure } from './internal.ts';
+import type { Diagnostic, PrepareLimits, RelatedDiagnosticLocation } from './types.ts';
+import { EngineFailure, enforceLimit, failure } from './internal.ts';
 import {
   INT_MAX, INT_MIN,
 } from './internal.ts';
@@ -56,6 +56,31 @@ type ParserScopeFrame = {
   typedefs: Map<string, TypedefBinding>;
 };
 type ParameterScopeContext = { retainFirst: boolean; frame?: ParserScopeFrame };
+type ParserMapMutation = { map: Map<unknown, unknown>; key: unknown; existed: boolean; value: unknown };
+type AggregateCheckpointState = Omit<AggregateDefinition, 'members'> & { members: AggregateMember[] };
+type ParserCheckpoint = {
+  typedefScopes: Map<string, TypedefBinding>[];
+  tagScopes: TagScope[];
+  enumTagScopes: Map<string, EnumDefinition>[];
+  ordinaryScopes: Map<string, bigint | null>[];
+  ordinaryTypeScopes: Map<string, CType>[];
+  mapMutations: ParserMapMutation[];
+  aggregateSnapshots: Map<AggregateDefinition, AggregateCheckpointState>;
+  globalSnapshots: Map<GlobalObject, GlobalObject>;
+  aggregatesLength: number;
+  enumsLength: number;
+  staticAssertionsLength: number;
+  functionsLength: number;
+  globalsLength: number;
+  lastSpecifierDefinesTag: boolean;
+  lastSpecifierConst: boolean;
+  lastSpecifierVolatile: boolean;
+  lastSpecifierRestrict: boolean;
+  lastSpecifierQualifiers: TypeQualifiers;
+  nextAggregateId: number;
+  nextEnumId: number;
+  expressionDuration: 'automatic' | 'static';
+};
 type DeclarationSpecifiers = {
   static: boolean;
   extern: boolean;
@@ -225,7 +250,50 @@ function requireIntegerConstantExpression(
   }
 }
 
-export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = tokens[0]?.file ?? 'main.c'): ParsedProgram {
+export interface ParserRecoveryOptions {
+  readonly diagnostics: Diagnostic[];
+  readonly maxDiagnostics: number;
+  readonly truncated: { value: boolean };
+}
+
+export function parse(
+  tokens: Token[],
+  limits: PrepareLimits,
+  translationUnit = tokens[0]?.file ?? 'main.c',
+  recovery?: ParserRecoveryOptions,
+): ParsedProgram {
+  const parserCheckpoints: ParserCheckpoint[] = [];
+  const relatedFragment = (opening: Location, boundary: Location, message: string): RelatedDiagnosticLocation | undefined => {
+    const openingSpan = opening.sourceSpan;
+    const boundarySpan = boundary.sourceSpan;
+    if (!opening.endLine || !opening.endColumn || !openingSpan || !boundarySpan) return undefined;
+    if (opening.file !== openingSpan.physicalFile || boundary.file !== boundarySpan.physicalFile ||
+        openingSpan.logicalLineOffset !== 0 || boundarySpan.logicalLineOffset !== 0) return undefined;
+    if (opening.file !== boundary.file || openingSpan.physicalFile !== boundarySpan.physicalFile ||
+        openingSpan.logicalLineOffset !== boundarySpan.logicalLineOffset || boundarySpan.startOffset < openingSpan.startOffset) return undefined;
+    return {
+      message,
+      file: opening.file,
+      line: opening.line,
+      column: opening.column,
+      endLine: boundary.line,
+      endColumn: boundary.column,
+    };
+  };
+  const syntaxFailureWithRelated = (message: string, location: Location, related?: RelatedDiagnosticLocation): never => {
+    const error = new EngineFailure('SYNTAX_ERROR', message, location);
+    if (related) error.diagnostic = { ...error.diagnostic, related: [related] };
+    throw error;
+  };
+  const setParserMap = <K, V>(map: Map<K, V>, key: K, value: V): void => {
+    if (recovery) {
+      const recordMap = map as unknown as Map<unknown, unknown>;
+      for (const checkpoint of parserCheckpoints) {
+        checkpoint.mapMutations.push({ map: recordMap, key, existed: map.has(key), value: map.get(key) });
+      }
+    }
+    map.set(key, value);
+  };
   let cursor = 0;
   const peek = (offset = 0) => tokens[Math.min(cursor + offset, tokens.length - 1)];
   const consume = () => tokens[cursor++];
@@ -313,10 +381,10 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const scope = ordinaryScopes[ordinaryScopes.length - 1];
     if (typedefScopes.at(-1)?.has(name)) failure('REDECLARATION', `Identifier «${name}» is already a typedef name in this scope.`, location);
     if (typeof scope.get(name) === 'bigint') failure('REDECLARATION', `Enumerator «${name}» is already declared in this scope.`, location);
-    scope.set(name, null);
-    if (type) ordinaryTypeScopes.at(-1)!.set(name, type);
+    setParserMap(scope, name, null);
+    if (type) setParserMap(ordinaryTypeScopes.at(-1)!, name, type);
   };
-  const setOrdinaryType = (name: string, type: CType): void => { ordinaryTypeScopes.at(-1)!.set(name, type); };
+  const setOrdinaryType = (name: string, type: CType): void => { setParserMap(ordinaryTypeScopes.at(-1)!, name, type); };
   const lookupOrdinaryType = (name: string): CType | undefined => {
     for (let index = ordinaryScopes.length - 1; index >= 0; index--) {
       if (ordinaryScopes[index].has(name)) return ordinaryTypeScopes[index].get(name);
@@ -332,7 +400,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       if (sameType(prior.type, type)) return;
       failure('CONFLICTING_TYPES', `Redeclaration of typedef «${name}» has an incompatible type.`, location);
     }
-    typedefScopes.at(-1)!.set(name, { type, isConst });
+    setParserMap(typedefScopes.at(-1)!, name, { type, isConst });
   };
   const isDeclarationStart = (token = peek()): boolean => declarationWords.has(token.text) || !!lookupTypedef(token.text);
   const lookupTag = (tag: string): AggregateDefinition | undefined => {
@@ -355,7 +423,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       let definition = nearest?.aggregate;
       if (!definition) {
         definition = { id: nextAggregateId++, kind, tag, complete: false, members: [], location: kindToken };
-        aggregates.push(definition); tagScopes[tagScopes.length - 1].set(tag, definition);
+        aggregates.push(definition); setParserMap(tagScopes[tagScopes.length - 1], tag, definition);
       } else if (definition.kind !== kind) failure('CONFLICTING_TYPES', `Tag «${tag}» already declares a different aggregate type.`, kindToken);
       return aggregateRef(definition.id);
     }
@@ -366,12 +434,15 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const definition: AggregateDefinition = existing ?? { id: nextAggregateId++, kind, tag, complete: false, members: [], location: kindToken };
     if (!existing) {
       aggregates.push(definition);
-      if (tag !== null) tagScopes[tagScopes.length - 1].set(tag, definition);
+      if (tag !== null) setParserMap(tagScopes[tagScopes.length - 1], tag, definition);
     }
-    consume();
+    const openBrace = consume();
     const members: AggregateMember[] = [];
     while (peek().text !== '}') {
-      if (peek().kind === 'eof') failure('SYNTAX_ERROR', `Missing closing } for ${kind}.`, peek());
+      if (peek().kind === 'eof') {
+        const message = `Missing closing } for ${kind}.`;
+        syntaxFailureWithRelated(message, peek(), relatedFragment(openBrace, peek(), `Unclosed ${kind} definition starts here.`));
+      }
       if (peek().text === ';') failure('SYNTAX_ERROR', 'An aggregate requires member declarations.', peek());
       if (peek().text === '_Static_assert') { staticAssertions.push(parseStaticAssert()); continue; }
       const alignmentSpecifiers: number[] = [];
@@ -436,6 +507,19 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       expect(';');
     }
     expect('}');
+    if (recovery) {
+      for (const checkpoint of parserCheckpoints) {
+        if (!checkpoint.aggregateSnapshots.has(definition)) {
+          checkpoint.aggregateSnapshots.set(definition, {
+            ...definition,
+            members: definition.members.map((member) => ({
+              ...member,
+              ...(member.bitField ? { bitField: { ...member.bitField } } : {}),
+            })),
+          });
+        }
+      }
+    }
     definition.members = members;
     definition.complete = true;
     if (!members.length) failure('TYPE_ERROR', 'A struct or union must declare at least one member.', kindToken);
@@ -461,12 +545,15 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       id: nextEnumId++, tag, complete: false, integerType: 'int', enumerators: [], translationUnit, location: enumToken,
     };
     enums.push(definition);
-    if (tag !== null) enumTagScopes[enumTagScopes.length - 1].set(tag, definition);
-    consume();
+    if (tag !== null) setParserMap(enumTagScopes[enumTagScopes.length - 1], tag, definition);
+    const openBrace = consume();
     let nextValue = 0n;
     let count = 0;
     while (peek().text !== '}') {
-      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Missing closing } for enum.', peek());
+      if (peek().kind === 'eof') {
+        const message = 'Missing closing } for enum.';
+        syntaxFailureWithRelated(message, peek(), relatedFragment(openBrace, peek(), 'Unclosed enum definition starts here.'));
+      }
       const enumerator = identifier();
       let value = nextValue;
       if (peek().text === '=') {
@@ -496,7 +583,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const scope = ordinaryScopes[ordinaryScopes.length - 1];
     if (typedefScopes.at(-1)?.has(name)) failure('REDECLARATION', `Enumerator «${name}» is already a typedef name in this scope.`, location);
     if (scope.has(name)) failure('REDECLARATION', `Identifier «${name}» is already declared in this scope.`, location);
-    scope.set(name, value);
+    setParserMap(scope, name, value);
   };
 
   const newDeclarationSpecifiers = (): DeclarationSpecifiers => ({
@@ -924,10 +1011,13 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const value = parseExpression(2, new Set([',', ';', '}']));
       return { kind: 'expression', value, location: at };
     }
-    consume();
+    const openBrace = consume();
     const list: { designators: InitializerDesignator[]; initializer: Initializer; location: Location }[] = [];
     while (peek().text !== '}') {
-      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Missing closing } for initializer.', peek());
+      if (peek().kind === 'eof') {
+        const message = 'Missing closing } for initializer.';
+        syntaxFailureWithRelated(message, peek(), relatedFragment(openBrace, peek(), 'Unclosed initializer starts here.'));
+      }
       const itemAt = peek();
       const designators: InitializerDesignator[] = [];
       while (peek().text === '.' || peek().text === '[') {
@@ -1056,12 +1146,23 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       stack.push(marker);
       questionCounts.push(0);
     };
+    const openingMarkerMessage = (marker: Marker): string =>
+      marker.kind === 'index' ? 'Opening subscript bracket for this expression.' :
+        marker.kind === 'call' ? 'Opening parenthesis for this function call.' : 'Opening parenthesis for this expression.';
+    const expectedClosingDelimiter = (marker: Marker): ')' | ']' => marker.kind === 'index' ? ']' : ')';
     const closeMarker = (kind: Marker['kind'], token: Token): void => {
       const open = markers[markers.length - 1];
       if (open === undefined) failure('SYNTAX_ERROR', `«${token.text}» has no matching opening delimiter.`, token);
       while (stack.length > open + 1) reduce();
       const marker = stack.pop()! as Marker;
-      if (marker.kind !== kind) failure('SYNTAX_ERROR', `Expected closing «${marker.kind === 'group' || marker.kind === 'call' ? '(' : '['}».`, token);
+      if (marker.kind !== kind) {
+        const related = relatedFragment(
+          marker.token,
+          token,
+          openingMarkerMessage(marker),
+        );
+        syntaxFailureWithRelated(`Expected closing «${expectedClosingDelimiter(marker)}».`, token, related);
+      }
       markers.pop(); questionCounts.pop(); consume();
       if (marker.kind === 'group') {
         if (values.length !== marker.valueStart + 1) failure('SYNTAX_ERROR', 'Invalid expression inside parentheses.', token);
@@ -1085,6 +1186,18 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const index = values.pop()!;
       pushValue({ kind: 'index', base: marker.base, index: index.expression, location: marker.token }, Math.max(marker.baseDepth, index.depth) + 1);
       expectingOperand = false;
+    };
+
+    const failForOpenMarker = (message: string, marker: Marker, boundary: Token, unclosed = false): never => {
+      const related = relatedFragment(
+        marker.token,
+        boundary,
+        unclosed
+          ? marker.kind === 'index' ? 'Unclosed subscript starts here.' :
+            marker.kind === 'call' ? 'Unclosed function call starts here.' : 'Unclosed parenthesized expression starts here.'
+          : openingMarkerMessage(marker),
+      );
+      return syntaxFailureWithRelated(message, boundary, related);
     };
 
     while (true) {
@@ -1319,10 +1432,17 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         stack.push({ kind: 'binary', token: consume(), operator: token.text }); expectingOperand = true; continue;
       }
       if (unsupportedWords.has(token.text)) unsupported(token);
+      if (open >= 0 && (token.text === ';' || token.text === '}')) {
+        const marker = stack[open] as Marker;
+        failForOpenMarker(`Expected closing «${expectedClosingDelimiter(marker)}» before «${token.text}».`, marker, token);
+      }
       failure('SYNTAX_ERROR', `Missing operator before «${token.text}».`, token);
     }
-    if (expectingOperand) failure('SYNTAX_ERROR', 'Missing expression or operand.', peek());
-    if (markers.length) failure('SYNTAX_ERROR', 'Missing closing parenthesis or subscript bracket.', peek());
+    if (expectingOperand) {
+      if (markers.length) failForOpenMarker('Missing expression or operand.', stack[markers[markers.length - 1]] as Marker, peek());
+      failure('SYNTAX_ERROR', 'Missing expression or operand.', peek());
+    }
+    if (markers.length) failForOpenMarker('Missing closing parenthesis or subscript bracket.', stack[markers[markers.length - 1]] as Marker, peek(), true);
     while (stack.length) reduce();
     if (values.length !== 1) failure('SYNTAX_ERROR', 'Invalid expression.', peek());
     return values[0].expression;
@@ -1531,7 +1651,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         declareOrdinary(declarator.name, declarator.location, type);
         const priorLinkage = fileLinkage.get(declarator.name);
         const linkage: 'internal' | 'external' = priorLinkage ?? 'external';
-        fileLinkage.set(declarator.name, linkage);
+        setParserMap(fileLinkage, declarator.name, linkage);
         const fnType = functionType(type)!;
         const symbolKey = linkage === 'internal' ? `internal:${translationUnit}:${declarator.name}` : `external:${declarator.name}`;
         const parameters: Parameter[] = (declarator.parameters ?? []).map((parameter, index) => ({
@@ -1580,7 +1700,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const alignment = Math.max(naturalAlignment, ...requestedAlignment, 1);
       if (local && isExtern) {
         const linkage = fileLinkage.get(declarator.name) ?? 'external';
-        fileLinkage.set(declarator.name, linkage);
+        setParserMap(fileLinkage, declarator.name, linkage);
         const symbolKey = linkage === 'internal' ? `internal:${translationUnit}:${declarator.name}` : `external:${declarator.name}`;
         const prior = globals.find((global) => global.symbolKey === symbolKey);
         if (prior && (!compatibleType(prior.type, type) || !!prior.threadLocal !== isThreadLocal)) {
@@ -1593,6 +1713,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         };
         if (!prior) globals.push(global);
         else {
+          captureGlobalState(prior);
           global.alignment = Math.max(global.alignment ?? naturalAlignment, alignment);
           global.requestedAlignment = Math.max(global.requestedAlignment ?? 0, ...requestedAlignment, 0) || undefined;
         }
@@ -1625,7 +1746,26 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       if (peek().text === '}') {
         current.block.endLocation = consume(); popTags(); pending.pop(); continue;
       }
-      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Missing closing } for block.', peek());
+      if (peek().kind === 'eof') {
+        if (!recovery) failure('SYNTAX_ERROR', 'Missing closing } for block.', peek());
+        if (recovery.diagnostics.length < recovery.maxDiagnostics) {
+          const eof = peek();
+          const related = pending.flatMap(({ block }) => {
+            const location = relatedFragment(block.location, eof, 'Unclosed block starts here.');
+            return location ? [location] : [];
+          });
+          recovery.diagnostics.push({
+            code: 'SYNTAX_ERROR', message: 'Missing closing } for block.',
+            file: eof.file, line: eof.line, column: eof.column,
+            ...(related.length ? { related } : {}),
+          });
+        } else {
+          recovery.truncated.value = true;
+        }
+        while (pending.length) { popTags(); pending.pop(); }
+        block.endLocation = peek();
+        break;
+      }
       enforceLimit('maxDepth', current.depth + 1, limits.maxDepth, peek());
       if (peek().text === '{') {
         const nestedOpen = consume();
@@ -1633,7 +1773,15 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         current.block.statements.push(nested); pushTags(); pending.push({ block: nested, depth: current.depth + 1 });
         continue;
       }
-      current.block.statements.push(parseStatement(current.depth + 1, true));
+      const statementStart = cursor;
+      const checkpoint = recovery ? captureParserCheckpoint() : undefined;
+      try {
+        current.block.statements.push(parseStatement(current.depth + 1, true));
+      } catch (error) {
+        if (!checkpoint || !recordRecovery(error, checkpoint, statementStart, 'statement')) throw error;
+      } finally {
+        if (checkpoint) finishParserCheckpoint(checkpoint);
+      }
     }
     return block;
   };
@@ -1710,8 +1858,139 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   const functions: FunctionIR[] = [];
   const globals: GlobalObject[] = [];
   const fileLinkage = new Map<string, 'internal' | 'external'>();
+
+  function captureParserCheckpoint(): ParserCheckpoint {
+    const checkpoint: ParserCheckpoint = {
+      typedefScopes: typedefScopes.slice(),
+      tagScopes: tagScopes.slice(),
+      enumTagScopes: enumTagScopes.slice(),
+      ordinaryScopes: ordinaryScopes.slice(),
+      ordinaryTypeScopes: ordinaryTypeScopes.slice(),
+      mapMutations: [],
+      aggregateSnapshots: new Map(),
+      globalSnapshots: new Map(),
+      aggregatesLength: aggregates.length,
+      enumsLength: enums.length,
+      staticAssertionsLength: staticAssertions.length,
+      functionsLength: functions.length,
+      globalsLength: globals.length,
+      lastSpecifierDefinesTag,
+      lastSpecifierConst,
+      lastSpecifierVolatile,
+      lastSpecifierRestrict,
+      lastSpecifierQualifiers: { ...lastSpecifierQualifiers },
+      nextAggregateId,
+      nextEnumId,
+      expressionDuration,
+    };
+    parserCheckpoints.push(checkpoint);
+    return checkpoint;
+  }
+
+  function finishParserCheckpoint(checkpoint: ParserCheckpoint): void {
+    const index = parserCheckpoints.lastIndexOf(checkpoint);
+    if (index === parserCheckpoints.length - 1) parserCheckpoints.pop();
+    else if (index >= 0) parserCheckpoints.splice(index, 1);
+  }
+
+  function captureGlobalState(value: GlobalObject): void {
+    if (!recovery) return;
+    for (const checkpoint of parserCheckpoints) {
+      if (!checkpoint.globalSnapshots.has(value)) checkpoint.globalSnapshots.set(value, { ...value });
+    }
+  }
+
+  function restoreParserCheckpoint(checkpoint: ParserCheckpoint): void {
+    finishParserCheckpoint(checkpoint);
+    for (let index = checkpoint.mapMutations.length - 1; index >= 0; index--) {
+      const mutation = checkpoint.mapMutations[index];
+      if (mutation.existed) mutation.map.set(mutation.key, mutation.value);
+      else mutation.map.delete(mutation.key);
+    }
+    for (const [value, state] of checkpoint.aggregateSnapshots) {
+      Object.assign(value, state);
+      value.members = state.members.map((member) => ({
+        ...member,
+        ...(member.bitField ? { bitField: { ...member.bitField } } : {}),
+      }));
+    }
+    for (const [value, state] of checkpoint.globalSnapshots) Object.assign(value, state);
+    aggregates.length = checkpoint.aggregatesLength;
+    enums.length = checkpoint.enumsLength;
+    staticAssertions.length = checkpoint.staticAssertionsLength;
+    functions.length = checkpoint.functionsLength;
+    globals.length = checkpoint.globalsLength;
+    typedefScopes.splice(0, typedefScopes.length, ...checkpoint.typedefScopes);
+    tagScopes.splice(0, tagScopes.length, ...checkpoint.tagScopes);
+    enumTagScopes.splice(0, enumTagScopes.length, ...checkpoint.enumTagScopes);
+    ordinaryScopes.splice(0, ordinaryScopes.length, ...checkpoint.ordinaryScopes);
+    ordinaryTypeScopes.splice(0, ordinaryTypeScopes.length, ...checkpoint.ordinaryTypeScopes);
+    lastSpecifierDefinesTag = checkpoint.lastSpecifierDefinesTag;
+    lastSpecifierConst = checkpoint.lastSpecifierConst;
+    lastSpecifierVolatile = checkpoint.lastSpecifierVolatile;
+    lastSpecifierRestrict = checkpoint.lastSpecifierRestrict;
+    lastSpecifierQualifiers = { ...checkpoint.lastSpecifierQualifiers };
+    nextAggregateId = checkpoint.nextAggregateId;
+    nextEnumId = checkpoint.nextEnumId;
+    expressionDuration = checkpoint.expressionDuration;
+  }
+
+  function synchronize(start: number, boundary: 'statement' | 'external'): number {
+    const eof = tokens.length - 1;
+    let parentheses = 0;
+    let brackets = 0;
+    let braces = 0;
+    const startLine = tokens[start]?.line;
+    for (let index = start; index < eof; index++) {
+      const text = tokens[index].text;
+      const atBoundary = parentheses === 0 && brackets === 0 && braces === 0 && index > start && tokens[index].line > (startLine ?? tokens[index].line) &&
+        (isDeclarationStart(tokens[index]) || (boundary === 'external'
+          ? text === '_Static_assert'
+          : ['{', 'if', 'switch', 'while', 'do', 'for', 'return', 'break', 'continue', 'goto', 'case', 'default', '_Static_assert'].includes(text)));
+      if (atBoundary) return index;
+      if (text === '(') parentheses++;
+      else if (text === ')' && parentheses) parentheses--;
+      else if (text === '[') brackets++;
+      else if (text === ']' && brackets) brackets--;
+      else if (text === '{') braces++;
+      else if (text === '}') {
+        if (!braces) return boundary === 'statement' ? index : index + 1;
+        braces--;
+      } else if (text === ';' && !parentheses && !brackets && !braces) {
+        return index + 1;
+      }
+    }
+    return eof;
+  }
+
+  function recordRecovery(error: unknown, checkpoint: ParserCheckpoint, start: number, boundary: 'statement' | 'external'): boolean {
+    if (!recovery || !(error instanceof EngineFailure) || error.resource !== undefined || error.diagnostic.code === 'ENGINE_INTERNAL_ERROR') return false;
+    restoreParserCheckpoint(checkpoint);
+    if (recovery.diagnostics.length >= recovery.maxDiagnostics) {
+      recovery.truncated.value = true;
+      cursor = tokens.length - 1;
+      return true;
+    }
+    recovery.diagnostics.push({
+      ...error.diagnostic,
+      ...(error.location.endLine !== undefined && error.location.endColumn !== undefined
+        ? { endLine: error.location.endLine, endColumn: error.location.endColumn }
+        : {}),
+    });
+    let next = synchronize(start, boundary);
+    const startText = tokens[start]?.text;
+    if (boundary === 'statement' && (startText === 'if' && tokens[next]?.text === 'else' || startText === 'do' && tokens[next]?.text === 'while')) {
+      next = synchronize(next, 'statement');
+    }
+    cursor = next > start ? next : Math.min(start + 1, tokens.length - 1);
+    return true;
+  }
+
   while (peek().kind !== 'eof') {
     const at = peek();
+    const externalStart = cursor;
+    const checkpoint = recovery ? captureParserCheckpoint() : undefined;
+    try {
     if (peek().text === '_Static_assert') { staticAssertions.push(parseStaticAssert()); continue; }
     const specifiers = newDeclarationSpecifiers();
     const base = parseTypeSpecifier((token) => consumeDeclarationSpecifier(specifiers, token));
@@ -1758,7 +2037,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         if (isExtern && fileLinkage.get(declarator.name) === 'internal') linkage = 'internal';
         const previousLinkage = fileLinkage.get(declarator.name);
         if (previousLinkage && previousLinkage !== linkage) failure('CONFLICTING_LINKAGE', `Function «${declarator.name}» mixes internal and external linkage.`, declarator.location);
-        fileLinkage.set(declarator.name, linkage);
+        setParserMap(fileLinkage, declarator.name, linkage);
         const parameterTypes = fnType.parameters;
         const sourceParameters = declarator.parameters ?? [];
         const parameters: Parameter[] = parameterTypes.map((parameterType, index) => ({
@@ -1854,10 +2133,11 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         if (isExtern && fileLinkage.get(declarator.name) === 'internal') linkage = 'internal';
         const previousLinkage = fileLinkage.get(declarator.name);
         if (previousLinkage && previousLinkage !== linkage) failure('CONFLICTING_LINKAGE', `Object «${declarator.name}» mixes internal and external linkage.`, declarator.location);
-        fileLinkage.set(declarator.name, linkage);
+        setParserMap(fileLinkage, declarator.name, linkage);
         const symbolKey = linkage === 'internal' ? `internal:${translationUnit}:${declarator.name}` : `external:${declarator.name}`;
         const prior = globals.find(global => global.symbolKey === symbolKey);
         if (prior) {
+          captureGlobalState(prior);
           const isConst = isConstObjectType(inferredType);
           if (!!prior.isConst !== isConst || !!prior.threadLocal !== isThreadLocal || !compatibleType(prior.type, inferredType)) failure('CONFLICTING_TYPES', `Incompatible declarations of object «${declarator.name}».`, declarator.location);
           if (prior.initializer && initializer) failure('REDEFINITION', `Global object «${declarator.name}» already has a definition.`, declarator.location);
@@ -1883,6 +2163,11 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       if (functions.length && functions[functions.length - 1].location === at && functions[functions.length - 1].body) failure('SYNTAX_ERROR', 'A function definition cannot share declarators.', at);
     }
     if (peek().text === ';') consume();
+    } catch (error) {
+      if (!checkpoint || !recordRecovery(error, checkpoint, externalStart, 'external')) throw error;
+    } finally {
+      if (checkpoint) finishParserCheckpoint(checkpoint);
+    }
   }
   if (cursor === 0) failure('SYNTAX_ERROR', 'The file contains no external declarations.', peek());
   for (const global of globals) {

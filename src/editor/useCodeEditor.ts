@@ -30,6 +30,10 @@ interface PendingInput {
   evaluation?: EditorCommandEvaluation;
 }
 
+interface EditorCallbacks {
+  onCompositionChange?: (composing: boolean) => void;
+}
+
 function getSelection(editor: HTMLTextAreaElement): EditorSelection {
   return {
     start: editor.selectionStart,
@@ -109,9 +113,14 @@ function keepCaretVisible(editor: HTMLTextAreaElement, snapshot: EditorSnapshot,
   }
 }
 
-export function useCodeEditor(initialText = '', onSourceChange?: (source: string) => void) {
+export function useCodeEditor(
+  initialText = '',
+  onSourceChange?: (source: string) => void,
+  callbacks: EditorCallbacks = {},
+) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  const [isComposing, setIsComposing] = useState(false);
   const normalizedInitialText = normalizeEditorText(initialText);
   const initialDiagnostic = getEditorLineLimitDiagnostic(normalizedInitialText);
   const [text, setText] = useState(initialDiagnostic ? '' : normalizedInitialText);
@@ -216,7 +225,9 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
       pending = null;
       literalInput = false;
       suppressPairs = false;
+      setIsComposing(false);
       publishEditorState();
+      callbacks.onCompositionChange?.(false);
     }
 
     function perform(command: EditorCommand) {
@@ -398,6 +409,8 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
       compositionBefore = capture();
       compositionViewport = snapshotViewport;
       composing = true;
+      setIsComposing(true);
+      callbacks.onCompositionChange?.(true);
       exitOnTab = false;
       pending = null;
       history.breakGroup();
@@ -461,5 +474,5 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
     };
   }, []);
 
-  return { ref, cursor, text, limitMessage };
+  return { ref, cursor, text, limitMessage, isComposing };
 }

@@ -13,10 +13,30 @@ export interface SourceProject {
   /** Ordered C translation units. Omitted means `[entry]`. */
   readonly translationUnits?: readonly string[];
 }
-export interface Diagnostic { readonly code: string; readonly message: string; readonly file: string; readonly line: number; readonly column: number }
+export interface RelatedDiagnosticLocation {
+  readonly message: string;
+  readonly file: string;
+  readonly line: number;
+  readonly column: number;
+  /** Exclusive end of the related source span, when the source mapping is safe. */
+  readonly endLine?: number;
+  readonly endColumn?: number;
+}
+export interface Diagnostic {
+  readonly code: string;
+  readonly message: string;
+  readonly file: string;
+  readonly line: number;
+  readonly column: number;
+  /** Exclusive end of the primary token span, when available. */
+  readonly endLine?: number;
+  readonly endColumn?: number;
+  readonly related?: readonly RelatedDiagnosticLocation[];
+}
 export interface PrepareLimits { maxSourceChars: number | null; maxTokens: number | null; maxPreprocessSteps: number | null; maxDepth: number | null }
 export interface ExecuteLimits { maxInstructions: number | null; maxMemoryBytes: number | null; maxIOBytes: number | null; maxDepth: number | null }
 export interface PrepareOptions { limits?: Partial<PrepareLimits> }
+export type PrepareResource = keyof PrepareLimits;
 export interface VirtualInputFile { readonly name: string; readonly data: string | Uint8Array }
 /** Session inputs are copied into the engine's bounded virtual I/O system. */
 export interface ExecuteIOOptions {
@@ -45,6 +65,10 @@ export interface PreparedProgram {
 export type LimitResource = keyof PrepareLimits | keyof ExecuteLimits;
 export interface LimitResult { kind: 'limit'; resource: LimitResource; limit: number; diagnostics: readonly Diagnostic[]; metrics: EngineMetrics }
 export type PrepareResult = { kind: 'prepared'; program: PreparedProgram; metrics: EngineMetrics } | { kind: 'prepare-error'; diagnostics: readonly Diagnostic[]; metrics: EngineMetrics } | (LimitResult & { stage: 'prepare' });
+export type SyntaxAnalysisResult =
+  | { kind: 'ok'; diagnostics: readonly []; metrics: EngineMetrics }
+  | { kind: 'error'; diagnostics: readonly Diagnostic[]; truncated: boolean; metrics: EngineMetrics }
+  | { kind: 'limit'; stage: 'syntax'; resource: PrepareResource; limit: number; diagnostics: readonly Diagnostic[]; metrics: EngineMetrics };
 export interface ExecutionOutput { readonly stdout: Uint8Array; readonly stderr: Uint8Array }
 export type ExecuteLimitResult = LimitResult & { stage: 'execute' } & ExecutionOutput;
 export type ExecuteResult = ({ kind: 'terminated'; exitCode: number; rawExitStatus: number; mainReturn: number; metrics: EngineMetrics } & ExecutionOutput) | ({ kind: 'runtime-error'; diagnostics: readonly Diagnostic[]; metrics: EngineMetrics } & ExecutionOutput) | ExecuteLimitResult;
@@ -425,6 +449,7 @@ export const CAPABILITIES = Object.freeze({
   blockExternDeclarations: true,
   externalInlineSemantics: 'c11',
   functions: 'typed-prototypes-variadic-functions-recursion-and-function-pointers', library: 'partial', preprocessor: 'c11-translation-phases-and-macros-with-virtual-project-includes',
+  syntaxAnalysis: 'preprocess-and-parse-without-linking-or-execution; up-to-20-parser-diagnostics-with-boundary-recovery; safe-token-ranges-and-related-delimiter-locations',
   virtualHeaders: Object.freeze(['assert.h', 'ctype.h', 'errno.h', 'float.h', 'inttypes.h', 'iso646.h', 'limits.h', 'math.h', 'stdarg.h', 'stdalign.h', 'stdbool.h', 'stddef.h', 'stdint.h', 'stdio.h', 'stdlib.h', 'string.h', 'time.h']),
   multipleFiles: true,
   translationUnits: true,

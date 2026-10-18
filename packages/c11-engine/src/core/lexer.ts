@@ -1,26 +1,36 @@
 import type { EngineMetrics, PrepareLimits } from './types.ts';
 import { enforceLimit, failure } from './internal.ts';
-import type { Location, Token } from './internal.ts';
+import type { Location, SourceSpan, Token } from './internal.ts';
 import { scanC, type SyntaxKind } from '../syntax.ts';
 
 /** Convert one preprocessing token into the parser's smaller token vocabulary. */
-export function lexPreprocessingToken(kind: SyntaxKind, text: string, at: Location): Token {
+export function lexPreprocessingToken(
+  kind: SyntaxKind,
+  text: string,
+  at: Location,
+  endAt?: Location,
+  sourceSpan?: SourceSpan,
+): Token {
+  const sourcePosition = {
+    ...(endAt ? { endLine: endAt.line, endColumn: endAt.column } : {}),
+    ...(sourceSpan ? { sourceSpan } : {}),
+  };
   const literalPrefix = /^(u8|[LuU])(['"])/.exec(text);
   if (literalPrefix && !(literalPrefix[1] === 'u8' && literalPrefix[2] === '"')) {
     failure('UNSUPPORTED_FEATURE', 'This profile does not implement wide literals.', at);
   }
-  if (kind === 'identifier' || kind === 'symbol') return { kind, text, ...at };
+  if (kind === 'identifier' || kind === 'symbol') return { kind, text, ...at, ...sourcePosition };
   if (kind === 'number') {
     const hexadecimal = /^0[xX]/.test(text);
-    return { kind: text.includes('.') || (hexadecimal ? /[pP]/ : /[eE]/).test(text) ? 'floating' : 'integer', text, ...at };
+    return { kind: text.includes('.') || (hexadecimal ? /[pP]/ : /[eE]/).test(text) ? 'floating' : 'integer', text, ...at, ...sourcePosition };
   }
   if (kind === 'string') {
     if ((!text.startsWith('"') && !text.startsWith('u8"')) || !text.endsWith('"')) failure('UNTERMINATED_STRING', 'Unterminated string literal.', at);
-    return { kind: 'string', text, ...at };
+    return { kind: 'string', text, ...at, ...sourcePosition };
   }
   if (kind === 'character') {
     if (!text.startsWith("'") || !text.endsWith("'")) failure('UNTERMINATED_CHARACTER', 'Unterminated character literal.', at);
-    return { kind: 'character', text, ...at };
+    return { kind: 'character', text, ...at, ...sourcePosition };
   }
   if (kind === 'invalid') failure('INVALID_TOKEN', `Unrecognized character: ${text}.`, at);
   failure('UNSUPPORTED_FEATURE', `Unsupported preprocessor token: ${text}.`, at);

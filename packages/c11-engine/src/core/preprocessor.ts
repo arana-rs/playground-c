@@ -1,7 +1,7 @@
 import { scanC, type SyntaxKind, type SyntaxToken } from '../syntax.ts';
 import { getStandardHeader } from './headers.ts';
 import { EngineFailure, failure, enforceLimit } from './internal.ts';
-import type { Location, Token } from './internal.ts';
+import type { Location, SourceSpan, Token } from './internal.ts';
 import { lexPreprocessingToken } from './lexer.ts';
 import type { EngineMetrics, PrepareLimits, SourceProject } from './types.ts';
 import { encodeUtf8Bytes, parseLiteral } from './numeric.ts';
@@ -20,6 +20,9 @@ interface PPToken {
   physicalFile?: string;
   physicalOffset?: number;
   physicalEndOffset?: number;
+  physicalEndLine?: number;
+  physicalEndColumn?: number;
+  endAt?: Location;
   expansionSite?: Location;
   physicalLine: number;
   physicalColumn: number;
@@ -38,6 +41,7 @@ interface PPContext {
   readonly onceFiles: Set<string>;
   readonly limits: PrepareLimits;
   readonly metrics: EngineMetrics;
+  readonly captureSourceSpans: boolean;
   readonly dateText: string;
   readonly timeText: string;
 }
@@ -225,7 +229,7 @@ function normalizeDigraphs(lines: Map<number, PPToken[]>): void {
   }
 }
 
-function tokenizeSource(name: string, source: string): { lines: PPLine[]; eof: Location & { physicalLine: number; physicalColumn: number } } {
+function tokenizeSource(name: string, source: string, captureSourceSpans: boolean): { lines: PPLine[]; eof: Location & { physicalLine: number; physicalColumn: number } } {
   const mapped = translatePhasesOneAndTwo(source);
   const positions = sourcePositions(source);
   const lines = new Map<number, PPToken[]>();
@@ -244,10 +248,15 @@ function tokenizeSource(name: string, source: string): { lines: PPLine[]; eof: L
     const make = (kind: PPToken['kind'], text: string, original: string, logicalStart: number, logicalEnd: number, separated = leadingSpace): PPToken => {
       const span = physicalSpan(mapped, logicalStart, logicalEnd);
       const start = physicalLocation(name, source, positions, span.start);
+      const end = captureSourceSpans ? physicalLocation(name, source, positions, span.end) : undefined;
       return {
         kind, text, spelling: original, at: { file: name, line: start.line, column: start.column }, physicalFile: name,
-        physicalOffset: span.start, physicalEndOffset: span.end, physicalLine: start.physicalLine,
-        physicalColumn: start.physicalColumn, logicalStart, logicalEnd, leadingSpace: separated,
+        physicalOffset: span.start,
+        ...(captureSourceSpans ? { physicalEndOffset: span.end } : {}),
+        physicalLine: start.physicalLine,
+        physicalColumn: start.physicalColumn,
+        ...(end ? { physicalEndLine: end.physicalLine, physicalEndColumn: end.physicalColumn } : {}),
+        logicalStart, logicalEnd, leadingSpace: separated,
       };
     };
     if (syntax.kind === 'preprocessor') {
@@ -727,7 +736,7 @@ class TranslationPreprocessor {
     this.checkDepth(depth, includeAt);
     this.countExpansionWork(1, includeAt);
     if (this.context.onceFiles.has(file)) return { tokens: [], eof: { file, line: 1, column: 1 } };
-    const scanned = tokenizeSource(file, source);
+    const scanned = tokenizeSource(file, source, this.context.captureSourceSpans);
     let logicalFile = file;
     let logicalOffset = 0;
     const output: PPToken[] = [];
@@ -741,7 +750,16 @@ class TranslationPreprocessor {
       pending = [];
     };
     for (const line of scanned.lines) {
-      const tokens = line.tokens.map((token) => ({ ...token, at: { file: logicalFile, line: token.physicalLine + logicalOffset, column: token.physicalColumn } }));
+      const tokens = line.tokens.map((token) => {
+        const safeSourceMapping = logicalFile === file && logicalOffset === 0;
+        return {
+          ...token,
+          at: { file: logicalFile, line: token.physicalLine + logicalOffset, column: token.physicalColumn },
+          ...(this.context.captureSourceSpans && safeSourceMapping && token.physicalEndLine !== undefined && token.physicalEndColumn !== undefined ? {
+            endAt: { file: logicalFile, line: token.physicalEndLine + logicalOffset, column: token.physicalEndColumn },
+          } : {}),
+        };
+      });
       this.countExpansionWork(Math.max(1, tokens.length), tokens[0]?.at ?? includeAt);
       const isDirective = tokens[0]?.text === '#';
       if (!isDirective) {
@@ -766,7 +784,17 @@ class TranslationPreprocessor {
     }
     flush();
     if (conditionalStack.length) preprocessError('Missing #endif for the condition started here.', conditionalStack.at(-1)!.at);
-    const eof: Location = { file: logicalFile, line: scanned.eof.physicalLine + logicalOffset, column: scanned.eof.physicalColumn };
+    const eof: Location = {
+      file: logicalFile,
+      line: scanned.eof.physicalLine + logicalOffset,
+      column: scanned.eof.physicalColumn,
+      ...(this.context.captureSourceSpans && logicalFile === file && logicalOffset === 0 ? { sourceSpan: {
+        physicalFile: file,
+        startOffset: source.length,
+        endOffset: source.length,
+        logicalLineOffset: logicalOffset,
+      } } : {}),
+    };
     return { tokens: output, eof };
   }
 
@@ -952,7 +980,14 @@ function evaluatePreprocessorExpression(tokens: readonly PPToken[], limits: Prep
   return ppTruthy(evaluate(tree));
 }
 
-export function preprocessProject(project: SourceProject, limits: PrepareLimits, metrics: EngineMetrics): readonly PreprocessedUnit[] {
+export interface PreprocessOptions { readonly captureSourceSpans?: boolean }
+
+export function preprocessProject(
+  project: SourceProject,
+  limits: PrepareLimits,
+  metrics: EngineMetrics,
+  options?: PreprocessOptions,
+): readonly PreprocessedUnit[] {
   const fallback = typeof project?.entry === 'string' && project.entry ? project.entry : 'main.c';
   const location: Location = { file: fallback, line: 1, column: 1 };
   if (!project || typeof project !== 'object' || typeof project.entry !== 'string' || !project.entry || !Array.isArray(project.files)) {
@@ -985,6 +1020,7 @@ export function preprocessProject(project: SourceProject, limits: PrepareLimits,
     const start: Location = { file: name, line: 1, column: 1 };
     const context: PPContext = {
       macros: predefinedMacros(start, dateText, timeText), files, onceFiles: new Set(), limits, metrics,
+      captureSourceSpans: options?.captureSourceSpans ?? false,
       dateText, timeText,
     };
     const preprocessor = new TranslationPreprocessor(context);
@@ -992,7 +1028,25 @@ export function preprocessProject(project: SourceProject, limits: PrepareLimits,
     const tokens: Token[] = [];
     for (const token of result.tokens) {
       if (token.kind === 'header') preprocessError('A header name appeared outside an #include directive.', token.at);
-      const parsed = lexPreprocessingToken(token.kind, token.text, token.at);
+      const needsRelatedProvenance = ['(', '[', '{', ')', ']', '}', ';'].includes(token.text);
+      const physicalFile = token.physicalFile;
+      const safeSourceMapping = options?.captureSourceSpans && token.expansionSite === undefined && token.physicalFile !== undefined &&
+        token.at.file === token.physicalFile && token.at.line - token.physicalLine === 0;
+      const sourceSpan: SourceSpan | undefined = safeSourceMapping && needsRelatedProvenance && physicalFile !== undefined && token.physicalOffset !== undefined && token.physicalEndOffset !== undefined
+        ? {
+          physicalFile,
+          startOffset: token.physicalOffset,
+          endOffset: token.physicalEndOffset,
+          logicalLineOffset: token.at.line - token.physicalLine,
+        }
+        : undefined;
+      const parsed = lexPreprocessingToken(
+        token.kind,
+        token.text,
+        token.at,
+        safeSourceMapping ? token.endAt : undefined,
+        sourceSpan,
+      );
       metrics.tokenCount++;
       enforceLimit('maxTokens', metrics.tokenCount, limits.maxTokens, token.at);
       tokens.push(parsed);

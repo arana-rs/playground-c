@@ -10,7 +10,12 @@ import { ThemeSwitch } from './components/arc/theme-switch/theme-switch.tsx';
 import { SelectedFileTab } from './components/SelectedFileTab.tsx';
 import { CodeEditor } from './editor/CodeEditor.tsx';
 import { createEditorSourcePersister, readEditorSource } from './editor/sourcePersistence.ts';
+import { projectEditorDiagnosticGroups } from './editor/editorDiagnostics.ts';
+import { SyntaxAnalysisControl } from './editor/SyntaxAnalysisControl.tsx';
+import { readSyntaxAnalysisMode, writeSyntaxAnalysisMode } from './editor/syntaxAnalysisPreference.ts';
+import type { SyntaxAnalysisController } from './editor/syntaxAnalysisController.ts';
 import { useCodeEditor } from './editor/useCodeEditor.ts';
+import { useSyntaxAnalysis } from './editor/useSyntaxAnalysis.ts';
 import { createRunConfiguration, readExecutionSettings, writeExecutionSettings } from './execution/settings.ts';
 import type { ExecutionSettings as ExecutionSettingsValue } from './execution/settings.ts';
 import { formatConsoleSegments, getConsoleStatus, useRunner } from './execution/useRunner.ts';
@@ -18,6 +23,12 @@ import { copyReportText } from './execution/copyReport.ts';
 import { formatTimeoutDiagnosticsReport, readTimeoutBrowserContext } from './execution/diagnosticsReport.ts';
 import type { TimeoutBrowserContext } from './execution/diagnosticsReport.ts';
 import { MemoryViewer } from './memory/MemoryViewer.tsx';
+import {
+  DEFAULT_MEMORY_VIEWER_PLAYBACK_INTERVAL_MS,
+  readMemoryViewerPlaybackInterval,
+  writeMemoryViewerPlaybackInterval,
+} from './memory/playbackSpeed.ts';
+import type { MemoryViewerPlaybackInterval } from './memory/playbackSpeed.ts';
 import {
   clampConsoleHeight,
   getConsoleHeightBounds,
@@ -123,6 +134,9 @@ function Playground() {
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettingsValue>(
     () => readExecutionSettings(() => window.localStorage),
   );
+  const [memoryViewerPlaybackIntervalMs, setMemoryViewerPlaybackIntervalMs] = useState<MemoryViewerPlaybackInterval>(
+    () => readMemoryViewerPlaybackInterval(() => window.localStorage, DEFAULT_MEMORY_VIEWER_PLAYBACK_INTERVAL_MS),
+  );
   const executionConfiguration = useMemo(() => createRunConfiguration(executionSettings), [executionSettings]);
   const requestedColorTheme = useRef(colorTheme);
   const themeTransitionGeneration = useRef(0);
@@ -131,7 +145,33 @@ function Playground() {
     () => createEditorSourcePersister(editorInitialSource, () => window.localStorage),
     [editorInitialSource],
   );
-  const { ref, cursor, text, limitMessage } = useCodeEditor(editorInitialSource, persistEditorSource);
+  const syntaxAnalysisControllerRef = useRef<SyntaxAnalysisController | null>(null);
+  const persistAndInvalidateSyntax = useCallback((source: string) => {
+    persistEditorSource(source);
+    syntaxAnalysisControllerRef.current?.setSource(source);
+  }, [persistEditorSource]);
+  const updateSyntaxComposition = useCallback((composing: boolean) => {
+    syntaxAnalysisControllerRef.current?.setComposing(composing);
+  }, []);
+  const { ref, cursor, text, limitMessage, isComposing } = useCodeEditor(
+    editorInitialSource,
+    persistAndInvalidateSyntax,
+    { onCompositionChange: updateSyntaxComposition },
+  );
+  const [syntaxAnalysisMode, setSyntaxAnalysisMode] = useState(
+    () => readSyntaxAnalysisMode(() => window.localStorage),
+  );
+  const syntaxAnalysis = useSyntaxAnalysis({
+    source: text,
+    enabled: syntaxAnalysisMode === 'syntax',
+    composing: isComposing,
+    options: executionConfiguration.options.prepare ?? {},
+    timeoutMs: executionConfiguration.timeoutMs,
+  }, syntaxAnalysisControllerRef);
+  const editorDiagnostics = useMemo(() => {
+    if (syntaxAnalysisMode !== 'syntax' || isComposing || syntaxAnalysis.status !== 'analysis-errors') return [];
+    return projectEditorDiagnosticGroups(text, syntaxAnalysis.diagnostics, 'main.c');
+  }, [isComposing, syntaxAnalysis, syntaxAnalysisMode, text]);
   const { state, run, stop, sendStdinLine, sendStdinEOF, isRunning } = useRunner();
   const timeoutReport = state.status === 'timeout' ? state.diagnosticsReport : null;
   const timeoutReportRef = useRef(timeoutReport);
@@ -201,6 +241,14 @@ function Playground() {
   useEffect(() => {
     writeExecutionSettings(() => window.localStorage, executionSettings);
   }, [executionSettings]);
+
+  useEffect(() => {
+    writeMemoryViewerPlaybackInterval(() => window.localStorage, memoryViewerPlaybackIntervalMs);
+  }, [memoryViewerPlaybackIntervalMs]);
+
+  useEffect(() => {
+    writeSyntaxAnalysisMode(() => window.localStorage, syntaxAnalysisMode);
+  }, [syntaxAnalysisMode]);
 
   const changeColorTheme = useCallback((next: 'light' | 'dark', trigger: HTMLButtonElement) => {
     const requestedTheme = requestedColorTheme.current === colorTheme
@@ -580,6 +628,12 @@ function Playground() {
           initialText={editorInitialSource}
           activeLine={cursor.line}
           limitMessage={limitMessage}
+          diagnostics={editorDiagnostics}
+        />
+        <SyntaxAnalysisControl
+          mode={syntaxAnalysisMode}
+          state={syntaxAnalysis}
+          onModeChange={setSyntaxAnalysisMode}
         />
       </main>
       <div
@@ -645,7 +699,12 @@ function Playground() {
       />
       <footer className="footer">
         <div className="footer-links">
-          <ExecutionSettings value={executionSettings} onApply={setExecutionSettings} />
+          <ExecutionSettings
+            value={executionSettings}
+            playbackIntervalMs={memoryViewerPlaybackIntervalMs}
+            onApply={setExecutionSettings}
+            onPlaybackIntervalChange={setMemoryViewerPlaybackIntervalMs}
+          />
           <a
             className="github-link"
             href={GITHUB_REPOSITORY_URL}
@@ -678,7 +737,12 @@ function Playground() {
         <span className="footer-cursor">{t('editor.cursorPosition', { line: cursor.line, column: cursor.column })}</span>
       </footer>
       {memoryViewerSource !== null && (
-        <MemoryViewer source={memoryViewerSource} configuration={executionConfiguration} onClose={closeMemoryViewer} />
+        <MemoryViewer
+          source={memoryViewerSource}
+          configuration={executionConfiguration}
+          playbackIntervalMs={memoryViewerPlaybackIntervalMs}
+          onClose={closeMemoryViewer}
+        />
       )}
     </div>
   );

@@ -3,6 +3,8 @@ import type { FormEvent, ChangeEvent } from 'react';
 import { Button } from './arc/button/button.tsx';
 import { isPositiveSafeInteger } from '../execution/settings.ts';
 import type { ExecutionSettings as ExecutionSettingsValue } from '../execution/settings.ts';
+import { isMemoryViewerPlaybackInterval, MEMORY_VIEWER_PLAYBACK_SPEED_OPTIONS } from '../memory/playbackSpeed.ts';
+import type { MemoryViewerPlaybackInterval } from '../memory/playbackSpeed.ts';
 import { useI18n } from '../i18n.tsx';
 
 type SettingsField = keyof ExecutionSettingsValue;
@@ -11,7 +13,9 @@ type FieldErrors = Partial<Record<SettingsField, boolean>>;
 
 interface ExecutionSettingsProps {
   value: ExecutionSettingsValue;
+  playbackIntervalMs: MemoryViewerPlaybackInterval;
   onApply: (settings: ExecutionSettingsValue) => void;
+  onPlaybackIntervalChange: (intervalMs: MemoryViewerPlaybackInterval) => void;
 }
 
 function toDraft(settings: ExecutionSettingsValue): DraftSettings {
@@ -27,23 +31,25 @@ function parsePositiveSafeInteger(value: string): number | null {
   return isPositiveSafeInteger(parsed) ? parsed : null;
 }
 
-export function ExecutionSettings({ value, onApply }: ExecutionSettingsProps) {
+export function ExecutionSettings({ value, playbackIntervalMs, onApply, onPlaybackIntervalChange }: ExecutionSettingsProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(() => toDraft(value));
   const [errors, setErrors] = useState<FieldErrors>({});
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const playbackSpeedSelectRef = useRef<HTMLSelectElement>(null);
   const depthInputRef = useRef<HTMLInputElement>(null);
   const popoverId = useId();
   const depthHelpId = useId();
   const stepsHelpId = useId();
   const depthErrorId = useId();
   const stepsErrorId = useId();
+  const playbackHelpId = useId();
 
   useEffect(() => {
     if (!open) return;
-    depthInputRef.current?.focus({ preventScroll: true });
+    playbackSpeedSelectRef.current?.focus({ preventScroll: true });
 
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setOpen(false);
@@ -129,6 +135,26 @@ export function ExecutionSettings({ value, onApply }: ExecutionSettingsProps) {
             <p>{t('executionSettings.description')}</p>
           </div>
           <form className="execution-settings-form" onSubmit={apply} noValidate>
+            <label className="execution-settings-field execution-settings-playback-field" htmlFor={`${popoverId}-playback-speed`}>
+              <span className="execution-settings-label">{t('executionSettings.playbackSpeed')}</span>
+              <select
+                ref={playbackSpeedSelectRef}
+                id={`${popoverId}-playback-speed`}
+                value={playbackIntervalMs}
+                aria-describedby={playbackHelpId}
+                onChange={event => {
+                  const nextIntervalMs = Number(event.currentTarget.value);
+                  if (isMemoryViewerPlaybackInterval(nextIntervalMs)) onPlaybackIntervalChange(nextIntervalMs);
+                }}
+              >
+                {MEMORY_VIEWER_PLAYBACK_SPEED_OPTIONS.map(option => (
+                  <option key={option.intervalMs} value={option.intervalMs}>
+                    {t(option.labelKey)}
+                  </option>
+                ))}
+              </select>
+              <span className="execution-settings-help" id={playbackHelpId}>{t('executionSettings.playbackSpeedHelp')}</span>
+            </label>
             <label className="execution-settings-field" htmlFor={`${popoverId}-depth`}>
               <span className="execution-settings-label">{t('executionSettings.maxDepth')}</span>
               <input

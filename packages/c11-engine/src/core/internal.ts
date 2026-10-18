@@ -1,7 +1,21 @@
 import type { Diagnostic, EngineMetrics, LimitResource, PreparedProgram } from './types.ts';
 import type { Binary80Value } from './binary80.ts';
 
-export interface Location { file: string; line: number; column: number }
+export interface SourceSpan {
+  readonly physicalFile: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly logicalLineOffset: number;
+}
+export interface Location {
+  file: string;
+  line: number;
+  column: number;
+  endLine?: number;
+  endColumn?: number;
+  /** Internal provenance used only to avoid unsafe related ranges. */
+  sourceSpan?: SourceSpan;
+}
 export interface Token extends Location { text: string; kind: 'identifier' | 'integer' | 'floating' | 'character' | 'string' | 'symbol' | 'eof' }
 
 export type ScalarCType = '_Bool' | 'char' | 'signed char' | 'unsigned char' | 'short' | 'unsigned short' | 'int' | 'unsigned int' | 'long' | 'unsigned long' | 'long long' | 'unsigned long long' | 'float' | 'double' | 'long double' | 'void';
@@ -286,11 +300,13 @@ export const INT_MAX = 2147483647n;
 
 export class EngineFailure extends Error {
   diagnostic: Diagnostic;
+  readonly location: Location;
   resource?: LimitResource;
   limit?: number;
   constructor(code: string, message: string, location: Location, resource?: LimitResource, limit?: number) {
     super(message);
     this.diagnostic = { code, message, file: location.file, line: location.line, column: location.column };
+    this.location = location;
     this.resource = resource;
     this.limit = limit;
   }

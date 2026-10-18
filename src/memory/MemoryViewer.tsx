@@ -56,12 +56,18 @@ import {
   mergeMemoryViewerHeapObjects,
 } from './heapSnapshots.ts';
 import { useStackHorizontalScroll } from './useStackHorizontalScroll.ts';
+import type { MemoryViewerPlaybackInterval } from './playbackSpeed.ts';
+import {
+  readMemoryViewerIoConsolePreference,
+  writeMemoryViewerIoConsolePreference,
+} from './ioConsolePreference.ts';
 import { useI18n } from '../i18n.tsx';
 import type { Translate } from '../i18n.tsx';
 
 interface MemoryViewerProps {
   source: string;
   configuration: RunConfiguration;
+  playbackIntervalMs: MemoryViewerPlaybackInterval;
   onClose: () => void;
 }
 
@@ -1845,7 +1851,7 @@ function MemoryViewerRegions({
   );
 }
 
-export function MemoryViewer({ source, configuration, onClose }: MemoryViewerProps) {
+export function MemoryViewer({ source, configuration, playbackIntervalMs, onClose }: MemoryViewerProps) {
   const { language, t } = useI18n();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -1886,9 +1892,15 @@ export function MemoryViewer({ source, configuration, onClose }: MemoryViewerPro
     setConsoleEnabled,
     stop,
     transcriptRevision,
-  } = useMemoryViewer(source, configuration, false);
+  } = useMemoryViewer(source, configuration, false, playbackIntervalMs);
   const hasStdioInclude = useMemo(() => hasDirectStdioInclude(frozenSource), [frozenSource]);
-  const [ioPreference, setIoPreference] = useState(false);
+  const [ioPreference, setIoPreference] = useState(
+    () => readMemoryViewerIoConsolePreference(() => window.localStorage),
+  );
+  const updateIoPreference = (enabled: boolean) => {
+    setIoPreference(enabled);
+    writeMemoryViewerIoConsolePreference(() => window.localStorage, enabled);
+  };
   const showIoConsole = hasStdioInclude && ioPreference;
   useEffect(() => {
     setConsoleEnabled(showIoConsole);
@@ -2028,7 +2040,7 @@ export function MemoryViewer({ source, configuration, onClose }: MemoryViewerPro
                 type="checkbox"
                 checked={showIoConsole}
                 disabled={!hasStdioInclude}
-                onChange={event => setIoPreference(event.currentTarget.checked)}
+                onChange={event => updateIoPreference(event.currentTarget.checked)}
               />
               <span>{t('memoryViewer.io')}</span>
             </label>
