@@ -48,7 +48,7 @@ export function compile(fn: FunctionIR): CompiledFunction {
   const schedule = (node: Statement, scopeName?: string): void => {
     if (node.kind === 'block') {
       const ids = node === fn.body ? [...new Set([...fn.parameters.map(parameter => parameter.binding!), ...(node.bindings ?? [])])] : node.bindings ?? [];
-      enter(ids, node.location, node === fn.body ? fn.name : scopeName ?? 'bloque');
+      enter(ids, node.location, node === fn.body ? fn.name : scopeName ?? 'block');
       work.push(() => leave(node.endLocation));
       for (let index = node.statements.length - 1; index >= 0; index--) work.push(() => schedule(node.statements[index]));
     } else if (node.kind === 'sequence') {
@@ -95,7 +95,7 @@ export function compile(fn: FunctionIR): CompiledFunction {
           controls.pop();
           if (node.kind === 'for') leave(node.location);
         });
-        work.push(() => scheduleScoped(node.body, node.kind === 'for' ? 'bloque de for' : node.scopeName));
+        work.push(() => scheduleScoped(node.body, node.kind === 'for' ? 'for block' : node.scopeName));
       };
       if (node.kind === 'for' && node.initializer) { work.push(startLoop); work.push(() => schedule(node.initializer!)); }
       else startLoop();
@@ -112,7 +112,7 @@ export function compile(fn: FunctionIR): CompiledFunction {
       work.push(() => scheduleScoped(node.body, node.scopeName));
     } else if (node.kind === 'case') {
       const control = [...controls].reverse().find(item => item.kind === 'switch');
-      if (!control?.dispatch) failure('INVALID_CONTROL_FLOW', 'case/default requiere un switch.', node.location);
+      if (!control?.dispatch) failure('INVALID_CONTROL_FLOW', 'case/default requires a switch.', node.location);
       if (node.value) control.dispatch.cases.push({ value: node.constant!, target: code.length });
       else { control.hasDefault = true; control.dispatch.target = code.length; }
       emit('tick', node.location, {});
@@ -124,7 +124,7 @@ export function compile(fn: FunctionIR): CompiledFunction {
       gotos.push({ instruction: jump(node.location), target: node.target });
     } else if (node.kind === 'break' || node.kind === 'continue') {
       const control = node.kind === 'break' ? controls.at(-1) : [...controls].reverse().find(item => item.kind === 'loop');
-      if (!control) failure('INVALID_CONTROL_FLOW', `«${node.kind}» fuera de su contexto.`, node.location);
+      if (!control) failure('INVALID_CONTROL_FLOW', `«${node.kind}» is outside its context.`, node.location);
       (node.kind === 'break' ? control.breaks : control.continues).push(jump(node.location));
     } else emit('tick', node.location, {});
   };
@@ -132,7 +132,7 @@ export function compile(fn: FunctionIR): CompiledFunction {
   while (work.length) work.pop()!();
   for (const item of gotos) {
     const target = labels.get(item.target);
-    if (target === undefined) failure('UNKNOWN_LABEL', `No existe la etiqueta «${item.target}».`, item.instruction.location);
+    if (target === undefined) failure('UNKNOWN_LABEL', `Label «${item.target}» does not exist.`, item.instruction.location);
     item.instruction.target = target;
   }
   return { fn, code };

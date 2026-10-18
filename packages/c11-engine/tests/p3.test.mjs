@@ -168,7 +168,7 @@ test('malloc/free manage heap storage, accept free(NULL), and allow zero-size fr
   run(fixtureSourceFor('p3', 'malloc-free.c'), 1);
 });
 
-test('long double conserva binary80 en almacenamiento, agregados, memcpy, llamadas y argumentos variádicos', () => {
+test('long double preserves binary80 across storage, aggregates, memcpy, calls and variadic arguments', () => {
   run(fixtureSourceFor('p3', 'long-double-storage.c'), 0);
 });
 

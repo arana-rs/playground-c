@@ -34,7 +34,10 @@ const report = {
     instructionCount: null,
     peakMemoryBytes: null,
   },
-  diagnostic: { code: 'RUN_TIMEOUT_UI', message: 'Se agotó el presupuesto de ejecución.' },
+  diagnostic: {
+    code: 'RUN_TIMEOUT_UI',
+    message: 'The interface watchdog stopped the Worker after 10 s of active time; stdin waits are excluded from the budget.',
+  },
   source: 'int main(void) { /* private source */ }',
 };
 

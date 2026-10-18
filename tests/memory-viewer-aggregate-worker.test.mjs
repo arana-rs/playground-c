@@ -80,7 +80,7 @@ function pointerNamed(state, name) {
   return state.pointers.find(pointer => pointer.name === name);
 }
 
-test('el Worker y el historial del Memory Viewer conservan layout, placeholders y enlaces de structs', async () => {
+test('Worker and Memory Viewer history retain struct layout, placeholders, and links', async () => {
   const { controller, responses, restoreSelf } = await createAggregateController();
 
   try {
@@ -103,7 +103,7 @@ test('el Worker y el historial del Memory Viewer conservan layout, placeholders 
       const aggregate = aggregateNamed(state, 's');
       return aggregate && memberNamed(aggregate, 'first')?.initialized === false;
     });
-    assert.ok(uninitializedState, 'el objeto local existe antes de asignar sus campos');
+    assert.ok(uninitializedState, 'the local object exists before its fields are assigned');
 
     const initial = aggregateNamed(uninitializedState, 's');
     assert.equal(initial.status, 'available');
@@ -128,7 +128,7 @@ test('el Worker y el historial del Memory Viewer conservan layout, placeholders 
 
     for (const name of ['first', 'tag', 'link', 'value', 'tail']) {
       const member = memberNamed(initial, name);
-      assert.equal(member.initialized, false, `${name} empieza sin inicializar`);
+      assert.equal(member.initialized, false, `${name} starts uninitialized`);
       assert.equal(member.displayValue, '?');
     }
     for (const [name, reason, offset, size] of [
@@ -160,18 +160,18 @@ test('el Worker y el historial del Memory Viewer conservan layout, placeholders 
     const firstAssigned = states.find(state => memberNamed(aggregateNamed(state, 's'), 'first')?.displayValue === '5');
     const valueSeven = states.find(state => memberNamed(aggregateNamed(state, 's'), 'value')?.displayValue === '7');
     const valueNine = states.find(state => memberNamed(aggregateNamed(state, 's'), 'value')?.displayValue === '9');
-    assert.ok(firstAssigned && valueSeven && valueNine, 'los accesos . y -> modifican los campos observables');
+    assert.ok(firstAssigned && valueSeven && valueNine, 'the . and -> accesses update observable fields');
     const rootId = aggregateNamed(firstAssigned, 's').rootId;
     assert.equal(memberNamed(aggregateNamed(firstAssigned, 's'), 'first').initialized, true);
     assert.deepEqual(
       findMemoryViewerChangedAggregateMemberKeys(uninitializedState.aggregates, firstAssigned.aggregates),
       [`${rootId}:0`],
-      'la delta identifica el campo inicializado sin marcar a sus vecinos',
+      'the delta identifies the initialized field without marking its neighbors',
     );
     assert.deepEqual(
       findMemoryViewerChangedAggregateMemberKeys(valueSeven.aggregates, valueNine.aggregates),
       [`${rootId}:3`],
-      'la asignación mediante -> cambia únicamente value',
+      'assignment through -> changes only value',
     );
 
     const targetState = states.find(state => {
@@ -183,13 +183,13 @@ test('el Worker y el historial del Memory Viewer conservan layout, placeholders 
       const link = memberNamed(aggregateNamed(state, 's'), 'link');
       return link?.target?.allocationId === rootId && link.target.byteOffset === 0 && link.target.type === 'int';
     });
-    assert.ok(targetState, 'el miembro puntero link resuelve un escalar vecino');
-    assert.ok(fieldPointerState, 'el miembro puntero puede apuntar al primer campo del struct');
+    assert.ok(targetState, 'the link pointer member resolves a neighboring scalar');
+    assert.ok(fieldPointerState, 'the member pointer can point to the first struct field');
     assert.equal(memberNamed(aggregateNamed(targetState, 's'), 'link').pointerStatus, 'live');
     assert.deepEqual(
       findMemoryViewerChangedAggregateMemberKeys(valueNine.aggregates, fieldPointerState.aggregates),
       [`${rootId}:2`],
-      'la delta incluye el miembro puntero cuando cambia su destino',
+      'the delta includes a pointer member when its target changes',
     );
 
     const firstPointer = pointerNamed(fieldPointerState, 'first');
@@ -201,13 +201,13 @@ test('el Worker y el historial del Memory Viewer conservan layout, placeholders 
     assert.equal(rootPointer?.target?.byteOffset, 0);
     assert.equal(rootPointer?.target?.type, 'struct S');
     assert.notEqual(firstPointer?.target?.type, rootPointer?.target?.type,
-      'un int * a s.first y un struct S * a s comparten offset, pero no destino de tipo');
+      'an int * to s.first and a struct S * to s share an offset but have different typed targets');
 
     while (controller.state.stepIndex > valueSeven.stepIndex) controller.previous();
     assert.equal(memberNamed(aggregateNamed(controller.state, 's'), 'value').displayValue, '7');
     controller.next();
     assert.equal(memberNamed(aggregateNamed(controller.state, 's'), 'value').displayValue, '9',
-      'Next restaura el snapshot posterior a root->value');
+      'Next restores the snapshot after root->value');
   } finally {
     controller.dispose();
     restoreSelf();

@@ -106,7 +106,7 @@ function setupController(source = pointerExampleSource) {
   return { controller, workers };
 }
 
-test('el Worker ejecuta el ejemplo de punteros y separa dirección propia, valor y destino', async () => {
+test('the Worker runs the pointer example and separates its address, value, and target', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -132,7 +132,7 @@ test('el Worker ejecuta el ejemplo de punteros y separa dirección propia, valor
       }
     }
 
-    assert.ok(terminal, 'el ejemplo llega a un estado terminal');
+    assert.ok(terminal, 'the example reaches a terminal state');
     assert.equal(terminal.progress.kind, 'terminated', JSON.stringify(terminal.progress));
     assert.equal(terminal.progress.mainReturn, 0);
     assert.equal(terminal.progress.exitCode, 0);
@@ -144,13 +144,13 @@ test('el Worker ejecuta el ejemplo de punteros y separa dirección propia, valor
         scalars: [...response.stackScalars, ...response.staticObjects],
       }))
       .filter(({ pointer }) => pointer);
-    const pending = observed('pendiente');
+    const pending = observed('uninitialized');
     assert.ok(pending.some(({ pointer }) =>
       pointer.status === 'uninitialized' && !pointer.initialized && pointer.displayValue === '?' && pointer.target === undefined,
     ));
 
     const pSteps = observed('p');
-    assert.ok(pSteps.length >= 5, 'p permanece inspeccionable durante sus reasignaciones');
+    assert.ok(pSteps.length >= 5, 'p remains inspectable across its assignments');
     const ownId = pSteps[0].pointer.id;
     const ownAddress = pSteps[0].pointer.address;
     assert.ok(pSteps.every(({ pointer }) => pointer.id === ownId && pointer.address === ownAddress));
@@ -158,10 +158,10 @@ test('el Worker ejecuta el ejemplo de punteros y separa dirección propia, valor
     const pointsToN = pSteps.find(({ pointer, scalars }) =>
       pointer.status === 'live' && scalars.some(scalar => scalar.name === 'n' && pointer.target?.allocationId === scalar.id),
     );
-    assert.ok(pointsToN, 'p apunta al objeto n por su ID de asignación');
+    assert.ok(pointsToN, 'p points to object n by its allocation ID');
     const n = pointsToN.scalars.find(scalar => scalar.name === 'n');
-    assert.notEqual(pointsToN.pointer.address, n.address, 'address representa el objeto puntero p');
-    assert.equal(pointsToN.pointer.displayValue, n.address, 'displayValue representa la dirección almacenada en p');
+    assert.notEqual(pointsToN.pointer.address, n.address, 'address represents pointer p itself');
+    assert.equal(pointsToN.pointer.displayValue, n.address, 'displayValue represents the address stored in p');
     assert.deepEqual(
       { allocationId: pointsToN.pointer.target.allocationId, byteOffset: pointsToN.pointer.target.byteOffset },
       { allocationId: n.id, byteOffset: 0 },
@@ -170,24 +170,24 @@ test('el Worker ejecuta el ejemplo de punteros y separa dirección propia, valor
     const afterIndirectWrite = pSteps.find(({ pointer, scalars }) =>
       pointer.target?.allocationId === n.id && scalars.find(scalar => scalar.name === 'n')?.displayValue === '20',
     );
-    assert.ok(afterIndirectWrite, '*p = 20 modifica n');
+    assert.ok(afterIndirectWrite, '*p = 20 modifies n');
     assert.equal(afterIndirectWrite.pointer.displayValue, pointsToN.pointer.displayValue);
     assert.equal(afterIndirectWrite.pointer.target.allocationId, pointsToN.pointer.target.allocationId);
 
-    const pointsToOtra = pSteps.find(({ pointer, scalars }) =>
-      pointer.status === 'live' && scalars.some(scalar => scalar.name === 'otra' && pointer.target?.allocationId === scalar.id),
+    const pointsToOther = pSteps.find(({ pointer, scalars }) =>
+      pointer.status === 'live' && scalars.some(scalar => scalar.name === 'other' && pointer.target?.allocationId === scalar.id),
     );
-    assert.ok(pointsToOtra, 'p puede cambiar su destino a otra');
-    const otra = pointsToOtra.scalars.find(scalar => scalar.name === 'otra');
-    assert.equal(pointsToOtra.pointer.displayValue, otra.address);
-    assert.notEqual(pointsToOtra.pointer.target.allocationId, pointsToN.pointer.target.allocationId);
+    assert.ok(pointsToOther, 'p can change its target to other');
+    const other = pointsToOther.scalars.find(scalar => scalar.name === 'other');
+    assert.equal(pointsToOther.pointer.displayValue, other.address);
+    assert.notEqual(pointsToOther.pointer.target.allocationId, pointsToN.pointer.target.allocationId);
 
     const afterSecondIndirectWrite = pSteps.find(({ pointer, scalars }) =>
-      pointer.target?.allocationId === otra.id && scalars.find(scalar => scalar.name === 'otra')?.displayValue === '40',
+      pointer.target?.allocationId === other.id && scalars.find(scalar => scalar.name === 'other')?.displayValue === '40',
     );
-    assert.ok(afterSecondIndirectWrite, '*p = 40 modifica otra');
+    assert.ok(afterSecondIndirectWrite, '*p = 40 modifies other');
     assert.equal(afterSecondIndirectWrite.pointer.address, ownAddress);
-    assert.equal(afterSecondIndirectWrite.pointer.displayValue, pointsToOtra.pointer.displayValue);
+    assert.equal(afterSecondIndirectWrite.pointer.displayValue, pointsToOther.pointer.displayValue);
 
     const nulled = pSteps.find(({ pointer }) => pointer.status === 'null');
     assert.ok(nulled);
@@ -201,7 +201,7 @@ test('el Worker ejecuta el ejemplo de punteros y separa dirección propia, valor
   }
 });
 
-test('el Worker enlaza aritmética de punteros con celdas de arrays y recorre la cadena hasta NUL', async () => {
+test('the Worker links pointer arithmetic to array cells and follows a string to NUL', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -229,7 +229,7 @@ test('el Worker enlaza aritmética de punteros con celdas de arrays y recorre la
       }
     }
 
-    assert.ok(terminal, 'el ejemplo alcanza un estado terminal');
+    assert.ok(terminal, 'the example reaches a terminal state');
     assert.equal(terminal.progress.kind, 'terminated', JSON.stringify(terminal.progress));
     assert.equal(terminal.progress.mainReturn, 0);
     assert.equal(terminal.progress.exitCode, 0);
@@ -238,7 +238,7 @@ test('el Worker enlaza aritmética de punteros con celdas de arrays y recorre la
     const observed = name => steps.map(response => ({
       response,
       pointer: response.pointers.find(item => item.name === name),
-      array: response.arrays.find(item => item.name === (name === 'p' ? 'a' : 'texto')),
+      array: response.arrays.find(item => item.name === (name === 'p' ? 'a' : 'text')),
     })).filter(({ pointer, array }) => pointer && array);
 
     const pSteps = observed('p');
@@ -249,7 +249,7 @@ test('el Worker enlaza aritmética de punteros con celdas de arrays y recorre la
     const pAfterWrite = pSteps.find(({ pointer, array }) =>
       pointer.target?.byteOffset === 4 && array.elements[1]?.displayValue === '99',
     );
-    assert.ok(pAtFirstCell && pAfterIncrement && pAfterWrite, 'p muestra la celda inicial, avanza y escribe en la siguiente');
+    assert.ok(pAtFirstCell && pAfterIncrement && pAfterWrite, 'p points to the first cell, advances, and writes to the next one');
     const pId = pAtFirstCell.pointer.id;
     const pAddress = pAtFirstCell.pointer.address;
     assert.ok(pSteps.every(({ pointer }) => pointer.id === pId && pointer.address === pAddress));
@@ -265,17 +265,17 @@ test('el Worker enlaza aritmética de punteros con celdas de arrays y recorre la
       { kind: 'array-cell', allocationId: pAfterIncrement.array.rootId, elementKey: `${pAfterIncrement.array.rootId}:1`, index: 1, region: 'stack' },
     );
     assert.deepEqual(findMemoryViewerChangedPointerIds(pAtFirstCell.response.pointers, pAfterIncrement.response.pointers), [pId],
-      'p++ cambia la dirección almacenada del puntero');
+      'p++ changes the address stored in the pointer');
     assert.deepEqual(findMemoryViewerChangedArrayElementKeys(pAtFirstCell.response.arrays, pAfterIncrement.response.arrays), [],
-      'p++ no modifica el array');
+      'p++ does not modify the array');
     assert.deepEqual(findMemoryViewerChangedArrayElementKeys(pAfterIncrement.response.arrays, pAfterWrite.response.arrays), [`${pAfterWrite.array.rootId}:1`],
-      '*p marca el cambio solo en la celda escrita');
+      '*p marks the change only on the written cell');
     assert.deepEqual(findMemoryViewerChangedPointerIds(pAfterIncrement.response.pointers, pAfterWrite.response.pointers), [],
-      '*p no cambia el snapshot del puntero');
+      '*p does not change the pointer snapshot');
 
     const qSteps = observed('q');
     assert.deepEqual(qSteps.map(({ pointer }) => pointer.target?.byteOffset), [0, 1, 2, 3, 4],
-      'q visita cada carácter y llega a la posición del terminador NUL');
+      'q visits each character and reaches the NUL terminator');
     const qAtNul = qSteps.at(-1);
     assert.equal(qAtNul.array.elements.length, 5);
     assert.equal(qAtNul.array.elements[4].displayValue, "'\\0'");
@@ -290,7 +290,7 @@ test('el Worker enlaza aritmética de punteros con celdas de arrays y recorre la
   }
 });
 
-test('el historial conserva el destino de celda elegido y rechaza request y job obsoletos', () => {
+test('history retains the selected cell target and rejects stale requests and jobs', () => {
   const { controller, workers } = setupController(arrayPointerExampleSource);
   const firstWorker = workers[0];
   const firstJobId = firstWorker.messages[0].jobId;
@@ -311,8 +311,8 @@ test('el historial conserva el destino de celda elegido y rechaza request y job 
   assert.ok(Object.isFrozen(originalPointer));
   assert.ok(Object.isFrozen(originalPointer.target));
   assert.ok(Object.isFrozen(controller.state.arrays[0].elements));
-  firstArray.elements[0].displayValue = 'mutación externa';
-  assert.equal(controller.state.arrays[0].elements[0].displayValue, '10', 'el Worker no conserva acceso al array histórico');
+  firstArray.elements[0].displayValue = 'external mutation';
+  assert.equal(controller.state.arrays[0].elements[0].displayValue, '10', 'the Worker does not retain access to the historical array');
 
   controller.next();
   const firstRequestId = firstWorker.messages.at(-1).requestId;
@@ -327,7 +327,7 @@ test('el historial conserva el destino de celda elegido y rechaza request y job 
     stackScalars: [], staticObjects: [], pointers: [incrementedPointer],
   });
   assert.equal(controller.state.pointers.find(pointer => pointer.name === 'p').target.byteOffset, 0,
-    'un requestId obsoleto no cambia el destino seleccionado');
+    'a stale requestId does not change the selected target');
 
   firstWorker.emit({
     type: 'debug-progress', jobId: firstJobId, requestId: firstRequestId,
@@ -337,7 +337,7 @@ test('el historial conserva el destino de celda elegido y rechaza request y job 
   });
   const savedIncrementedPointer = controller.state.pointers.find(pointer => pointer.name === 'p');
   incrementedPointer.target.byteOffset = 999;
-  incrementedPointer.displayValue = 'valor mutado fuera del historial';
+  incrementedPointer.displayValue = 'value mutated outside history';
   assert.equal(savedIncrementedPointer.target.byteOffset, 4);
   assert.equal(savedIncrementedPointer.displayValue, incrementedArray.elements[1].address);
 
@@ -354,7 +354,7 @@ test('el historial conserva el destino de celda elegido y rechaza request y job 
     stackScalars: [], staticObjects: [], pointers: [writtenPointer],
   });
   assert.deepEqual(findMemoryViewerChangedPointerIds([savedIncrementedPointer], [writtenPointer]), [],
-    '*p conserva el valor de dirección que guarda el puntero');
+    '*p retains the address value stored by the pointer');
   assert.deepEqual(findMemoryViewerChangedArrayElementKeys([incrementedArray], [writtenArray]), ['17:1']);
 
   const messageCount = firstWorker.messages.length;
@@ -364,8 +364,8 @@ test('el historial conserva el destino de celda elegido y rechaza request y job 
   controller.next();
   assert.equal(controller.state.pointers.find(pointer => pointer.name === 'p').target.byteOffset, 4);
   assert.equal(controller.state.arrays[0].elements[1].displayValue, '99');
-  assert.equal(firstWorker.messages.length, messageCount, 'Atrás/Siguiente restaura snapshots sin volver a avanzar el VM');
-  assert.equal(originalPointer.target.byteOffset, 0, 'la navegación no modifica el punto anterior');
+  assert.equal(firstWorker.messages.length, messageCount, 'Back/Next restores snapshots without advancing the VM again');
+  assert.equal(originalPointer.target.byteOffset, 0, 'navigation does not modify the previous state');
 
   const replacementSource = 'int main(void) { int a[1] = {77}; return 0; }';
   controller.start(replacementSource);
@@ -394,16 +394,16 @@ test('el historial conserva el destino de celda elegido y rechaza request y job 
       allocationId: 17, byteOffset: 4, type: 'int', name: 'a',
     })],
   });
-  assert.equal(controller.state.arrays[0].elements[0].displayValue, '77', 'un job anterior no contamina los valores actuales');
+  assert.equal(controller.state.arrays[0].elements[0].displayValue, '77', 'an earlier job does not contaminate current values');
   assert.deepEqual(
     resolveMemoryViewerPointerTarget(20, controller.state.pointers, controller.state.stackScalars, controller.state.arrays),
     { kind: 'array-cell', allocationId: 17, elementKey: '17:0', index: 0, region: 'stack' },
-    'el ID reutilizado resuelve solo el puntero y array del job seleccionado',
+    'the reused ID resolves only the pointer and array from the selected job',
   );
   controller.dispose();
 });
 
-test('la resolución de celdas usa identidad, offset entero exacto, tipo y celdas visibles', () => {
+test('cell resolution uses identity, exact integer offset, type, and visible cells', () => {
   const array = arraySnapshot(50, 'wide', ['10', '20', '30'], { address: '0x10000000000000001' });
   const atSecondCell = pointerSnapshot(80, 'p', array.elements[1].address, 'live', {
     allocationId: array.rootId, byteOffset: 4, type: 'int', name: 'wide',
@@ -411,62 +411,62 @@ test('la resolución de celdas usa identidad, offset entero exacto, tipo y celda
   assert.deepEqual(
     resolveMemoryViewerPointerTarget(80, [atSecondCell], [], [array]),
     { kind: 'array-cell', allocationId: 50, elementKey: '50:1', index: 1, region: 'stack' },
-    'las direcciones sobre 2^53 mantienen su offset exacto mediante BigInt',
+    'addresses above 2^53 retain their exact offset through BigInt',
   );
 
   const sameAddressDifferentAllocation = arraySnapshot(51, 'replacement', ['10', '20', '30'], {
     address: array.address,
   });
   assert.equal(resolveMemoryViewerPointerTarget(80, [atSecondCell], [], [sameAddressDifferentAllocation]), null,
-    'una dirección igual con otro allocationId no enlaza la celda');
+    'the same address with another allocationId does not link the cell');
 
   const misaligned = pointerSnapshot(80, 'p', `0x${(BigInt(array.address) + 2n).toString(16)}`, 'live', {
     allocationId: array.rootId, byteOffset: 2, type: 'int',
   });
   assert.equal(resolveMemoryViewerPointerTarget(80, [misaligned], [], [array]), null,
-    'un offset que cae entre celdas no obtiene vínculo');
+    'an offset between cells does not produce a link');
 
   const wrongType = pointerSnapshot(80, 'p', array.elements[1].address, 'live', {
     allocationId: array.rootId, byteOffset: 4, type: 'unsigned int',
   }, 'unsigned int *');
   assert.equal(resolveMemoryViewerPointerTarget(80, [wrongType], [], [array]), null,
-    'la identidad y el offset no bastan si el tipo designado es distinto');
+    'identity and offset are insufficient when the designated type differs');
 
   const onePast = pointerSnapshot(80, 'p', `0x${(BigInt(array.address) + 12n).toString(16)}`, 'one-past', {
     allocationId: array.rootId, byteOffset: 12, type: 'int',
   });
   assert.equal(resolveMemoryViewerPointerTarget(80, [onePast], [], [array]), null,
-    'one-past no coincide con ninguna de las celdas existentes');
+    'one-past does not match any existing cell');
 
   const dangling = pointerSnapshot(80, 'p', array.elements[1].address, 'dangling', {
     allocationId: array.rootId, byteOffset: 4, type: 'int',
   });
   assert.equal(resolveMemoryViewerPointerTarget(80, [dangling], [], [array]), null,
-    'una asignación muerta no vuelve a enlazarse aunque coincida el ID');
+    'a dead allocation is not linked again even if its ID matches');
 
-  const tooLarge = arraySnapshot(52, 'grande', Array(11).fill('?'), { status: 'too-many-elements' });
+  const tooLarge = arraySnapshot(52, 'large', Array(11).fill('?'), { status: 'too-many-elements' });
   const pointerToLarge = pointerSnapshot(81, 'large_pointer', tooLarge.address, 'live', {
-    allocationId: tooLarge.rootId, byteOffset: 0, type: 'int', name: 'grande',
+    allocationId: tooLarge.rootId, byteOffset: 0, type: 'int', name: 'large',
   });
   assert.equal(tooLarge.elements.length, 0);
   assert.equal(resolveMemoryViewerPointerTarget(81, [pointerToLarge], [], [tooLarge]), null,
-    'un array que solo tiene placeholder local no recibe vínculo a una celda inexistente');
+    'an array with only a local placeholder does not link to a nonexistent cell');
 
   const matrix = {
-    ...arraySnapshot(53, 'matriz', [], { status: 'multidimensional' }),
+    ...arraySnapshot(53, 'matrix', [], { status: 'multidimensional' }),
     type: 'int[2][2]',
     elementType: 'int[2]',
     length: 2,
     size: 16,
   };
   const pointerToMatrix = pointerSnapshot(82, 'matrix_pointer', matrix.address, 'live', {
-    allocationId: matrix.rootId, byteOffset: 0, type: 'int', name: 'matriz',
+    allocationId: matrix.rootId, byteOffset: 0, type: 'int', name: 'matrix',
   });
   assert.equal(resolveMemoryViewerPointerTarget(82, [pointerToMatrix], [], [matrix]), null,
-    'una matriz conserva su placeholder y no presenta sus subceldas como escalares');
+    'a matrix retains its placeholder and does not expose its subcells as scalars');
 });
 
-test('el resaltado de un escalar conserva identidad de raíz y rechaza destinos inválidos', () => {
+test('scalar highlighting retains root identity and rejects invalid targets', () => {
   const scalar = scalarSnapshot(10, 'n', '20');
   const livePointer = pointerSnapshot(20, 'p', scalar.address, 'live', {
     allocationId: scalar.id, byteOffset: 0, type: 'int', name: 'n',
@@ -477,18 +477,18 @@ test('el resaltado de un escalar conserva identidad de raíz y rechaza destinos 
     allocationId: 999, byteOffset: 0, type: 'int', name: 'n',
   });
   assert.equal(resolveMemoryViewerPointerTargetId(20, [missingTarget], [scalar]), null,
-    'una asignación que ya no vive no recibe el resaltado');
+    'an allocation that is no longer live is not highlighted');
 
   const interiorPointer = pointerSnapshot(20, 'p', '0x20004', 'live', {
     allocationId: scalar.id, byteOffset: 4, type: 'int', name: 'n',
   });
   assert.equal(resolveMemoryViewerPointerTargetId(20, [interiorPointer], [scalar]), null,
-    'un offset interior no se resuelve como raíz escalar');
+    'an interior offset is not resolved as a scalar root');
 
   const danglingPointer = pointerSnapshot(20, 'p', scalar.address, 'dangling', {
     allocationId: scalar.id, byteOffset: 0, type: 'int', name: 'n',
   });
   assert.equal(resolveMemoryViewerPointerTargetId(20, [danglingPointer], [scalar]), null,
-    'un puntero colgante no resalta una dirección que coincida');
+    'a dangling pointer does not highlight a matching address');
   assert.equal(resolveMemoryViewerPointerTargetId(999, [livePointer], [scalar]), null);
 });

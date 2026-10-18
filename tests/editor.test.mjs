@@ -63,9 +63,9 @@ test('the shared editor line count normalizes CRLF and counts empty and trailing
   assert.equal(isEditorTextWithinLineLimit(lines998), true);
   assert.equal(isEditorTextWithinLineLimit(lines999), true);
   assert.equal(isEditorTextWithinLineLimit(lines1000), false);
-  assert.match(getEditorLineLimitDiagnostic(lines1000), /no se cargó.*1000.*999/i);
+  assert.deepEqual(getEditorLineLimitDiagnostic(lines1000), { kind: 'file-too-long', lineCount: 1000 });
   assert.equal(getEditorLineLimitDiagnostic(lines999), null);
-  assert.match(EDITOR_LINE_LIMIT_MESSAGE, /999 líneas por archivo/);
+  assert.deepEqual(EDITOR_LINE_LIMIT_MESSAGE, { kind: 'line-limit' });
 });
 
 test('Enter admits line 999, rejects line 1000, and allows replacing a 999-line selection', () => {

@@ -25,13 +25,13 @@ const heapLifecycleSource = [
 
 function randomValuesFromOutput(stdout) {
   const lines = stdout.trimEnd().split('\n');
-  assert.equal(lines[0], 'Arreglo con 10 numeros aleatorios entre 0 y 99:');
+  assert.equal(lines[0], 'Array with 10 random numbers between 0 and 99:');
   assert.equal(lines.length, 11);
   return lines.slice(1).map((line, index) => {
-    const match = new RegExp(`^numeros\\[${index}\\] = (\\d+)$`).exec(line);
-    assert.ok(match, `línea de salida no válida: ${line}`);
+    const match = new RegExp(`^numbers\\[${index}\\] = (\\d+)$`).exec(line);
+    assert.ok(match, `Invalid output line: ${line}`);
     const value = Number(match[1]);
-    assert.ok(Number.isInteger(value) && value >= 0 && value <= 99, `valor fuera de rango: ${value}`);
+    assert.ok(Number.isInteger(value) && value >= 0 && value <= 99, `Value out of range: ${value}`);
     return value;
   });
 }
@@ -94,22 +94,22 @@ test('debug tracks heap allocations through free and replacement with a focused 
     }
     assert.deepEqual(session.currentLocation(), progress.location);
   }
-  assert.ok(result, 'La sesión debug no alcanzó un estado terminal en 1.000 pausas.');
+  assert.ok(result, 'The debug session did not reach a terminal state within 1,000 pauses.');
   assert.equal(result.kind, 'terminated', JSON.stringify(result));
   assert.equal(result.mainReturn, 0);
   assert.deepEqual(result.stdout, new Uint8Array());
   assert.deepEqual(result.stderr, new Uint8Array());
   const heapCreates = events.filter(event => event.kind === 'object-create' && event.duration === 'heap');
   const heapDeletes = events.filter(event => event.kind === 'object-delete' && event.duration === 'heap');
-  assert.equal(heapCreates.length, 4, 'las tres reservas iniciales y la reserva tras el free producen objetos heap reales');
-  assert.equal(heapDeletes.length, heapCreates.length, 'el ejemplo libera todos sus bloques heap antes de terminar');
+  assert.equal(heapCreates.length, 4, 'the three initial allocations and the allocation after free produce real heap objects');
+  assert.equal(heapDeletes.length, heapCreates.length, 'the example frees every heap block before it terminates');
   assert.deepEqual(heapCreates.map(event => event.size), [8, 20, 36, 12]);
   assert.ok(heapCreates.every(event => event.origin === 'heap' && event.frameId === null && event.scopeId === null));
 
   const liveHeap = new Map();
   for (const event of events.filter(event => event.duration === 'heap')) {
     if (event.kind === 'object-create') {
-      assert.equal(event.addressVirtual % BigInt(VIRTUAL_HEAP_LAYOUT.alignmentBytes), 0n, 'el base heap conserva la alineación de malloc');
+      assert.equal(event.addressVirtual % BigInt(VIRTUAL_HEAP_LAYOUT.alignmentBytes), 0n, 'the heap base preserves malloc alignment');
       const start = event.addressVirtual;
       const end = start + BigInt(event.size);
       assert.ok(start >= VIRTUAL_HEAP_LAYOUT.start);
@@ -117,21 +117,21 @@ test('debug tracks heap allocations through free and replacement with a focused 
       for (const other of liveHeap.values()) {
         const otherStart = other.addressVirtual;
         const otherEnd = otherStart + BigInt(other.size);
-        assert.ok(end <= otherStart || otherEnd <= start, 'dos bloques heap vivos no comparten bytes');
+        assert.ok(end <= otherStart || otherEnd <= start, 'live heap blocks do not share bytes');
       }
       liveHeap.set(event.allocationId, event);
       continue;
     }
 
     const created = liveHeap.get(event.allocationId);
-    assert.ok(created, 'free elimina una asignación heap que seguía viva');
+    assert.ok(created, 'free deletes a heap allocation that was still live');
     assert.equal(event.objectId, created.objectId);
     assert.equal(event.addressVirtual, created.addressVirtual);
     assert.equal(event.size, created.size);
     assert.ok(created.sequence < event.sequence);
     liveHeap.delete(event.allocationId);
   }
-  assert.equal(liveHeap.size, 0, 'el heap queda vacío tras el último free');
+  assert.equal(liveHeap.size, 0, 'the heap is empty after the final free');
 
   const createsById = new Map(heapCreates.map(event => [event.allocationId, event]));
   for (const snapshot of heapSnapshots) {
@@ -146,7 +146,7 @@ test('debug tracks heap allocations through free and replacement with a focused 
       assert.ok(address + BigInt(object.size) <= VIRTUAL_HEAP_LAYOUT.endExclusive);
       assert.equal(address % BigInt(VIRTUAL_HEAP_LAYOUT.alignmentBytes), 0n);
       const created = createsById.get(object.id);
-      assert.ok(created, `el snapshot ${object.id} proviene de un object-create real`);
+      assert.ok(created, `Snapshot ${object.id} comes from a real object-create event`);
       assert.equal(object.address, `0x${created.addressVirtual.toString(16)}`);
       assert.equal(object.size, created.size);
     }
@@ -156,7 +156,7 @@ test('debug tracks heap allocations through free and replacement with a focused 
   const initialIds = initialCreates.map(event => event.allocationId);
   const beforeReleaseIndex = heapSnapshots.findIndex(snapshot =>
     initialIds.every(id => snapshot.some(object => object.id === id)));
-  assert.ok(beforeReleaseIndex >= 0, 'los tres bloques distintos aparecen juntos antes del primer free');
+  assert.ok(beforeReleaseIndex >= 0, 'the three distinct blocks appear together before the first free');
   const beforeRelease = heapSnapshots[beforeReleaseIndex];
   const medium = initialCreates.find(event => event.size === 20);
   assert.ok(medium);
@@ -166,19 +166,19 @@ test('debug tracks heap allocations through free and replacement with a focused 
     index > beforeReleaseIndex
       && !snapshot.some(object => object.id === medium.allocationId)
       && initialIds.filter(id => id !== medium.allocationId).every(id => snapshot.some(object => object.id === id)));
-  assert.ok(afterReleaseIndex > beforeReleaseIndex, 'free quita del snapshot el bloque mediano por su identidad real');
-  assert.ok(beforeRelease.some(object => object.id === medium.allocationId), 'el snapshot histórico previo conserva el objeto liberado');
+  assert.ok(afterReleaseIndex > beforeReleaseIndex, 'free removes the middle block from the snapshot by its real identity');
+  assert.ok(beforeRelease.some(object => object.id === medium.allocationId), 'the prior historical snapshot retains the released object');
   const replacement = heapCreates[3];
   assert.ok(replacement);
   const afterReplacement = heapSnapshots.slice(afterReleaseIndex + 1)
     .find(snapshot => snapshot.some(object => object.id === replacement.allocationId));
-  assert.ok(afterReplacement, 'la reserva posterior vuelve a aparecer con una identidad propia');
+  assert.ok(afterReplacement, 'the later allocation appears with its own identity');
   assert.ok(!afterReplacement.some(object => object.id === medium.allocationId));
   assert.deepEqual(
     new Set(afterReplacement.map(object => object.id)),
     new Set([...initialIds.filter(id => id !== medium.allocationId), replacement.allocationId]),
   );
-  assert.equal(heapSnapshots.at(-1).length, 0, 'el último snapshot confirma la desaparición de todos los bloques');
+  assert.equal(heapSnapshots.at(-1).length, 0, 'the final snapshot confirms that every block has disappeared');
 });
 
 test('the full P2-P4 example remains covered with the editor execution budgets', async () => {
@@ -190,11 +190,11 @@ test('the full P2-P4 example remains covered with the editor execution budgets',
     assert.equal(result.mainReturn, 42, `Example group ${result.mainReturn} failed.`);
     assert.equal(result.exitCode, 42);
     assert.equal(new TextDecoder().decode(result.stdout), [
-      'P4 macros, conditional, #undef y argv: ok',
-      'P4 static inline, K&R y va_copy: ok',
+      'P4 macros, conditional, #undef, and argv: ok',
+      'P4 static inline, K&R, and va_copy: ok',
       'P4 output value:42',
-      'P4 printf/snprintf y archivo binario virtual: ok',
-      'P4 string, ctype, errno, inttypes y assert: ok',
+      'P4 printf/snprintf and virtual binary files: ok',
+      'P4 string, ctype, errno, inttypes, and assert: ok',
       '',
     ].join('\n'));
     assert.deepEqual(result.stderr, new Uint8Array());

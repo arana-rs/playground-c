@@ -115,7 +115,7 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
   const normalizedInitialText = normalizeEditorText(initialText);
   const initialDiagnostic = getEditorLineLimitDiagnostic(normalizedInitialText);
   const [text, setText] = useState(initialDiagnostic ? '' : normalizedInitialText);
-  const [limitMessage, setLimitMessage] = useState(initialDiagnostic ?? '');
+  const [limitMessage, setLimitMessage] = useState(initialDiagnostic);
 
   useLayoutEffect(() => {
     const editor = ref.current;
@@ -183,7 +183,7 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
         const next = evaluation.snapshot;
         if (!compositionBefore) {
           history.record(snapshot, next);
-          setLimitMessage('');
+          setLimitMessage(null);
         }
         snapshot = next;
       } else if (!sameSelection(snapshot.selection, selection)) {
@@ -209,7 +209,7 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
       } else {
         snapshot = evaluation.snapshot;
         history.record(compositionBefore, snapshot);
-        setLimitMessage('');
+        setLimitMessage(null);
       }
       compositionBefore = null;
       compositionViewport = null;
@@ -232,7 +232,7 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
       pending = null;
       literalInput = false;
       history.record(before, result);
-      setLimitMessage('');
+      setLimitMessage(null);
       write(result);
       return true;
     }
@@ -243,7 +243,7 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
       pending = null;
       literalInput = false;
       suppressPairs = false;
-      setLimitMessage('');
+      setLimitMessage(null);
       write(result ?? before);
     }
 
@@ -329,7 +329,7 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
         pending = null;
         literalInput = false;
         suppressPairs = false;
-        setLimitMessage('');
+        setLimitMessage(null);
         write(result);
       } else {
         pending = { before, viewport: snapshotViewport, literal, command, evaluation };
@@ -366,14 +366,14 @@ export function useCodeEditor(initialText = '', onSourceChange?: (source: string
       const result = evaluation?.status === 'applied' ? evaluation.snapshot : undefined;
       if (result && command && nativeNext.text === expectedNativeText(before, command)) {
         history.record(before, result);
-        setLimitMessage('');
+        setLimitMessage(null);
         write(result);
       } else {
         const kind = !literal && input.inputType === 'insertText' && input.data?.length === 1
           ? 'typing' : !literal && (input.inputType === 'deleteContentBackward'
             || input.inputType === 'deleteContentForward') ? 'delete' : 'action';
         history.record(before, nativeNext, { kind });
-        setLimitMessage('');
+        setLimitMessage(null);
         snapshot = nativeNext;
         snapshotViewport = getViewport(editor!);
         publishEditorState();

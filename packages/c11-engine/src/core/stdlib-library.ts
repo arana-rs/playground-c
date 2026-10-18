@@ -9,18 +9,18 @@ const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 const { ENOMEM, EINVAL, EILSEQ, ENOSYS } = ERRNO_CODES;
 
 function count(name: string, args: readonly CValue[], expected: number, context: StdlibTimeRuntimeContext): void {
-  if (args.length !== expected) context.fail('LIBRARY_ARGUMENT', `${name} recibió una cantidad de argumentos no válida.`, context.at);
+  if (args.length !== expected) context.fail('LIBRARY_ARGUMENT', `${name} received an invalid number of arguments.`, context.at);
 }
 
 function integer(value: CValue, name: string, context: StdlibTimeRuntimeContext): bigint {
-  if (typeof value.value !== 'bigint') return context.fail('LIBRARY_ARGUMENT', `${name} requiere argumentos enteros.`, context.at);
+  if (typeof value.value !== 'bigint') return context.fail('LIBRARY_ARGUMENT', `${name} requires integer arguments.`, context.at);
   return value.value;
 }
 
 function objectPointer(value: CValue, name: string, context: StdlibTimeRuntimeContext, nullable = false): ObjectPointerValue | null {
   if (value.value === null && nullable) return null;
   if (typeof value.value !== 'object' || value.value === null || value.value.kind !== 'object-pointer') {
-    return context.fail('LIBRARY_ARGUMENT', `${name} requiere un puntero a objeto.`, context.at);
+    return context.fail('LIBRARY_ARGUMENT', `${name} requires an object pointer.`, context.at);
   }
   return value.value;
 }
@@ -30,13 +30,13 @@ function resultPointer(pointer: ObjectPointerValue | null, resultType: CType | u
 }
 
 function sessionState(context: StdlibTimeRuntimeContext) {
-  if (!context.stdlibState) return context.fail('ENGINE_INTERNAL_ERROR', 'Falta el estado por ejecución de stdlib/time.', context.at);
+  if (!context.stdlibState) return context.fail('ENGINE_INTERNAL_ERROR', 'Per-execution stdlib/time state is missing.', context.at);
   return context.stdlibState;
 }
 
 function functionPointer(value: CValue, name: string, context: StdlibTimeRuntimeContext): void {
   if (typeof value.value !== 'object' || value.value === null || value.value.kind !== 'function-pointer' || value.value.functionIndex === null) {
-    context.fail('LIBRARY_ARGUMENT', `${name} requiere un puntero a función C válido.`, context.at);
+    context.fail('LIBRARY_ARGUMENT', `${name} requires a valid C function pointer.`, context.at);
   }
 }
 
@@ -50,11 +50,11 @@ function *registerHandler(
 
 function *terminate(mode: 'normal' | 'quick' | 'immediate' | 'abort', status: bigint, context: StdlibTimeRuntimeContext): LibraryBuiltinGenerator {
   yield { kind: 'terminate', mode, status };
-  return context.fail('INVALID_TERMINATION', 'El scheduler reanudó una terminación que debía ser definitiva.', context.at);
+  return context.fail('INVALID_TERMINATION', 'The scheduler resumed a termination that should have been final.', context.at);
 }
 
 function compareResult(value: CValue, context: StdlibTimeRuntimeContext): number {
-  if (typeof value.value !== 'bigint') return context.fail('LIBRARY_ARGUMENT', 'El comparador de qsort/bsearch debe devolver int.', context.at);
+  if (typeof value.value !== 'bigint') return context.fail('LIBRARY_ARGUMENT', 'The qsort/bsearch comparator must return int.', context.at);
   return value.value < 0n ? -1 : value.value > 0n ? 1 : 0;
 }
 
@@ -84,7 +84,7 @@ function *siftDown(
     if (greater === root) return { type: 'void', value: 0n };
     const left = context.offsetPointer(base, (first + root) * size, context.at);
     const right = context.offsetPointer(base, (first + greater) * size, context.at);
-    if (!context.swapObjectBytes) return context.fail('ENGINE_INTERNAL_ERROR', 'qsort requiere el servicio de intercambio que conserva metadatos de memoria.', context.at);
+    if (!context.swapObjectBytes) return context.fail('ENGINE_INTERNAL_ERROR', 'qsort requires the byte-swap service that preserves memory metadata.', context.at);
     context.swapObjectBytes(objectPointer(left, 'qsort', context)!, objectPointer(right, 'qsort', context)!, size, context.at);
     context.chargeWork(1, context.at);
     root = greater;
@@ -96,18 +96,18 @@ function *qsort(args: readonly CValue[], context: StdlibTimeRuntimeContext): Lib
   const base = objectPointer(args[0], 'qsort', context, true);
   const countValue = integer(args[1], 'qsort', context);
   const sizeValue = integer(args[2], 'qsort', context);
-  if (countValue < 0n || sizeValue < 0n || countValue > MAX_SAFE || sizeValue > MAX_SAFE) return context.fail('LIBRARY_ARGUMENT', 'qsort recibió un rango no representable.', context.at);
+  if (countValue < 0n || sizeValue < 0n || countValue > MAX_SAFE || sizeValue > MAX_SAFE) return context.fail('LIBRARY_ARGUMENT', 'qsort received an unrepresentable range.', context.at);
   const length = Number(countValue), size = Number(sizeValue);
   if (length <= 1 || size === 0) return { type: 'void', value: 0n };
-  if (length > Math.floor(Number.MAX_SAFE_INTEGER / size)) return context.fail('LIBRARY_ARGUMENT', 'El tamaño total de qsort excede el rango seguro.', context.at);
-  if (!base) return context.fail('LIBRARY_ARGUMENT', 'qsort requiere un buffer no nulo cuando hay varios elementos.', context.at);
+  if (length > Math.floor(Number.MAX_SAFE_INTEGER / size)) return context.fail('LIBRARY_ARGUMENT', 'The total qsort size exceeds the safe range.', context.at);
+  if (!base) return context.fail('LIBRARY_ARGUMENT', 'qsort requires a non-null buffer when there is more than one element.', context.at);
   functionPointer(args[3], 'qsort', context);
   const comparator = args[3];
   for (let start = Math.floor(length / 2) - 1; start >= 0; start--) yield* siftDown(args[0], comparator, 0, start, length, size, context);
   for (let end = length - 1; end > 0; end--) {
     const first = context.offsetPointer(args[0], 0, context.at);
     const last = context.offsetPointer(args[0], end * size, context.at);
-    if (!context.swapObjectBytes) return context.fail('ENGINE_INTERNAL_ERROR', 'qsort requiere el servicio de intercambio que conserva metadatos de memoria.', context.at);
+    if (!context.swapObjectBytes) return context.fail('ENGINE_INTERNAL_ERROR', 'qsort requires the byte-swap service that preserves memory metadata.', context.at);
     context.swapObjectBytes(objectPointer(first, 'qsort', context)!, objectPointer(last, 'qsort', context)!, size, context.at);
     context.chargeWork(1, context.at);
     yield* siftDown(args[0], comparator, 0, 0, end, size, context);
@@ -120,10 +120,10 @@ function *bsearch(args: readonly CValue[], resultType: CType | undefined, contex
   const basePointer = objectPointer(args[1], 'bsearch', context, true);
   const countValue = integer(args[2], 'bsearch', context);
   const sizeValue = integer(args[3], 'bsearch', context);
-  if (countValue < 0n || sizeValue < 0n || countValue > MAX_SAFE || sizeValue > MAX_SAFE) return context.fail('LIBRARY_ARGUMENT', 'bsearch recibió un rango no representable.', context.at);
+  if (countValue < 0n || sizeValue < 0n || countValue > MAX_SAFE || sizeValue > MAX_SAFE) return context.fail('LIBRARY_ARGUMENT', 'bsearch received an unrepresentable range.', context.at);
   const length = Number(countValue), size = Number(sizeValue);
   if (length === 0) return resultPointer(null, resultType);
-  if (!basePointer || size === 0 || length > Math.floor(Number.MAX_SAFE_INTEGER / size)) return context.fail('LIBRARY_ARGUMENT', 'bsearch recibió un buffer inválido.', context.at);
+  if (!basePointer || size === 0 || length > Math.floor(Number.MAX_SAFE_INTEGER / size)) return context.fail('LIBRARY_ARGUMENT', 'bsearch received an invalid buffer.', context.at);
   functionPointer(args[4], 'bsearch', context);
   let low = 0, high = length;
   while (low < high) {
@@ -141,12 +141,12 @@ function *bsearch(args: readonly CValue[], resultType: CType | undefined, contex
 function division(name: string, args: readonly CValue[], resultType: CType | undefined, context: StdlibTimeRuntimeContext): CValue {
   count(name, args, 2, context);
   const numerator = integer(args[0], name, context), denominator = integer(args[1], name, context);
-  if (denominator === 0n) return context.fail('DIVISION_BY_ZERO', `${name} no admite divisor cero.`, context.at);
+  if (denominator === 0n) return context.fail('DIVISION_BY_ZERO', `${name} does not allow a zero divisor.`, context.at);
   const bits = name === 'div' ? 32n : 64n;
   const minimum = -(1n << (bits - 1n)), maximum = (1n << (bits - 1n)) - 1n;
-  if (numerator === minimum && denominator === -1n) return context.fail('INTEGER_OVERFLOW', `${name} excede el rango del tipo cociente.`, context.at);
+  if (numerator === minimum && denominator === -1n) return context.fail('INTEGER_OVERFLOW', `${name} exceeds the quotient type range.`, context.at);
   const quotient = numerator / denominator;
-  if (quotient < minimum || quotient > maximum) return context.fail('INTEGER_OVERFLOW', `${name} excede el rango del tipo cociente.`, context.at);
+  if (quotient < minimum || quotient > maximum) return context.fail('INTEGER_OVERFLOW', `${name} exceeds the quotient type range.`, context.at);
   const remainder = numerator - quotient * denominator;
   const aggregate: AggregateValue = {
     kind: 'aggregate-value',
@@ -218,10 +218,10 @@ export function dispatchStdlibBuiltin(
   if (name === 'calloc') {
     count(name, args, 2, context);
     const countValue = integer(args[0], name, context), sizeValue = integer(args[1], name, context);
-    if (countValue < 0n || sizeValue < 0n) return context.fail('LIBRARY_ARGUMENT', 'calloc requiere tamaños no negativos.', at);
+    if (countValue < 0n || sizeValue < 0n) return context.fail('LIBRARY_ARGUMENT', 'calloc requires nonnegative sizes.', at);
     const total = countValue * sizeValue;
     if (total > MAX_SAFE) { context.errno.set(ENOMEM); return resultPointer(null, resultType); }
-    if (!context.allocateHeap || !context.zeroHeap) return context.fail('ENGINE_INTERNAL_ERROR', 'calloc requiere los servicios de memoria heap de la VM.', at);
+    if (!context.allocateHeap || !context.zeroHeap) return context.fail('ENGINE_INTERNAL_ERROR', 'calloc requires the VM heap memory services.', at);
     const pointer = context.allocateHeap(Number(total), at);
     if (pointer) context.zeroHeap(pointer, Number(total), at);
     else context.errno.set(ENOMEM);
@@ -235,7 +235,7 @@ export function dispatchStdlibBuiltin(
       return resultPointer(null, resultType);
     }
     if (size > MAX_SAFE) { context.errno.set(ENOMEM); return resultPointer(null, resultType); }
-    if (!context.allocateHeapAligned) return context.fail('ENGINE_INTERNAL_ERROR', 'aligned_alloc requiere el servicio de asignación alineada de la VM.', at);
+    if (!context.allocateHeapAligned) return context.fail('ENGINE_INTERNAL_ERROR', 'aligned_alloc requires the VM aligned-allocation service.', at);
     const pointer = context.allocateHeapAligned(Number(size), Number(alignment), at);
     if (!pointer) context.errno.set(ENOMEM);
     return resultPointer(pointer, resultType);
@@ -256,7 +256,7 @@ export function dispatchStdlibBuiltin(
     const value = integer(args[0], name, context);
     const bits = name === 'abs' ? 32n : 64n;
     const minimum = -(1n << (bits - 1n));
-    if (value === minimum) return context.fail('INTEGER_OVERFLOW', `${name} no puede representar el valor absoluto del mínimo.`, at);
+    if (value === minimum) return context.fail('INTEGER_OVERFLOW', `${name} cannot represent the absolute value of the minimum.`, at);
     return context.makeInt(value < 0n ? -value : value, resultType ?? (name === 'abs' ? 'int' : name === 'labs' ? 'long' : 'long long'));
   }
   if (name === 'div' || name === 'ldiv' || name === 'lldiv') return division(name, args, resultType, context);

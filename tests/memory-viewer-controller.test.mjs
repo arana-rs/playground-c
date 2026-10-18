@@ -28,7 +28,7 @@ function terminated() {
 function runtimeError() {
   return {
     kind: 'runtime-error',
-    diagnostics: [{ code: 'TEST_ERROR', file: 'main.c', line: 4, column: 1, message: 'error intencional' }],
+    diagnostics: [{ code: 'TEST_ERROR', file: 'main.c', line: 4, column: 1, message: 'intentional error' }],
     stdout: new Uint8Array(),
     stderr: new Uint8Array(),
     metrics,
@@ -202,7 +202,7 @@ function ready(worker, line = 1, events = [], stackScalars = [], staticObjects =
   return jobId;
 }
 
-test('pasos manuales crean historial navegable sin volver a ejecutar el VM', () => {
+test('manual steps create navigable history without rerunning the VM', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1, [lifecycleEvent(1)]);
@@ -215,10 +215,10 @@ test('pasos manuales crean historial navegable sin volver a ejecutar el VM', () 
   assert.deepEqual(firstStep, { type: 'debug-step', jobId, requestId: 1 });
   assert.equal(controller.state.status, 'running');
   controller.next();
-  assert.equal(worker.messages.length, 2, 'no se envía un segundo paso mientras el primero está pendiente');
+  assert.equal(worker.messages.length, 2, 'a second step is not sent while the first is pending');
 
   worker.emit({ type: 'debug-progress', jobId, requestId: 99, progress: paused(30), events: [] });
-  assert.equal(controller.state.status, 'running', 'se ignoran respuestas de solicitud obsoleta');
+  assert.equal(controller.state.status, 'running', 'responses to stale requests are ignored');
   worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(2), events: [lifecycleEvent(2)] });
   assert.equal(controller.state.location.line, 2);
   assert.equal(controller.state.stepIndex, 1);
@@ -229,7 +229,7 @@ test('pasos manuales crean historial navegable sin volver a ejecutar el VM', () 
   assert.equal(controller.state.lifecycle.eventCount, 1);
   controller.next();
   assert.equal(controller.state.location.line, 2);
-  assert.equal(worker.messages.length, 2, 'Siguiente consume el historial sin volver a pedir un paso');
+  assert.equal(worker.messages.length, 2, 'Next consumes history without requesting another step');
 
   controller.next();
   assert.equal(worker.messages[2].requestId, 2);
@@ -244,10 +244,10 @@ test('pasos manuales crean historial navegable sin volver a ejecutar el VM', () 
   controller.previous();
   controller.next();
   assert.equal(controller.state.status, 'terminated');
-  assert.equal(worker.messages.length, 3, 'navegar el estado terminal tampoco reejecuta la sesión');
+  assert.equal(worker.messages.length, 3, 'navigating the terminal state does not rerun the session');
 });
 
-test('activeScopes reconstruye el orden LIFO desde el setup y el historial en caché', () => {
+test('activeScopes rebuilds LIFO order from setup and cached history', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1, [
@@ -290,10 +290,10 @@ test('activeScopes reconstruye el orden LIFO desde el setup y el historial en ca
   assert.deepEqual(controller.state.activeScopes.map(scope => scope.scopeName), ['main', 'appendNode', 'while(...)']);
   controller.next();
   assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1]);
-  assert.equal(worker.messages.length, 3, 'recorrer el futuro en caché no pide pasos nuevos');
+  assert.equal(worker.messages.length, 3, 'traversing cached future does not request new steps');
 });
 
-test('stackScalars conserva inicialización, asignaciones y objetos por punto histórico', () => {
+test('stackScalars retains initialization, assignments, and objects at each history point', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 2, [
@@ -301,7 +301,7 @@ test('stackScalars conserva inicialización, asignaciones y objetos por punto hi
     scopeLifecycleEvent(2, 'scope-enter', 1),
   ]);
 
-  assert.deepEqual(controller.state.stackScalars, [], 'entrar en main no publica sus declaraciones futuras');
+  assert.deepEqual(controller.state.stackScalars, [], 'entering main does not publish its future declarations');
   assert.ok(Object.isFrozen(controller.state.stackScalars));
   assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1]);
 
@@ -311,7 +311,7 @@ test('stackScalars conserva inicialización, asignaciones y objetos por punto hi
     events: [scopeLifecycleEvent(3, 'scope-enter', 2, { scopeName: 'block' })],
     stackScalars: [],
   });
-  assert.deepEqual(controller.state.stackScalars, [], 'entrar en un bloque no publica declaraciones que aún no se ejecutan');
+  assert.deepEqual(controller.state.stackScalars, [], 'entering a block does not publish declarations that have not executed');
   assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1, 2]);
 
   const originalInput = scalarSnapshot({ id: 42, scopeId: 2, name: 'temporal', displayValue: '7' });
@@ -324,12 +324,12 @@ test('stackScalars conserva inicialización, asignaciones y objetos por punto hi
     stackScalars: [originalInput],
   });
   const initializedRecord = controller.state.stackScalars[0];
-  assert.equal(initializedRecord.id, createEvent.allocationId, 'el snapshot usa la identidad del objeto publicado');
+  assert.equal(initializedRecord.id, createEvent.allocationId, 'the snapshot uses the identity of the published object');
   assert.equal(initializedRecord.initialized, true);
   assert.equal(initializedRecord.displayValue, '7');
   assert.ok(Object.isFrozen(initializedRecord));
-  originalInput.displayValue = 'mutado tras el postMessage';
-  assert.equal(controller.state.stackScalars[0].displayValue, '7', 'el historial copia el DTO del Worker');
+  originalInput.displayValue = 'mutated after postMessage';
+  assert.equal(controller.state.stackScalars[0].displayValue, '7', 'history copies the Worker DTO');
 
   controller.next();
   worker.emit({
@@ -337,16 +337,16 @@ test('stackScalars conserva inicialización, asignaciones y objetos por punto hi
     stackScalars: [scalarSnapshot({ id: 42, scopeId: 2, name: 'temporal', displayValue: '8' })],
   });
   const assignedRecord = controller.state.stackScalars[0];
-  assert.equal(assignedRecord.id, initializedRecord.id, 'una asignación conserva la identidad del objeto');
+  assert.equal(assignedRecord.id, initializedRecord.id, 'an assignment retains the object identity');
   assert.equal(assignedRecord.displayValue, '8');
-  assert.notEqual(assignedRecord, initializedRecord, 'un valor nuevo obtiene un registro histórico nuevo');
+  assert.notEqual(assignedRecord, initializedRecord, 'a new value gets a new history record');
 
   controller.next();
   worker.emit({
     type: 'debug-progress', jobId, requestId: 4, progress: paused(6), events: [],
     stackScalars: [scalarSnapshot({ id: 42, scopeId: 2, name: 'temporal', displayValue: '8' })],
   });
-  assert.equal(controller.state.stackScalars[0], assignedRecord, 'registros sin cambios se comparten entre entradas');
+  assert.equal(controller.state.stackScalars[0], assignedRecord, 'unchanged records are shared between entries');
 
   const deleteEvent = objectLifecycleEvent(7, 'object-delete', 'automatic', {
     objectId: 42, allocationId: 42, scopeId: 2, name: 'temporal',
@@ -360,35 +360,35 @@ test('stackScalars conserva inicialización, asignaciones y objetos por punto hi
     ],
     stackScalars: [],
   });
-  assert.equal(deleteEvent.allocationId, createEvent.allocationId, 'la salida elimina el mismo objeto publicado por declaration');
-  assert.deepEqual(controller.state.stackScalars, [], 'la salida real del scope retira sus escalares');
+  assert.equal(deleteEvent.allocationId, createEvent.allocationId, 'scope exit deletes the same object published by declaration');
+  assert.deepEqual(controller.state.stackScalars, [], 'actual scope exit removes its scalars');
   assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1]);
 
   controller.previous();
-  assert.equal(controller.state.stackScalars[0].displayValue, '8', 'Atrás restaura el valor anterior a la salida del scope');
+  assert.equal(controller.state.stackScalars[0].displayValue, '8', 'Back restores the value from before scope exit');
   controller.previous();
   assert.equal(controller.state.stackScalars[0].displayValue, '8');
   controller.previous();
   assert.equal(controller.state.stackScalars[0].displayValue, '7');
   controller.previous();
-  assert.deepEqual(controller.state.stackScalars, [], 'Atrás restaura el punto entre scope-enter y declaration');
+  assert.deepEqual(controller.state.stackScalars, [], 'Back restores the point between scope-enter and declaration');
   assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1, 2]);
   controller.next();
   controller.next();
   assert.equal(controller.state.stackScalars[0].displayValue, '8');
-  assert.equal(worker.messages.length, 6, 'el futuro cacheado no vuelve a ejecutar pasos del VM');
+  assert.equal(worker.messages.length, 6, 'cached future does not rerun VM steps');
 });
 
-test('el historial conserva ?→0 y una asignación al mismo valor no crea un cambio', () => {
+test('history retains ?→0 and an assignment to the same value creates no change', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1);
-  const pending = scalarSnapshot({ id: 42, name: 'pendiente', initialized: false, displayValue: '?' });
+  const pending = scalarSnapshot({ id: 42, name: 'uninitialized', initialized: false, displayValue: '?' });
 
   controller.next();
   worker.emit({
     type: 'debug-progress', jobId, requestId: 1, progress: paused(2),
-    events: [objectLifecycleEvent(1, 'object-create', 'automatic', { allocationId: 42, name: 'pendiente' })],
+    events: [objectLifecycleEvent(1, 'object-create', 'automatic', { allocationId: 42, name: 'uninitialized' })],
     stackScalars: [pending],
   });
   assert.deepEqual(
@@ -396,7 +396,7 @@ test('el historial conserva ?→0 y una asignación al mismo valor no crea un ca
     [{ initialized: false, displayValue: '?' }],
   );
 
-  const initialized = scalarSnapshot({ id: 42, name: 'pendiente', initialized: true, displayValue: '0' });
+  const initialized = scalarSnapshot({ id: 42, name: 'uninitialized', initialized: true, displayValue: '0' });
   controller.next();
   worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: paused(3), events: [], stackScalars: [initialized] });
   const zeroRecord = controller.state.stackScalars[0];
@@ -406,9 +406,9 @@ test('el historial conserva ?→0 y una asignación al mismo valor no crea un ca
   controller.next();
   worker.emit({
     type: 'debug-progress', jobId, requestId: 3, progress: paused(4), events: [],
-    stackScalars: [scalarSnapshot({ id: 42, name: 'pendiente', initialized: true, displayValue: '0' })],
+    stackScalars: [scalarSnapshot({ id: 42, name: 'uninitialized', initialized: true, displayValue: '0' })],
   });
-  assert.equal(controller.state.stackScalars[0], zeroRecord, 'repetir el mismo estado reutiliza el snapshot');
+  assert.equal(controller.state.stackScalars[0], zeroRecord, 'repeating the same state reuses the snapshot');
 
   controller.previous();
   assert.equal(controller.state.stackScalars[0].displayValue, '0');
@@ -421,11 +421,11 @@ test('el historial conserva ?→0 y una asignación al mismo valor no crea un ca
   assert.deepEqual(controller.state.stackScalars, []);
   controller.next();
   controller.next();
-  assert.equal(controller.state.stackScalars[0].displayValue, '0', 'Next restaura el mismo snapshot sin ejecutar otra escritura');
-  assert.equal(worker.messages.length, 4, 'navegar el historial solo solicita los tres pasos iniciales');
+  assert.equal(controller.state.stackScalars[0].displayValue, '0', 'Next restores the same snapshot without another write');
+  assert.equal(worker.messages.length, 4, 'history navigation only requests the first three steps');
 });
 
-test('staticObjects conserva escalares y el historial guarda literales como arrays por punto histórico', () => {
+test('staticObjects retains scalars and history stores literals as arrays at each history point', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const globalValue = staticSnapshot({ id: 101, name: 'global_value', displayValue: '4' });
@@ -443,7 +443,7 @@ test('staticObjects conserva escalares y el historial guarda literales como arra
   assert.ok(Object.isFrozen(controller.state.staticObjects[0]));
   assert.ok(Object.isFrozen(controller.state.arrays[0].elements));
   globalValue.displayValue = 'mutated after postMessage';
-  assert.equal(controller.state.staticObjects[0].displayValue, '4', 'el controller copia el DTO del Worker');
+  assert.equal(controller.state.staticObjects[0].displayValue, '4', 'the controller copies the Worker DTO');
 
   const updatedGlobal = staticSnapshot({ id: 101, name: 'global_value', displayValue: '5' });
   const localStatic = staticSnapshot({ id: 103, name: 'visits', displayValue: '2' });
@@ -456,30 +456,30 @@ test('staticObjects conserva escalares y el historial guarda literales como arra
     ['global_value', '5'],
     ['visits', '2'],
   ]);
-  assert.equal(controller.state.arrays[0].rootId, 102, 'el literal conserva la identidad de array entre pausas');
+  assert.equal(controller.state.arrays[0].rootId, 102, 'the literal retains its array identity across pauses');
 
   controller.previous();
   assert.deepEqual(controller.state.staticObjects.map(({ id, displayValue }) => [id, displayValue]), [
     [101, '4'],
-  ], 'Atrás reconstruye los estáticos en el punto seleccionado');
-  assert.equal(controller.state.arrays[0].rootId, 102, 'Atrás restaura el literal desde su snapshot de array');
+  ], 'Back rebuilds static objects at the selected point');
+  assert.equal(controller.state.arrays[0].rootId, 102, 'Back restores the literal from its array snapshot');
   controller.next();
   assert.deepEqual(controller.state.staticObjects.map(({ id, displayValue }) => [id, displayValue]), [
     [101, '5'],
     [103, '2'],
   ]);
-  assert.equal(controller.state.arrays[0].rootId, 102, 'Next restaura el mismo literal sin crear un preview static');
+  assert.equal(controller.state.arrays[0].rootId, 102, 'Next restores the same literal without creating a static preview');
 
   controller.next();
   worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: paused(3), events: [], stackScalars: [] });
   assert.deepEqual(controller.state.staticObjects.map(({ id, displayValue }) => [id, displayValue]), [
     [101, '5'],
     [103, '2'],
-  ], 'una respuesta antigua sin staticObjects conserva el último snapshot real');
-  assert.equal(worker.messages.length, 3, 'volver al frente cacheado y avanzar envía un paso cada vez');
+  ], 'an old response without staticObjects retains the latest real snapshot');
+  assert.equal(worker.messages.length, 3, 'returning to cached latest state and advancing sends one step at a time');
 });
 
-test('heapObjects conserva el orden del engine y restaura IDs al navegar free y reutilización de dirección', () => {
+test('heapObjects retains engine order and restores IDs while navigating free and address reuse', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker);
@@ -495,12 +495,12 @@ test('heapObjects conserva el orden del engine y restaura IDs al navegar free y 
     ],
     heapObjects: [adjacentAddress, highAddress],
   });
-  assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [41, 40], 'el historial conserva el orden del engine y las direcciones exactas por encima de 2^53');
-  assert.equal(controller.state.hasUsedHeap, true, 'la creación heap real activa la región');
+  assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [41, 40], 'history retains engine order and exact addresses above 2^53');
+  assert.equal(controller.state.hasUsedHeap, true, 'a real heap allocation activates the region');
   assert.ok(Object.isFrozen(controller.state.heapObjects));
   assert.ok(Object.isFrozen(controller.state.heapObjects[0]));
   highAddress.address = '0x1';
-  assert.equal(controller.state.heapObjects[1].address, '0x20000000000001', 'el controller copia los DTO del Worker');
+  assert.equal(controller.state.heapObjects[1].address, '0x20000000000001', 'the controller copies the Worker DTOs');
 
   const lowAddress = heapSnapshot(42, '0x100', 4);
   const highAddressAgain = heapSnapshot(40, '0x20000000000001', 24);
@@ -510,7 +510,7 @@ test('heapObjects conserva el orden del engine y restaura IDs al navegar free y 
     events: [objectLifecycleEvent(4, 'object-create', 'heap', { allocationId: 42, origin: 'heap' })],
     heapObjects: [lowAddress, adjacentAddress, highAddressAgain],
   });
-  assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [42, 41, 40], 'una inserción puede quedar antes de cualquier tarjeta existente');
+  assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [42, 41, 40], 'an insertion can appear before any existing card');
 
   controller.next();
   worker.emit({
@@ -518,7 +518,7 @@ test('heapObjects conserva el orden del engine y restaura IDs al navegar free y 
     events: [objectLifecycleEvent(5, 'object-delete', 'heap', { allocationId: 40, origin: 'heap' })],
     heapObjects: [lowAddress, adjacentAddress],
   });
-  assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [42, 41], 'free quita el ID vivo del snapshot');
+  assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [42, 41], 'free removes the live ID from the snapshot');
 
   const reusedAddress = heapSnapshot(43, '0x20000000000001', 24);
   controller.next();
@@ -530,23 +530,23 @@ test('heapObjects conserva el orden del engine y restaura IDs al navegar free y 
   assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [42, 41, 43]);
 
   controller.previous();
-  assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [42, 41], 'Atrás restaura el estado después de free');
+  assert.deepEqual(controller.state.heapObjects.map(({ id }) => id), [42, 41], 'Back restores the state after free');
   controller.previous();
   assert.deepEqual(controller.state.heapObjects.map(({ id, address }) => [id, address]), [
     [42, '0x100'],
     [41, '0x20000000000000'],
     [40, '0x20000000000001'],
-  ], 'el historial conserva el ID/address de la asignación anterior');
+  ], 'history retains the ID/address from the previous allocation');
   controller.next();
   controller.next();
   assert.deepEqual(controller.state.heapObjects.map(({ id, address }) => [id, address]), [
     [42, '0x100'],
     [41, '0x20000000000000'],
     [43, '0x20000000000001'],
-  ], 'reutilizar una dirección crea otro ID sin confundir las dos vidas');
+  ], 'reusing an address creates another ID without confusing the two lifetimes');
 });
 
-test('el historial copia y restaura el origen parameter/variable junto al valor del scalar', () => {
+test('history copies and restores parameter/variable origin with the scalar value', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 2, [
@@ -568,10 +568,10 @@ test('el historial copia y restaura el origen parameter/variable junto al valor 
 
   const savedParameter = controller.state.stackScalars[0];
   assert.equal(savedParameter.origin, 'parameter');
-  assert.notEqual(savedParameter, parameterInput, 'el controller clona el DTO recibido del Worker');
+  assert.notEqual(savedParameter, parameterInput, 'the controller clones the DTO received from the Worker');
   assert.ok(Object.isFrozen(savedParameter));
   parameterInput.origin = 'variable';
-  assert.equal(controller.state.stackScalars[0].origin, 'parameter', 'el clon conserva el discriminator');
+  assert.equal(controller.state.stackScalars[0].origin, 'parameter', 'the clone retains the discriminator');
 
   const localInput = scalarSnapshot({
     id: 81, scopeId: 2, frameId: 2, name: 'local', origin: 'variable', displayValue: '2',
@@ -602,7 +602,7 @@ test('el historial copia y restaura el origen parameter/variable junto al valor 
   assert.deepEqual(controller.state.stackScalars.map(scalar => [scalar.name, scalar.origin, scalar.displayValue]), [
     ['count', 'parameter', '2'],
     ['local', 'variable', '2'],
-  ], 'Atrás restaura origen y valor del snapshot en caché');
+  ], 'Back restores origin and value from the cached snapshot');
   controller.previous();
   assert.deepEqual(controller.state.stackScalars.map(({ name, origin }) => [name, origin]), [['count', 'parameter']]);
   controller.next();
@@ -610,10 +610,10 @@ test('el historial copia y restaura el origen parameter/variable junto al valor 
     ['count', 'parameter'],
     ['local', 'variable'],
   ]);
-  assert.equal(worker.messages.length, 4, 'navegar los snapshots guardados no solicita pasos nuevos');
+  assert.equal(worker.messages.length, 4, 'navigating saved snapshots does not request new steps');
 });
 
-test('el límite del historial conserva snapshots, errores retienen el último valor y start los reinicia', () => {
+test('history limit retains snapshots, errors keep the latest value, and start resets them', () => {
   const { controller, workers } = setup({ maxHistoryEntries: 2 });
   const worker = workers[0];
   let jobId = ready(worker, 1);
@@ -633,20 +633,20 @@ test('el límite del historial conserva snapshots, errores retienen el último v
   assert.equal(controller.state.stackScalars[0].displayValue, '3');
   controller.previous();
   assert.equal(controller.state.stackScalars[0].displayValue, '2');
-  assert.equal(controller.state.canPrevious, false, 'el snapshot podado tampoco se puede recuperar');
+  assert.equal(controller.state.canPrevious, false, 'the pruned snapshot cannot be restored either');
   controller.next();
   assert.equal(controller.state.stackScalars[0].displayValue, '3');
-  assert.equal(worker.messages.length, 3, 'volver al frente cacheado no manda un mensaje duplicado');
+  assert.equal(worker.messages.length, 3, 'returning to cached latest state does not send a duplicate message');
 
   controller.next();
   worker.emit({
-    type: 'debug-error', jobId, requestId: 3, status: 'error', message: 'fallo intencional',
+    type: 'debug-error', jobId, requestId: 3, status: 'error', message: 'intentional failure',
   });
   assert.equal(controller.state.status, 'error');
-  assert.equal(controller.state.stackScalars[0].displayValue, '3', 'un error conserva la última inspección real');
+  assert.equal(controller.state.stackScalars[0].displayValue, '3', 'an error retains the latest real inspection');
 
   controller.start();
-  assert.deepEqual(controller.state.stackScalars, [], 'una sesión nueva no hereda snapshots anteriores');
+  assert.deepEqual(controller.state.stackScalars, [], 'a new session does not inherit previous snapshots');
   jobId = ready(workers[1], 1);
   controller.next();
   workers[1].emit({
@@ -659,10 +659,10 @@ test('el límite del historial conserva snapshots, errores retienen el último v
     type: 'debug-progress', jobId, requestId: 999, progress: paused(90), events: [],
     stackScalars: [scalarSnapshot({ displayValue: 'stale' })],
   });
-  assert.equal(controller.state.stackScalars[0].displayValue, '9', 'una respuesta de paso obsoleta se ignora');
+  assert.equal(controller.state.stackScalars[0].displayValue, '9', 'a stale step response is ignored');
 });
 
-test('los checkpoints de escalares conservan Back y el futuro cacheado después de podar', () => {
+test('scalar checkpoints retain Back and cached future after pruning', () => {
   const { controller, workers } = setup({ maxHistoryEntries: 3 });
   const worker = workers[0];
   const jobId = ready(worker, 1);
@@ -685,15 +685,15 @@ test('los checkpoints de escalares conservan Back y el futuro cacheado después 
   assert.equal(controller.state.stackScalars[0].displayValue, '129');
   controller.previous();
   assert.equal(controller.state.stackScalars[0].displayValue, '128');
-  assert.equal(controller.state.canPrevious, false, 'el límite conserva solo las tres entradas recientes');
+  assert.equal(controller.state.canPrevious, false, 'the limit retains only the three most recent entries');
   const messageCount = worker.messages.length;
   controller.next();
   controller.next();
   assert.equal(controller.state.stackScalars[0].displayValue, '130');
-  assert.equal(worker.messages.length, messageCount, 'el futuro posterior al checkpoint sigue cacheado');
+  assert.equal(worker.messages.length, messageCount, 'future after the checkpoint remains cached');
 });
 
-test('scope de una llamada entra después del frame y el retorno consume sus cierres reales', () => {
+test('a call scope enters after its frame and return consumes its actual exits', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1, [
@@ -736,7 +736,7 @@ test('scope de una llamada entra después del frame y el retorno consume sus cie
   assert.deepEqual(controller.state.activeScopes, []);
 });
 
-test('un error conserva los scopes que el motor no cerró y una sesión nueva los reinicia', () => {
+test('an error retains scopes the engine did not close, and a new session resets them', () => {
   const { controller, workers } = setup();
   const firstJobId = ready(workers[0], 1, [
     frameLifecycleEvent(1, 'frame-enter', 1, 'main'),
@@ -749,7 +749,7 @@ test('un error conserva los scopes que el motor no cerró y una sesión nueva lo
     events: [frameLifecycleEvent(3, 'frame-exit', 1, 'main')],
   });
   assert.equal(controller.state.status, 'error');
-  assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1], 'frame-exit no inventa un scope-exit');
+  assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1], 'frame-exit does not invent a scope-exit');
 
   controller.start();
   assert.deepEqual(controller.state.activeScopes, []);
@@ -760,7 +760,7 @@ test('un error conserva los scopes que el motor no cerró y una sesión nueva lo
   assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1]);
 });
 
-test('un límite de eventos conserva los scopes activos sin fabricar cierres', () => {
+test('an event limit retains active scopes without fabricating exits', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1, [
@@ -782,7 +782,7 @@ test('un límite de eventos conserva los scopes activos sin fabricar cierres', (
       kind: 'debug-limit',
       resource: 'maxDebugEvents',
       limit: 100_000,
-      diagnostics: [{ code: 'DEBUG_EVENT_LIMIT', file: 'main.c', line: 3, column: 1, message: 'límite alcanzado' }],
+      diagnostics: [{ code: 'DEBUG_EVENT_LIMIT', file: 'main.c', line: 3, column: 1, message: 'limit reached' }],
       metrics,
       stdout: new Uint8Array(),
       stderr: new Uint8Array(),
@@ -792,10 +792,10 @@ test('un límite de eventos conserva los scopes activos sin fabricar cierres', (
 
   assert.equal(controller.state.status, 'limit');
   assert.deepEqual(controller.state.activeScopes.map(scope => scope.id), [1]);
-  assert.equal(controller.state.stackScalars[0].displayValue, '6', 'el límite conserva la última inspección real');
+  assert.equal(controller.state.stackScalars[0].displayValue, '6', 'the limit retains the latest real inspection');
 });
 
-test('los scopes activos persisten al recortar el historial navegable', () => {
+test('active scopes persist when navigable history is pruned', () => {
   const { controller, workers } = setup({ maxHistoryEntries: 2 });
   const worker = workers[0];
   const jobId = ready(worker, 1, [scopeLifecycleEvent(1, 'scope-enter', 10)]);
@@ -819,7 +819,7 @@ test('los scopes activos persisten al recortar el historial navegable', () => {
   assert.equal(worker.messages.length, 3);
 });
 
-test('hasUsedHeap solo cambia con una asignación heap real y persiste al liberar o navegar atrás', () => {
+test('hasUsedHeap changes only with a real heap allocation and persists across free or Back', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
 
@@ -828,40 +828,40 @@ test('hasUsedHeap solo cambia con una asignación heap real y persiste al libera
     objectLifecycleEvent(1, 'object-create', 'automatic'),
     objectLifecycleEvent(2, 'object-create', 'static'),
   ]);
-  assert.equal(controller.state.hasUsedHeap, false, 'los objetos automáticos y static no cuentan como heap');
+  assert.equal(controller.state.hasUsedHeap, false, 'automatic and static objects do not count as heap');
 
   controller.next();
   worker.emit({
     type: 'debug-progress', jobId, requestId: 1, progress: paused(2),
     events: [objectLifecycleEvent(3, 'object-create', 'heap')],
   });
-  assert.equal(controller.state.hasUsedHeap, true, 'la asignación heap recibida al avanzar se reconoce');
+  assert.equal(controller.state.hasUsedHeap, true, 'the heap allocation received while advancing is recognized');
 
   controller.next();
   worker.emit({
     type: 'debug-progress', jobId, requestId: 2, progress: paused(3),
     events: [objectLifecycleEvent(4, 'object-delete', 'heap')],
   });
-  assert.equal(controller.state.hasUsedHeap, true, 'liberar el objeto no borra el uso histórico de heap');
+  assert.equal(controller.state.hasUsedHeap, true, 'freeing the object does not erase historical heap use');
 
   controller.previous();
   controller.previous();
-  assert.equal(controller.state.lifecycle.eventCount, 2, 'el punto seleccionado queda antes del evento heap');
-  assert.equal(controller.state.hasUsedHeap, true, 'Atrás no reinicia la señal de la sesión');
+  assert.equal(controller.state.lifecycle.eventCount, 2, 'the selected point is before the heap event');
+  assert.equal(controller.state.hasUsedHeap, true, 'Back does not reset the session signal');
 
   controller.start();
-  assert.equal(controller.state.hasUsedHeap, false, 'una sesión nueva reinicia la señal');
+  assert.equal(controller.state.hasUsedHeap, false, 'a new session resets the signal');
   ready(workers[1]);
-  assert.equal(controller.state.hasUsedHeap, false, 'una sesión nueva sin heap permanece en false');
+  assert.equal(controller.state.hasUsedHeap, false, 'a new session without heap remains false');
 });
 
-test('hasUsedHeap detecta una asignación incluida en los eventos iniciales de preparación', () => {
+test('hasUsedHeap detects an allocation in the initial preparation events', () => {
   const { controller, workers } = setup();
   ready(workers[0], 1, [objectLifecycleEvent(1, 'object-create', 'heap')]);
   assert.equal(controller.state.hasUsedHeap, true);
 });
 
-test('Play espera 500 ms, impide solapamientos y se detiene con Atrás', () => {
+test('Play waits 500 ms, prevents overlap, and stops on Back', () => {
   const { controller, workers, timers } = setup();
   const worker = workers[0];
   const jobId = ready(worker);
@@ -875,7 +875,7 @@ test('Play espera 500 ms, impide solapamientos y se detiene con Atrás', () => {
   assert.equal(worker.messages[1].requestId, 1);
 
   timers.advance(4_000);
-  assert.equal(worker.messages.length, 2, 'no se apilan pasos mientras el Worker no responde');
+  assert.equal(worker.messages.length, 2, 'steps do not queue while the Worker is unresponsive');
   worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(2), events: [] });
   assert.equal(controller.state.status, 'paused');
   assert.equal(controller.state.isPlaying, true);
@@ -888,17 +888,17 @@ test('Play espera 500 ms, impide solapamientos y se detiene con Atrás', () => {
   assert.equal(controller.state.location.line, 1);
   assert.equal(controller.state.isPlaying, false);
   worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: paused(3), events: [] });
-  assert.equal(controller.state.location.line, 1, 'la respuesta pendiente queda en el futuro del historial');
+  assert.equal(controller.state.location.line, 1, 'the pending response remains in the history future');
   assert.equal(controller.state.canNext, true);
   timers.advance(1_000);
-  assert.equal(worker.messages.length, 3, 'Atrás cancela los ticks pendientes');
+  assert.equal(worker.messages.length, 3, 'Back cancels pending ticks');
   controller.next();
   controller.next();
   assert.equal(controller.state.location.line, 3);
-  assert.equal(worker.messages.length, 3, 'el futuro del historial se recorre sin consumir otra vez el VM');
+  assert.equal(worker.messages.length, 3, 'history future is traversed without advancing the VM again');
 });
 
-test('historial y eventos respetan el límite, y dispose cancela timers y Worker', () => {
+test('history and events respect the limit, and dispose cancels timers and Worker', () => {
   const { controller, workers, timers } = setup({ maxHistoryEntries: 2 });
   const worker = workers[0];
   const jobId = ready(worker, 1, [lifecycleEvent(1)]);
@@ -907,15 +907,15 @@ test('historial y eventos respetan el límite, y dispose cancela timers y Worker
   controller.next();
   worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: paused(3), events: [lifecycleEvent(3)] });
   assert.equal(controller.state.stepIndex, 2);
-  assert.equal(controller.state.lifecycle.eventCount, 3, 'los eventos de lifecycle conservan el prefijo tras recortar ubicaciones viejas');
-  assert.match(controller.state.historyNotice, /límite|historial conserva/u);
+  assert.equal(controller.state.lifecycle.eventCount, 3, 'lifecycle events retain the prefix after old locations are pruned');
+  assert.equal(controller.state.historyNotice, 2);
   assert.equal(controller.state.canPrevious, true);
 
   controller.previous();
   assert.equal(controller.state.stepIndex, 1);
-  assert.equal(controller.state.canPrevious, false, 'el inicio navegable avanza con el límite del historial');
+  assert.equal(controller.state.canPrevious, false, 'the navigable start advances with the history limit');
   assert.equal(controller.state.lifecycle.eventCount, 2);
-  assert.match(controller.state.historyNotice, /más antiguos ya no están disponibles/u);
+  assert.equal(controller.state.historyNotice, 2);
   controller.next();
   assert.equal(controller.state.location.line, 3);
   assert.equal(worker.messages.length, 3);
@@ -928,7 +928,7 @@ test('historial y eventos respetan el límite, y dispose cancela timers y Worker
   assert.equal(timers.timers.size, 0);
 });
 
-test('los job IDs obsoletos no cambian el estado, y la preparación informa diagnósticos', () => {
+test('stale job IDs do not change state, and preparation reports diagnostics', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker);
@@ -941,13 +941,13 @@ test('los job IDs obsoletos no cambian el estado, y la preparación informa diag
   const replacementId = replacement.messages[0].jobId;
   replacement.emit({
     type: 'debug-error', jobId: replacementId, requestId: null, status: 'error',
-    message: 'main.c:1:1: falta cerrar el bloque',
+    message: 'main.c:1:17: Missing closing } for block.',
   });
   assert.equal(controller.state.status, 'error');
-  assert.equal(controller.state.errorMessage, 'main.c:1:1: falta cerrar el bloque');
+  assert.equal(controller.state.errorMessage, 'main.c:1:17: Missing closing } for block.');
 });
 
-test('el watchdog cubre preparación y pasos, pero no la espera entre ticks o acciones', () => {
+test('the watchdog covers preparation and steps, but not waits between ticks or actions', () => {
   const configuration = { ...RUN_CONFIGURATION, timeoutMs: 100 };
   const { controller, workers, timers } = setup({ configuration });
   const worker = workers[0];
@@ -956,14 +956,14 @@ test('el watchdog cubre preparación y pasos, pero no la espera entre ticks o ac
   assert.equal(controller.state.status, 'starting');
   ready(worker, 1);
   timers.advance(10_000);
-  assert.equal(controller.state.status, 'paused', 'el tiempo en espera de usuario no consume el watchdog');
+  assert.equal(controller.state.status, 'paused', 'time spent waiting for user input does not consume the watchdog');
 
   controller.next();
   timers.advance(99);
   assert.equal(controller.state.status, 'running');
   timers.advance(1);
   assert.equal(controller.state.status, 'error');
-  assert.match(controller.state.errorMessage, /tiempo máximo de 100 ms/u);
+  assert.match(controller.state.errorMessage, /The Memory Viewer exceeded its 100 ms time limit/u);
   assert.equal(worker.terminated, true);
 
   const preparing = setup({ configuration });
@@ -972,7 +972,7 @@ test('el watchdog cubre preparación y pasos, pero no la espera entre ticks o ac
   assert.equal(preparing.workers[0].terminated, true);
 });
 
-test('I/O apagado responde EOF al primer input-needed sin publicar una espera oculta', () => {
+test('I/O off responds with EOF to the first input-needed without publishing a hidden wait', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker);
@@ -990,16 +990,16 @@ test('I/O apagado responde EOF al primer input-needed sin publicar una espera oc
   });
   assert.equal(controller.state.status, 'running');
   assert.equal(controller.state.inputRequestId, null);
-  assert.equal(controller.state.stepIndex, 0, 'EOF continúa el mismo paso sin crear historial');
+  assert.equal(controller.state.stepIndex, 0, 'EOF continues the same step without creating history');
   assert.ok(controller.state.transcript.some(entry => entry.text === '[EOF]\n'));
   assert.equal(controller.sendStdinLine('9'), false);
 
   const messageCount = worker.messages.length;
   controller.setStdinInteractiveEnabled(true);
-  assert.equal(worker.messages.length, messageCount, 'reactivar I/O no reabre stdin después de EOF');
+  assert.equal(worker.messages.length, messageCount, 'reactivating I/O does not reopen stdin after EOF');
 });
 
-test('I/O apagado cierra la espera desde el historial sin mover su cursor', () => {
+test('I/O off closes the wait from history without moving its cursor', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1);
@@ -1013,7 +1013,7 @@ test('I/O apagado cierra la espera desde el historial sin mover su cursor', () =
   });
   controller.previous();
   assert.equal(controller.state.isViewingHistory, true);
-  assert.equal(controller.state.inputRequestId, null, 'el formulario de stdin queda oculto en el historial');
+  assert.equal(controller.state.inputRequestId, null, 'the stdin form is hidden in history');
 
   controller.setStdinInteractiveEnabled(false);
   assert.deepEqual(worker.messages.at(-1), {
@@ -1025,16 +1025,16 @@ test('I/O apagado cierra la espera desde el historial sin mover su cursor', () =
 
   const messageCount = worker.messages.length;
   controller.setStdinInteractiveEnabled(true);
-  assert.equal(controller.sendStdinLine('ignored'), false, 'el token interno ya quedó cerrado');
-  assert.equal(worker.messages.length, messageCount, 'I/O vuelve a mostrarse sin reiniciar la sesión');
+  assert.equal(controller.sendStdinLine('ignored'), false, 'the internal token is already closed');
+  assert.equal(worker.messages.length, messageCount, 'I/O is shown again without restarting the session');
 
   worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: terminated(), events: [] });
-  assert.equal(controller.state.stepIndex, 0, 'la respuesta del paso pendiente conserva el cursor histórico');
+  assert.equal(controller.state.stepIndex, 0, 'the pending step response retains the history cursor');
   assert.equal(controller.state.location.line, 1);
   assert.equal(controller.state.isViewingHistory, true);
 });
 
-test('I/O encendido mantiene la entrada interactiva habitual', () => {
+test('I/O on retains normal interactive input', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker);
@@ -1048,7 +1048,7 @@ test('I/O encendido mantiene la entrada interactiva habitual', () => {
 
   assert.equal(controller.state.status, 'waiting-input');
   assert.equal(controller.state.inputRequestId, 21);
-  assert.equal(worker.messages.length, 2, 'no se envía EOF con I/O encendido');
+  assert.equal(worker.messages.length, 2, 'EOF is not sent while I/O is on');
   assert.equal(controller.sendStdinLine('5'), true);
   assert.deepEqual(worker.messages.at(-1), {
     type: 'debug-stdin', jobId, requestId: 1, inputRequestId: 21,
@@ -1056,7 +1056,7 @@ test('I/O encendido mantiene la entrada interactiva habitual', () => {
   });
 });
 
-test('stdin mantiene el mismo paso a través de esperas repetidas y conserva salida/historial monotónicos', () => {
+test('stdin retains the same step across repeated waits and keeps output/history monotonic', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1);
@@ -1064,7 +1064,7 @@ test('stdin mantiene el mismo paso a través de esperas repetidas y conserva sal
   const step = worker.messages[1];
 
   worker.emit({ type: 'debug-output', jobId, requestId: step.requestId, sequence: 1, stream: 'stdout', chunk: new TextEncoder().encode('prompt> ') });
-  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'prompt> ', 'la salida aparece antes del primer wait');
+  assert.equal(controller.state.transcript.map(entry => entry.text).join(''), 'prompt> ', 'output appears before the first wait');
   worker.emit({ type: 'debug-output', jobId, requestId: 99, sequence: 2, stream: 'stdout', chunk: new TextEncoder().encode('stale') });
   worker.emit({
     type: 'debug-progress', jobId, requestId: step.requestId, inputRequestId: 1,
@@ -1074,8 +1074,8 @@ test('stdin mantiene el mismo paso a través de esperas repetidas y conserva sal
   });
   assert.equal(controller.state.status, 'waiting-input');
   assert.equal(controller.state.inputRequestId, 1);
-  assert.equal(controller.state.stepIndex, 0, 'la espera no crea una ubicación histórica');
-  assert.equal(controller.state.lifecycle.eventCount, 1, 'los eventos transitorios se conservan una vez');
+  assert.equal(controller.state.stepIndex, 0, 'the wait does not create a history location');
+  assert.equal(controller.state.lifecycle.eventCount, 1, 'transient events are retained once');
   assert.equal(controller.sendStdinLine('12'), true);
   assert.deepEqual(worker.messages.at(-1), {
     type: 'debug-stdin', jobId, requestId: step.requestId, inputRequestId: 1,
@@ -1090,12 +1090,12 @@ test('stdin mantiene el mismo paso a través de esperas repetidas y conserva sal
     heapObjects: [heapSnapshot(1, '0x1000'), heapSnapshot(2, '0x1008')], pointers: [], arrays: [], omittedArrayObjects: 0,
     aggregates: [], omittedAggregateObjects: 0, stackScalars: [scalarSnapshot({ displayValue: '12' })], staticObjects: [],
   });
-  assert.equal(controller.state.inputRequestId, 2, 'cada parada real de entrada recibe un token nuevo');
-  assert.equal(controller.state.stepIndex, 0, 'el segundo wait sigue sin añadir historia');
-  assert.equal(controller.state.stackScalars[0].displayValue, '12', 'se muestra la conversión ya asignada antes del segundo wait');
+  assert.equal(controller.state.inputRequestId, 2, 'each actual input wait receives a new token');
+  assert.equal(controller.state.stepIndex, 0, 'the second wait still does not add history');
+  assert.equal(controller.state.stackScalars[0].displayValue, '12', 'the conversion assigned before the second wait is shown');
   assert.equal(controller.state.lifecycle.eventCount, 2);
   assert.equal(controller.sendStdinLine('34'), true);
-  assert.equal(worker.messages.at(-1).requestId, step.requestId, 'la continuación reusa el request del mismo paso');
+  assert.equal(worker.messages.at(-1).requestId, step.requestId, 'the continuation reuses the request for the same step');
   assert.equal(worker.messages.at(-1).inputRequestId, 2);
 
   worker.emit({ type: 'debug-output', jobId, requestId: step.requestId, sequence: 3, stream: 'stdout', chunk: new TextEncoder().encode('34\n') });
@@ -1105,10 +1105,10 @@ test('stdin mantiene el mismo paso a través de esperas repetidas y conserva sal
     aggregates: [], omittedAggregateObjects: 0, stackScalars: [scalarSnapshot({ displayValue: '46' })], staticObjects: [],
   });
   assert.equal(controller.state.status, 'paused');
-  assert.equal(controller.state.stepIndex, 1, 'el request pendiente crea una sola entrada al pausar');
+  assert.equal(controller.state.stepIndex, 1, 'the pending request creates a single entry when pausing');
   assert.equal(controller.state.inputRequestId, null);
-  assert.equal(controller.state.lifecycle.eventCount, 3, 'los eventos de las dos esperas y la pausa se agregan sin perderse');
-  assert.equal(controller.state.heapObjects.length, 1, 'las instantáneas finales reemplazan el estado transitorio');
+  assert.equal(controller.state.lifecycle.eventCount, 3, 'events from both waits and the pause are added without being lost');
+  assert.equal(controller.state.heapObjects.length, 1, 'final snapshots replace transient state');
 
   const transcriptBeforeHistory = controller.state.transcript;
   const outputText = transcriptBeforeHistory.map(entry => entry.text).join('');
@@ -1117,18 +1117,18 @@ test('stdin mantiene el mismo paso a través de esperas repetidas y conserva sal
   controller.previous();
   assert.equal(controller.state.isViewingHistory, true);
   assert.equal(controller.state.inputRequestId, null);
-  assert.equal(controller.state.canStop, true, 'Stop sigue disponible al recorrer historia mientras la VM vive');
+  assert.equal(controller.state.canStop, true, 'Stop remains available while traversing history as the VM runs');
   controller.next();
-  assert.equal(controller.state.transcript, transcriptBeforeHistory, 'navegar snapshots no vuelve a emitir salida ni stdin');
+  assert.equal(controller.state.transcript, transcriptBeforeHistory, 'navigating snapshots does not re-emit output or stdin');
   assert.equal(worker.messages.length, messageCount);
 });
 
-test('EOF usa el token de la espera una sola vez y Stop conserva salida e historial parcial', () => {
+test('EOF uses the wait token once and Stop retains partial output and history', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker);
   controller.next();
-  worker.emit({ type: 'debug-output', jobId, requestId: 1, sequence: 1, stream: 'stderr', chunk: new TextEncoder().encode('diagnóstico parcial') });
+  worker.emit({ type: 'debug-output', jobId, requestId: 1, sequence: 1, stream: 'stderr', chunk: new TextEncoder().encode('partial diagnostic') });
   worker.emit({
     type: 'debug-progress', jobId, requestId: 1, inputRequestId: 41, progress: inputNeeded(2), events: [],
     heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
@@ -1145,18 +1145,18 @@ test('EOF usa el token de la espera una sola vez y Stop conserva salida e histor
   assert.equal(controller.state.canStop, false);
   assert.equal(controller.state.stepIndex, 1);
   assert.equal(worker.terminated, true);
-  assert.ok(controller.state.transcript.some(entry => entry.text === 'diagnóstico parcial'));
+  assert.ok(controller.state.transcript.some(entry => entry.text === 'partial diagnostic'));
   const transcript = controller.state.transcript;
-  worker.emit({ type: 'debug-output', jobId, requestId: 1, sequence: 2, stream: 'stderr', chunk: new TextEncoder().encode('tarde') });
-  assert.equal(controller.state.transcript, transcript, 'la salida tardía tras Stop queda descartada');
+  worker.emit({ type: 'debug-output', jobId, requestId: 1, sequence: 2, stream: 'stderr', chunk: new TextEncoder().encode('late') });
+  assert.equal(controller.state.transcript, transcript, 'late output after Stop is discarded');
   assert.equal(controller.sendStdinEOF(), false);
 });
 
-test('una espera de stdin queda oculta en historia vieja y reaparece al volver a su frontera', () => {
+test('a stdin wait is hidden in old history and reappears when returning to its boundary', () => {
   const { controller, workers } = setup();
   const worker = workers[0];
   const jobId = ready(worker, 1);
-  assert.equal(controller.state.canStop, true, 'Stop sigue disponible mientras la VM pausada permanece viva');
+  assert.equal(controller.state.canStop, true, 'Stop remains available while the paused VM is alive');
   controller.next();
   worker.emit({ type: 'debug-progress', jobId, requestId: 1, progress: paused(2), events: [] });
   controller.next();
@@ -1172,22 +1172,22 @@ test('una espera de stdin queda oculta en historia vieja y reaparece al volver a
   controller.previous();
   assert.equal(controller.state.isViewingHistory, true);
   assert.equal(controller.state.status, 'paused');
-  assert.equal(controller.state.inputRequestId, null, 'no se proyecta al pasado el formulario de la VM viva');
-  assert.equal(controller.sendStdinLine('invalido'), false);
+  assert.equal(controller.state.inputRequestId, null, 'the live VM form is not projected into the past');
+  assert.equal(controller.sendStdinLine('invalid'), false);
   assert.equal(controller.state.canStop, true);
 
   controller.next();
   assert.equal(controller.state.status, 'waiting-input');
-  assert.equal(controller.state.inputRequestId, 13, 'la misma petición reaparece al volver al frontier');
-  assert.equal(worker.messages.length, 3, 'recorrer el futuro cacheado no envía otro debug-step');
+  assert.equal(controller.state.inputRequestId, 13, 'the same request reappears when returning to the frontier');
+  assert.equal(worker.messages.length, 3, 'traversing cached future does not send another debug-step');
   assert.equal(controller.sendStdinLine('5'), true);
   worker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: paused(3), events: [] });
   assert.equal(controller.state.status, 'paused');
   controller.previous();
-  assert.equal(controller.state.canStop, true, 'el VM pausado sigue siendo cancelable desde cualquier paso visible');
+  assert.equal(controller.state.canStop, true, 'the paused VM can still be cancelled from any visible step');
 });
 
-test('el watchdog se pausa durante el wait y vuelve a contar al enviar stdin', () => {
+test('the watchdog pauses during the wait and resumes when stdin is sent', () => {
   const configuration = { ...RUN_CONFIGURATION, timeoutMs: 100 };
   const { controller, workers, timers } = setup({ configuration });
   const worker = workers[0];

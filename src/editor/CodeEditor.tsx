@@ -1,7 +1,9 @@
 import { memo, useCallback, useLayoutEffect, useMemo, useRef } from 'react';
 import type { RefObject } from 'react';
 import { getEditorLineCount, MAX_EDITOR_LINES } from './limits.ts';
+import type { EditorLimitMessage } from './limits.ts';
 import { highlightC } from './highlight.ts';
+import { useI18n } from '../i18n.tsx';
 
 interface CodeEditorProps {
   editorRef: RefObject<HTMLTextAreaElement | null>;
@@ -12,7 +14,7 @@ interface CodeEditorProps {
   readOnly?: boolean;
   showActiveLine?: boolean;
   compactReadOnlyGutter?: boolean;
-  limitMessage?: string;
+  limitMessage?: EditorLimitMessage | null;
 }
 
 const EditorLineNumber = memo(function EditorLineNumber({
@@ -31,8 +33,9 @@ const EditorLineNumber = memo(function EditorLineNumber({
 export const CodeEditor = memo(function CodeEditor({
   editorRef, text, initialText = '', activeLine = 1, highlightLine,
   readOnly = false, showActiveLine = true, compactReadOnlyGutter = false,
-  limitMessage = '',
+  limitMessage = null,
 }: CodeEditorProps) {
+  const { t } = useI18n();
   const viewportRef = useRef<HTMLDivElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   const executionLineRef = useRef<HTMLDivElement>(null);
@@ -136,7 +139,7 @@ export const CodeEditor = memo(function CodeEditor({
       <textarea
         ref={editorRef}
         className={`editor${readOnly ? ' is-readonly' : ''}${compactGutterClass}`}
-        aria-label="main.c"
+        aria-label={t('editor.codeAreaLabel', { file: 'main.c' })}
         defaultValue={initialText}
         readOnly={readOnly}
         spellCheck={false}
@@ -159,7 +162,11 @@ export const CodeEditor = memo(function CodeEditor({
         aria-live="polite"
         aria-atomic="true"
       >
-        {limitMessage}
+        {limitMessage?.kind === 'line-limit'
+          ? t('editor.lineLimit', { max: MAX_EDITOR_LINES })
+          : limitMessage?.kind === 'file-too-long'
+            ? t('editor.fileTooLong', { count: limitMessage.lineCount, max: MAX_EDITOR_LINES })
+            : ''}
       </div>
     </>
   );

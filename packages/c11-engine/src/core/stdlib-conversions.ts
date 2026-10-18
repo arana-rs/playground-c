@@ -19,11 +19,11 @@ interface FloatSubject {
 }
 
 function count(args: readonly CValue[], expected: number, name: string, context: LibraryRuntimeContext, at: Location): void {
-  if (args.length !== expected) context.fail('LIBRARY_ARGUMENT', `${name} recibió una cantidad de argumentos no válida.`, at);
+  if (args.length !== expected) context.fail('LIBRARY_ARGUMENT', `${name} received an invalid number of arguments.`, at);
 }
 
 function integer(value: CValue, context: LibraryRuntimeContext, at: Location): bigint {
-  if (typeof value.value !== 'bigint') return context.fail('LIBRARY_ARGUMENT', 'Se esperaba un argumento entero.', at);
+  if (typeof value.value !== 'bigint') return context.fail('LIBRARY_ARGUMENT', 'Expected an integer argument.', at);
   return value.value;
 }
 

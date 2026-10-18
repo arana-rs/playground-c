@@ -31,7 +31,7 @@ async function temporaryFile(t, source, filename = 'main.c') {
 }
 
 test('the built public browser entry accepts File and separates timings', async () => {
-    const result = await runBrowserFile(new File([SOURCE], 'memoria-ñ.c'));
+    const result = await runBrowserFile(new File([SOURCE], 'memory-ñ.c'));
     assert.equal(result.kind, 'terminated');
     assert.equal(result.exitCode, 42);
     assert.equal(result.mainReturn, 42);
@@ -43,7 +43,7 @@ test('the built public browser entry accepts File and separates timings', async 
 });
 
 test('the built public Node entry accepts a real Unicode filesystem path', async (t) => {
-    const path = await temporaryFile(t, SOURCE, 'cálculo ñ.c');
+    const path = await temporaryFile(t, SOURCE, 'calculation ñ.c');
     const result = await runNodeFile(path);
     assert.equal(result.kind, 'terminated');
     assert.equal(result.exitCode, 42);
@@ -53,9 +53,9 @@ test('the built public Node entry accepts a real Unicode filesystem path', async
 
 test('P2 scalar, flow, recursive and math behavior is available through File and path adapters', async (t) => {
     const source = fixtureSourceFor('adapters', 'p2-adapter.c');
-    const path = await temporaryFile(t, source, 'p2-cálculo.c');
+    const path = await temporaryFile(t, source, 'p2-calculation-ñ.c');
     for (const result of await Promise.all([
-        runBrowserFile(new File([source], 'p2-cálculo.c')),
+        runBrowserFile(new File([source], 'p2-calculation-ñ.c')),
         runNodeFile(path),
     ])) {
         assert.equal(result.kind, 'terminated', JSON.stringify(result));

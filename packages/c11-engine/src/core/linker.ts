@@ -17,7 +17,7 @@ type SymbolGroup<T> = { key: string; declarations: T[] };
 
 /** Resolve C external and internal identifiers after each source file is parsed independently. */
 export function linkTranslationUnits(units: readonly ParsedProgram[], entry: string): ProgramIR {
-  if (!units.length) failure('INVALID_PROJECT', 'El programa no contiene unidades de traducción.', { file: entry, line: 1, column: 1 });
+  if (!units.length) failure('INVALID_PROJECT', 'The program contains no translation units.', { file: entry, line: 1, column: 1 });
   const unitWork: UnitWork[] = units.map((parsed) => ({ parsed }));
 
   // analyze() also validates file-scope initializers. A declaration-only TU still
@@ -84,7 +84,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
   for (const [key, group] of functionGroups) {
     const conflictingObjects = globalGroups.get(key);
     if (conflictingObjects) {
-      failure('CONFLICTING_TYPES', `«${group.declarations[0].fn.name}» declara tanto un objeto como una función.`, conflictingObjects.declarations[0].global.location);
+      failure('CONFLICTING_TYPES', `«${group.declarations[0].fn.name}» is declared as both an object and a function.`, conflictingObjects.declarations[0].global.location);
     }
   }
 
@@ -98,7 +98,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
         if (binding.globalBinding !== undefined ||
             (binding.storageDuration !== 'static' && binding.storageDuration !== 'thread-local')) continue;
         if (isModifiableInlineStaticObject(binding.type, inlineAggregateContext)) {
-          failure('TYPE_ERROR', 'Una definición inline con enlace externo no puede definir un objeto modificable static o _Thread_local.', binding.location);
+          failure('TYPE_ERROR', 'An inline definition with external linkage cannot define a modifiable static or _Thread_local object.', binding.location);
         }
       }
 
@@ -108,13 +108,13 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
           const referencedKey = localGlobalIds[unit].get(value.globalBinding);
           const target = referencedKey ? globalGroups.get(referencedKey) : undefined;
           if (target?.declarations.some(({ global }) => global.linkage === 'internal')) {
-            failure('TYPE_ERROR', 'Una definición inline con enlace externo no puede referirse a un identificador con enlace interno.', value.location as Location);
+            failure('TYPE_ERROR', 'An inline definition with external linkage cannot refer to an identifier with internal linkage.', value.location as Location);
           }
         }
         if ((value.kind === 'function' || value.kind === 'call') && typeof value.symbolKey === 'string') {
           const referenced = functionGroups.get(value.symbolKey);
           if (referenced?.declarations.some(({ fn: target }) => target.linkage === 'internal')) {
-            failure('TYPE_ERROR', 'Una definición inline con enlace externo no puede referirse a un identificador con enlace interno.', value.location as Location);
+            failure('TYPE_ERROR', 'An inline definition with external linkage cannot refer to an identifier with internal linkage.', value.location as Location);
           }
         }
       });
@@ -127,7 +127,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
     const first = group.declarations[0];
     for (const item of group.declarations.slice(1)) {
       if (!compatibleFunctionDeclarations(first.fn, item.fn, compatibilityContext)) {
-        failure('CONFLICTING_TYPES', `Declaraciones incompatibles de la función «${first.fn.name}».`, item.fn.location);
+        failure('CONFLICTING_TYPES', `Incompatible declarations of function «${first.fn.name}».`, item.fn.location);
       }
       unifyFunctionTypes(first.fn, item.fn, aggregateDefinitions, typeUnions, enumUnions, compatibilityContext);
     }
@@ -138,7 +138,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
       if (!!first.global.isConst !== !!item.global.isConst ||
           !!first.global.threadLocal !== !!item.global.threadLocal ||
           !compatibleType(first.global.type, item.global.type, compatibilityContext)) {
-        failure('CONFLICTING_TYPES', `Declaraciones incompatibles del objeto «${first.global.name}».`, item.global.location);
+        failure('CONFLICTING_TYPES', `Incompatible declarations of object «${first.global.name}».`, item.global.location);
       }
       unifyTypes(first.global.type, item.global.type, aggregateDefinitions, typeUnions, enumUnions, compatibilityContext);
     }
@@ -251,7 +251,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
     const definitions = group.declarations.filter((item) => !!item.fn.body);
     const externalDefinitions = definitions.filter((definition) => isExternalFunctionDefinition(definition, group));
     if (externalDefinitions.length > 1) {
-      failure('REDEFINITION', `La función «${externalDefinitions[1].fn.name}» tiene más de una definición externa.`, externalDefinitions[1].fn.location);
+      failure('REDEFINITION', `Function «${externalDefinitions[1].fn.name}» has more than one external definition.`, externalDefinitions[1].fn.location);
     }
     const externalDefinition = externalDefinitions[0];
     const builtin = definitions.length ? undefined : group.declarations.find((item) => !!item.fn.builtin);
@@ -261,12 +261,12 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
     functionHasExternalDefinition.set(key, !!externalDefinition || !!builtin);
     if (!selected) {
       const reference = functionRefs.get(key);
-      if (reference) failure('UNDEFINED_FUNCTION', `La función «${group.declarations[0].fn.name}» no tiene definición en el programa.`, reference);
+      if (reference) failure('UNDEFINED_FUNCTION', `Function «${group.declarations[0].fn.name}» has no definition in the program.`, reference);
       continue;
     }
     const reference = functionRefs.get(key);
     if (reference && !externalDefinition && !builtin) {
-      failure('UNDEFINED_FUNCTION', `La función «${group.declarations[0].fn.name}» no tiene una definición externa en el programa.`, reference);
+      failure('UNDEFINED_FUNCTION', `Function «${group.declarations[0].fn.name}» has no external definition in the program.`, reference);
     }
     const index = functions.length;
     functions.push({ ...selected.fn, noreturn: group.declarations.some((item) => !!item.fn.noreturn) });
@@ -277,17 +277,17 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
   const globals: GlobalObject[] = [];
   for (const [key, group] of globalGroups) {
     const definitions = group.declarations.filter((item) => !!item.global.initializer || !!item.global.tentative);
-    if (definitions.length > 1) failure('REDEFINITION', `El objeto «${definitions[1].global.name}» tiene más de una definición externa.`, definitions[1].global.location);
+    if (definitions.length > 1) failure('REDEFINITION', `Object «${definitions[1].global.name}» has more than one external definition.`, definitions[1].global.location);
     const selected = definitions[0];
     if (!selected) {
       const reference = globalRefs.get(key);
-      if (reference) failure('UNDEFINED_OBJECT', `El objeto externo «${group.declarations[0].global.name}» no tiene definición en el programa.`, reference);
+      if (reference) failure('UNDEFINED_OBJECT', `External object «${group.declarations[0].global.name}» has no definition in the program.`, reference);
       continue;
     }
     let combinedType = selected.global.type;
     for (const declaration of group.declarations) {
       const composite = compositeType(combinedType, declaration.global.type, compatibilityContext);
-      if (!composite) failure('CONFLICTING_TYPES', `Declaraciones incompatibles del objeto «${selected.global.name}».`, declaration.global.location);
+      if (!composite) failure('CONFLICTING_TYPES', `Incompatible declarations of object «${selected.global.name}».`, declaration.global.location);
       // The composite can be created after the parsed IR has been rewritten.
       // Canonicalize it too, so an aggregate selected from a later TU cannot
       // retain an ID that TypeUnions already folded into another definition.
@@ -331,7 +331,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
   const mainIndex = functionIndexByKey.get(mainKey);
   if (mainIndex === undefined || !functionHasExternalDefinition.get(mainKey)) {
     const at = externalFunctions[0]?.fn.location ?? { file: entry, line: 1, column: 1 };
-    failure('MISSING_MAIN', 'Se requiere una definición externa de main.', at);
+    failure('MISSING_MAIN', 'An external definition of main is required.', at);
   }
   const main = functions[mainIndex];
   const mainReturnType = unqualifiedType(main.returnType);
@@ -344,7 +344,7 @@ export function linkTranslationUnits(units: readonly ParsedProgram[], entry: str
   const validArgv = mainReturnType === 'int' && main.parameters.length === 2 && unqualifiedType(main.parameters[0].type) === 'int' &&
     !!mainArgvPointer && !!mainArgvBase && typeof mainArgvBase !== 'string' && mainArgvBase.kind === 'pointer' &&
     mainArgvCharPointer === 'char' && !main.variadic;
-  if (!validNoArgs && !validArgv) failure('UNSUPPORTED_FEATURE', 'P4 admite int main(void) o int main(int, char **).', main.location);
+  if (!validNoArgs && !validArgv) failure('UNSUPPORTED_FEATURE', 'P4 supports int main(void) or int main(int, char **).', main.location);
 
   return { functions, globals, aggregates, enums, mainIndex, entry, translationUnit: entry, sourceChars: 0, tokenCount: 0 };
 }

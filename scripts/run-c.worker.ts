@@ -64,7 +64,7 @@ port.on('message', (request: RunCliWorkerRequest) => {
 
 async function start(): Promise<void> {
   if (typeof filePath !== 'string' || filePath.length === 0) {
-    fail('Se requiere una ruta de archivo.');
+    fail('A file path is required.');
     return;
   }
 

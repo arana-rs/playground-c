@@ -74,7 +74,7 @@ function runProjectStarted(
     });
     const cancellationDiagnostic = (): Diagnostic => ({
             code: 'CANCELLED',
-            message: 'La ejecución se canceló antes de comenzar la etapa.',
+            message: 'Execution was cancelled before the stage started.',
             file: name,
             line: 1,
             column: 1,
@@ -118,7 +118,7 @@ export async function runRead(
         const engineMetrics = emptyEngineMetrics();
         return {
             kind: 'cancelled', stage: 'read', diagnostics: [{
-                code: 'CANCELLED', message: 'La lectura se canceló antes de comenzar.', file: name, line: 1, column: 1,
+                code: 'CANCELLED', message: 'Reading was cancelled before it started.', file: name, line: 1, column: 1,
             }],
             metrics: { ...engineMetrics, readMs: 0, totalMs: performance.now() - startedAt },
         };
@@ -133,14 +133,14 @@ export async function runRead(
         if (options.signal?.aborted) {
             return {
                 kind: 'cancelled', stage: 'read', diagnostics: [{
-                    code: 'CANCELLED', message: 'La lectura se canceló.', file: name, line: 1, column: 1,
+                    code: 'CANCELLED', message: 'Reading was cancelled.', file: name, line: 1, column: 1,
                 }],
                 metrics: { ...engineMetrics, readMs, totalMs: performance.now() - startedAt },
             };
         }
         return {
             kind: 'read-error',
-            diagnostics: [{ code: 'READ_FAILED', message: `No se pudo leer «${name}»: ${describeError(error)}`, file: name, line: 1, column: 1 }],
+            diagnostics: [{ code: 'READ_FAILED', message: `Could not read «${name}»: ${describeError(error)}`, file: name, line: 1, column: 1 }],
             metrics: { ...engineMetrics, readMs, totalMs: performance.now() - startedAt },
         };
     }

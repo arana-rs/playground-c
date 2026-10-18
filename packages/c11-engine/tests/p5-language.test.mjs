@@ -37,10 +37,10 @@ function pauseBeforeLine(session, targetLine, maxSteps = 2_000) {
     const progress = session.resume();
     if (progress.kind !== 'paused' || progress.location.line === targetLine) return progress;
   }
-  assert.fail(`La sesión no alcanzó la línea ${targetLine}.`);
+  assert.fail(`The session did not reach line ${targetLine}.`);
 }
 
-test('CAPABILITIES publica el subconjunto real de P5 sin prometer C11 completo ni la biblioteca', () => {
+test('CAPABILITIES publishes the actual P5 subset without claiming full C11 or the full library', () => {
   assert.equal(CAPABILITIES.phase, 'P5');
   assert.equal(CAPABILITIES.completeC11, false);
   assert.equal(CAPABILITIES.library, 'partial');
@@ -68,7 +68,7 @@ test('CAPABILITIES publica el subconjunto real de P5 sin prometer C11 completo n
   assert.ok(Object.isFrozen(CAPABILITIES));
 });
 
-test('P5 acepta las nueve familias implementadas con alias, conversiones y layout del perfil', async (t) => {
+test('P5 accepts the nine implemented families with aliases, conversions and profile layout', async (t) => {
   for (const name of [
     'generic-selection.c',
     'generic-lvalue.c',
@@ -92,7 +92,7 @@ test('P5 acepta las nueve familias implementadas con alias, conversiones y layou
   }
 });
 
-test('diagnostica restricciones de bitfields, FAM, qualifiers, generic, alignment y typedef', async (t) => {
+test('diagnoses bitfield, FAM, qualifier, generic, alignment and typedef constraints', async (t) => {
   const cases = [
     'struct Bad { unsigned int too_wide : 33; }; int main(void) { return 0; }',
     'struct Bad { int named_zero : 0; }; int main(void) { return 0; }',
@@ -145,11 +145,11 @@ test('diagnostica restricciones de bitfields, FAM, qualifiers, generic, alignmen
     'int main(void) { _Alignas(0) register int value = 1; return value; }',
   ];
   for (const [index, source] of cases.entries()) {
-    await t.test(`restricción ${index + 1}`, () => rejects(source));
+    await t.test(`constraint ${index + 1}`, () => rejects(source));
   }
 });
 
-test('conserva los rechazos P6 de VLA, atomics, complex y biblioteca de threads', async (t) => {
+test('preserves the P6 rejections for VLA, atomics, complex and the threads library', async (t) => {
   const cases = [
     'int main(void) { int count = 2; int values[count]; return sizeof values; }',
     '#include <stdatomic.h>\nint main(void) { atomic_int value = 0; return atomic_load(&value); }',
@@ -161,7 +161,7 @@ test('conserva los rechazos P6 de VLA, atomics, complex y biblioteca de threads'
   }
 });
 
-test('un cast elimina el calificador del puntero, pero respeta si el objeto original es const', () => {
+test('a cast removes the pointer qualifier while respecting whether the original object is const', () => {
   run('int main(void) { int value = 1; const int *view = &value; *(int *)view = 7; return value == 7; }', 1);
   const prepared = compile('int main(void) { const int value = 1; const int *view = &value; *(int *)view = 7; return value; }');
   const result = execute(prepared);
@@ -169,7 +169,7 @@ test('un cast elimina el calificador del puntero, pero respeta si el objeto orig
   assert.equal(result.diagnostics[0].code, 'CONST_OBJECT_MODIFICATION');
 });
 
-test('inline externo requiere una definición externa única y respeta sus restricciones C11', () => {
+test('external inline requires one external definition and respects its C11 constraints', () => {
   const files = [
     { name: 'main.c', source: 'int value(void); int main(void) { return value() == 1; }' },
     { name: 'first.c', source: 'int value(void) { return 1; }' },
@@ -215,7 +215,7 @@ test('inline externo requiere una definición externa única y respeta sus restr
   rejects('static int internal_value; inline int invalid(void) { return internal_value; } int main(void) { return invalid(); }');
 });
 
-test('enlaza extern de bloque y completa un array externo entre unidades', () => {
+test('links block-scope extern and completes an external array across translation units', () => {
   for (const [entry, names] of [
     ['block-extern/main.c', ['block-extern/main.c', 'block-extern/definition.c']],
     ['linkage-array/main.c', ['linkage-array/main.c', 'linkage-array/definition.c']],
@@ -228,7 +228,7 @@ test('enlaza extern de bloque y completa un array externo entre unidades', () =>
   }
 });
 
-test('exige el calificador _Thread_local en todas las declaraciones externas de un objeto', () => {
+test('requires the _Thread_local qualifier on every external declaration of an object', () => {
   const validFiles = ['thread-linkage/main.c', 'thread-linkage/definition.c'];
   const valid = prepare(projectFromFiles(validFiles[0], validFiles));
   assert.equal(valid.kind, 'prepared', JSON.stringify(valid));
@@ -242,7 +242,7 @@ test('exige el calificador _Thread_local en todas las declaraciones externas de 
   assert.ok(invalid.diagnostics.some(({ code }) => code === 'CONFLICTING_TYPES'));
 });
 
-test('debug DTO serializa bitfields, FAM heap y duraciones TLS sin tipos internos', () => {
+test('debug DTOs serialize bitfields, heap FAMs and TLS durations without internal types', () => {
   const source = sourceFor('debug-layout.c');
   const prepared = prepare(project(source, 'debug-layout.c'));
   assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));
@@ -269,7 +269,7 @@ test('debug DTO serializa bitfields, FAM heap y duraciones TLS sin tipos interno
   assert.deepEqual(namedBits.map(({ bitWidth, bitOffset, storageUnitSize, offset, size }) => [bitWidth, bitOffset, storageUnitSize, offset, size]), [
     [1, 0, 4, 0, 4], [3, 1, 4, 0, 4], [2, 0, 4, 4, 4],
   ]);
-  assert.equal(flags.members.some((member) => member.name === ''), false, 'no se publica el separador unnamed de ancho cero');
+  assert.equal(flags.members.some((member) => member.name === ''), false, 'the zero-width unnamed separator is not published');
   const packet = aggregates.find((aggregate) => aggregate.type.includes('Packet') && aggregate.duration === 'heap');
   assert.ok(packet);
   assert.equal(packet.region, 'heap');
@@ -291,7 +291,7 @@ test('debug DTO serializa bitfields, FAM heap y duraciones TLS sin tipos interno
   for (const value of [staticObjects, arrays, pointers, scalars, aggregates]) assert.deepEqual(structuredClone(value), value);
 });
 
-test('el snapshot FAM limita las celdas con la misma cota que los arrays y cuenta el resto', () => {
+test('FAM snapshots limit cells with the same bound as arrays and count the remainder', () => {
   const source = sourceFor('debug-layout.c');
   const prepared = prepare(project(source, 'debug-layout.c'));
   assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));

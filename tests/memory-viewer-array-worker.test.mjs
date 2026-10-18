@@ -82,7 +82,7 @@ function setupController() {
   return { controller, workers };
 }
 
-test('el Worker transporta arrays por elemento y llega a exit 0 aunque haya placeholders locales', async () => {
+test('the Worker transports arrays by element and exits 0 with local placeholders', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -108,7 +108,7 @@ test('el Worker transporta arrays por elemento y llega a exit 0 aunque haya plac
       }
     }
 
-    assert.ok(terminal, 'la sesión alcanza un estado terminal');
+    assert.ok(terminal, 'the session reaches a terminal state');
     assert.equal(terminal.progress.kind, 'terminated', JSON.stringify(terminal.progress));
     assert.equal(terminal.progress.mainReturn, 0);
     assert.equal(terminal.progress.exitCode, 0);
@@ -124,17 +124,17 @@ test('el Worker transporta arrays por elemento y llega a exit 0 aunque haya plac
       index === 0 || JSON.stringify(values) !== JSON.stringify(snapshots[index - 1]));
 
     const aSnapshots = observations.filter(({ array }) => array.name === 'a').map(({ array }) => array);
-    assert.ok(aSnapshots.length > 4, '`a` conserva snapshots a través de las visitas de línea');
+    assert.ok(aSnapshots.length > 4, '`a` retains snapshots across line visits');
     assert.ok(aSnapshots.every(array => array.status === 'available' && array.length === 4));
     assert.deepEqual(
       compactUnique(findValues('a').map(values => values.join(','))),
       ['10,20,0,0', '11,20,0,0', '11,21,0,0'],
-      'el ejemplo muestra el estado inicial, ++ por índice y asignación por índice en líneas distintas',
+      'the example shows the initial state, ++ by index, and an indexed assignment on separate lines',
     );
     assert.ok(aSnapshots.every(array => array.elements.every(element => element.key === `${array.rootId}:${element.index}`)));
-    assert.equal(new Set(aSnapshots.map(array => array.rootId)).size, 1, 'la raíz conserva identidad en cada línea');
+    assert.equal(new Set(aSnapshots.map(array => array.rootId)).size, 1, 'the root retains its identity on every line');
 
-    const uninitialized = latestByName('sin_inicializar');
+    const uninitialized = latestByName('uninitialized');
     assert.equal(uninitialized.status, 'available');
     assert.deepEqual(
       uninitialized.elements.map(({ initialized, displayValue }) => ({ initialized, displayValue })),
@@ -145,17 +145,17 @@ test('el Worker transporta arrays por elemento y llega a exit 0 aunque haya plac
       ],
     );
 
-    const text = latestByName('texto');
-    assert.deepEqual(text.elements.map(element => element.displayValue), ["'h'", "'o'", "'l'", "'a'", "'\\0'"]);
+    const text = latestByName('text');
+    assert.deepEqual(text.elements.map(element => element.displayValue), ["'c'", "'o'", "'d'", "'e'", "'\\0'"]);
     const raw = latestByName('raw');
     assert.deepEqual(raw.elements.map(element => element.displayValue), ["'a'", "'b'", "'c'"]);
-    assert.equal(raw.length, 3, 'el array raw no inventa una celda NUL');
+    assert.equal(raw.length, 3, 'the raw array does not invent a NUL cell');
 
-    const large = latestByName('grande');
-    assert.equal(large.length, 11, 'el largo conserva el número de celdas reales, incluido el NUL');
+    const large = latestByName('large');
+    assert.equal(large.length, 11, 'the length retains the number of actual cells, including NUL');
     assert.equal(large.status, 'too-many-elements');
     assert.deepEqual(large.elements, []);
-    const matrix = latestByName('matriz');
+    const matrix = latestByName('matrix');
     assert.equal(matrix.status, 'multidimensional');
     assert.deepEqual(matrix.elements, []);
   } finally {
@@ -164,7 +164,7 @@ test('el Worker transporta arrays por elemento y llega a exit 0 aunque haya plac
   }
 });
 
-test('un literal observado de 11 celdas llega como un solo array y no como preview static', async () => {
+test('an observed 11-cell literal arrives as one array and not as a static preview', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -174,7 +174,7 @@ test('un literal observado de 11 celdas llega como un solo array y no como previ
     await import('../src/memory/memory.worker.ts?memory-viewer-overlimit-literal-worker-test');
     scope.onmessage({ data: {
       type: 'debug-start', jobId: 242, fileName: 'main.c',
-      source: 'static int puntos[3] = {3, 6};\nchar *global_text = "abcdefghij";\nint main(void) { return 0; }\n',
+      source: 'static int points[3] = {3, 6};\nchar *global_text = "abcdefghij";\nint main(void) { return 0; }\n',
     } });
     assert.equal(responses[0].type, 'debug-ready');
     assert.equal(responses[0].omittedArrayObjects, 0);
@@ -183,11 +183,11 @@ test('un literal observado de 11 celdas llega como un solo array y no como previ
     assert.equal(literals.length, 1);
     assert.ok(Number.isSafeInteger(literals[0].rootId));
     assert.equal(literals[0].region, 'static');
-    assert.equal(literals[0].length, 11, 'las diez letras más el NUL cuentan para el límite');
+    assert.equal(literals[0].length, 11, 'the ten letters plus NUL count toward the limit');
     assert.equal(literals[0].status, 'too-many-elements');
     assert.deepEqual(literals[0].elements, []);
-    const staticArray = responses[0].arrays.find(array => array.name === 'puntos');
-    assert.ok(staticArray, 'la prueba conserva la cobertura de arrays en Static sin ampliar main.c');
+    const staticArray = responses[0].arrays.find(array => array.name === 'points');
+    assert.ok(staticArray, 'the test retains Static array coverage without extending main.c');
     assert.equal(staticArray.region, 'static');
     assert.equal(staticArray.status, 'available');
     assert.deepEqual(staticArray.elements.map(element => element.displayValue), ['3', '6', '0']);
@@ -198,8 +198,8 @@ test('un literal observado de 11 celdas llega como un solo array y no como previ
     assert.equal(terminal.progress.kind, 'terminated');
     assert.equal(terminal.progress.mainReturn, 0);
     const terminalLiteral = terminal.arrays.find(array => array.origin === 'string-literal');
-    assert.equal(terminalLiteral?.rootId, literals[0].rootId, 'el snapshot conserva la identidad rootId');
-    assert.equal(terminal.arrays.find(array => array.name === 'puntos')?.rootId, staticArray.rootId);
+    assert.equal(terminalLiteral?.rootId, literals[0].rootId, 'the snapshot retains the rootId identity');
+    assert.equal(terminal.arrays.find(array => array.name === 'points')?.rootId, staticArray.rootId);
     assert.ok(terminal.staticObjects.every(object => object.origin !== 'string-literal'));
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
@@ -207,7 +207,7 @@ test('un literal observado de 11 celdas llega como un solo array y no como previ
   }
 });
 
-test('el historial conserva snapshots de arrays inmutables, vuelve con Back/Next y descarta respuestas viejas', () => {
+test('history retains immutable array snapshots, navigates with Back/Next, and discards stale responses', () => {
   const { controller, workers } = setupController();
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
@@ -224,9 +224,9 @@ test('el historial conserva snapshots de arrays inmutables, vuelve con Back/Next
   const sharedRoot = controller.state.arrays[1];
   const originalFirstCell = originalRoot.elements[0];
   assert.equal(originalFirstCell.displayValue, '10');
-  firstArray.elements[0].displayValue = 'mutación externa';
+  firstArray.elements[0].displayValue = 'external mutation';
   firstArray.elements.push({ ...firstArray.elements[0], key: '17:4', index: 4 });
-  assert.equal(controller.state.arrays[0].elements[0].displayValue, '10', 'el estado copia también los elementos anidados');
+  assert.equal(controller.state.arrays[0].elements[0].displayValue, '10', 'the state also copies nested elements');
   assert.equal(controller.state.arrays[0].elements.length, 4);
   assert.ok(Object.isFrozen(controller.state.arrays[0]));
   assert.ok(Object.isFrozen(controller.state.arrays[0].elements));
@@ -239,7 +239,7 @@ test('el historial conserva snapshots de arrays inmutables, vuelve con Back/Next
     heapObjects: [], stackScalars: [], staticObjects: [],
     arrays: [arraySnapshot(17, 'a', ['99', '20', '0', '0'])], omittedArrayObjects: 9,
   });
-  assert.equal(controller.state.arrays[0].elements[0].displayValue, '10', 'un requestId obsoleto no cambia el snapshot seleccionado');
+  assert.equal(controller.state.arrays[0].elements[0].displayValue, '10', 'a stale requestId does not change the selected snapshot');
   assert.equal(controller.state.omittedArrayObjects, 0);
 
   worker.emit({
@@ -250,9 +250,9 @@ test('el historial conserva snapshots de arrays inmutables, vuelve con Back/Next
   const changedRoot = controller.state.arrays[0];
   assert.equal(changedRoot.elements[0].displayValue, '11');
   assert.equal(changedRoot.elements[1].displayValue, originalRoot.elements[1].displayValue);
-  assert.equal(controller.state.arrays[1], sharedRoot, 'una raíz sin cambios mantiene el DTO compartido');
+  assert.equal(controller.state.arrays[1], sharedRoot, 'an unchanged root retains the shared DTO');
   assert.equal(controller.state.omittedArrayObjects, 1);
-  secondArray.elements[0].displayValue = 'mutación posterior';
+  secondArray.elements[0].displayValue = 'later mutation';
   assert.equal(controller.state.arrays[0].elements[0].displayValue, '11');
 
   const sentMessages = worker.messages.length;
@@ -262,8 +262,8 @@ test('el historial conserva snapshots de arrays inmutables, vuelve con Back/Next
   controller.next();
   assert.equal(controller.state.arrays[0].elements[0].displayValue, '11');
   assert.equal(controller.state.omittedArrayObjects, 1);
-  assert.equal(worker.messages.length, sentMessages, 'Back/Next recorre los snapshots guardados sin avanzar otra vez el VM');
-  assert.equal(originalRoot.elements[0].displayValue, '10', 'el snapshot anterior no se modifica al navegar');
+  assert.equal(worker.messages.length, sentMessages, 'Back/Next traverses saved snapshots without advancing the VM again');
+  assert.equal(originalRoot.elements[0].displayValue, '10', 'navigation does not modify the previous snapshot');
 
   controller.start('int main(void) { int a[4]; return 0; }');
   const replacementWorker = workers[1];
@@ -276,11 +276,11 @@ test('el historial conserva snapshots de arrays inmutables, vuelve con Back/Next
     omittedArrayObjects: 0,
   });
   assert.deepEqual(controller.state.arrays[0].elements.map(element => element.displayValue), ['77', '?', '?', '?']);
-  assert.equal(controller.state.stepIndex, 0, 'reutilizar el ID de raíz en otra sesión no restaura historia anterior');
+  assert.equal(controller.state.stepIndex, 0, 'reusing a root ID in another session does not restore old history');
   controller.dispose();
 });
 
-test('las celdas de arrays producen Δ por elemento y las cadenas no vuelven como tarjeta estática duplicada', () => {
+test('array cells produce per-element deltas and strings do not reappear as duplicate static cards', () => {
   const previous = arraySnapshot(23, 'buffer', ['1', '2', '3']);
   const next = arraySnapshot(23, 'buffer', ['1', '2', '4']);
   assert.deepEqual(findMemoryViewerChangedArrayElementKeys([previous], [next]), ['23:2']);
@@ -288,7 +288,7 @@ test('las celdas de arrays producen Δ por elemento y las cadenas no vuelven com
   const pendingBefore = arraySnapshot(24, 'pending', ['?', '0'], { initialized: [false, true] });
   const pendingAfter = arraySnapshot(24, 'pending', ['?', '0'], { initialized: [true, true] });
   assert.deepEqual(findMemoryViewerChangedArrayElementKeys([pendingBefore], [pendingAfter]), ['24:0']);
-  assert.deepEqual(findMemoryViewerChangedArrayElementKeys([next], [previous]), ['23:2'], 'la selección Back detecta el delta en la dirección elegida');
+  assert.deepEqual(findMemoryViewerChangedArrayElementKeys([next], [previous]), ['23:2'], 'Back selection detects the delta in the chosen direction');
 
   const original = {
     ...arraySnapshot(25, 'large', [], { region: 'static' }),
@@ -300,18 +300,18 @@ test('las celdas de arrays producen Δ por elemento y las cadenas no vuelven com
   };
   const cloned = cloneMemoryViewerArraySnapshot(original);
   assert.ok(sameMemoryViewerArraySnapshot(original, cloned));
-  assert.notEqual(original.elements, cloned.elements, 'el clone no comparte el arreglo mutable del Worker');
+  assert.notEqual(original.elements, cloned.elements, 'the clone does not share the Worker mutable array');
   assert.ok(Object.isFrozen(cloned));
   assert.ok(Object.isFrozen(cloned.elements));
 
   const staticObjects = [
-    { id: 25, origin: 'string-literal', displayValue: 'preview que duplica large' },
-    { id: 26, origin: 'string-literal', displayValue: 'literal omitido por maxObjects' },
+    { id: 25, origin: 'string-literal', displayValue: 'preview that duplicates large' },
+    { id: 26, origin: 'string-literal', displayValue: 'literal omitted by maxObjects' },
     { id: 27, origin: 'variable', displayValue: '42' },
   ];
   assert.deepEqual(
     filterMemoryViewerStaticScalars(staticObjects, [cloned]).map(({ id }) => id),
     [27],
-    'las cadenas permanecen representadas solo por sus raíces de array, también si falta su raíz por presupuesto',
+    'strings remain represented only by their array roots, even when the root is omitted by the budget',
   );
 });

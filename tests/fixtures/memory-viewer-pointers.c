@@ -2,12 +2,12 @@
 
 int main(void) {
     int n = 10;
-    int otra = 30;
-    int *pendiente;
+    int other = 30;
+    int *uninitialized;
     int *p = &n;
     *p = 20;
-    int lectura = *p;
-    p = &otra;
+    int read_value = *p;
+    p = &other;
     *p = 40;
     p = NULL;
     return 0;

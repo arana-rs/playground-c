@@ -172,7 +172,7 @@ body,
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   margin-left: auto;
 }
 
@@ -203,6 +203,35 @@ body,
   outline-offset: 2px;
 }
 
+.header .language-switch-button {
+  --foreground: var(--fg);
+  --text-secondary: var(--dim);
+  --surface-muted: var(--bg3);
+  --space-2: 5px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --control-height-sm: 20px;
+  --radius-control: 2px;
+  --text-sm: 10px;
+  --leading-body: 1;
+  --shadow-resting: none;
+  --duration-instant: 120ms;
+  --duration-fast: 160ms;
+  --ease-standard: cubic-bezier(.22, 1, .36, 1);
+  width: 30px;
+  min-width: 30px;
+  height: 20px;
+  padding: 0 2px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .01em;
+}
+
+.header .language-switch-button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .github-link {
   display: inline-flex;
   width: 20px;
@@ -227,6 +256,7 @@ body,
 
 @media (hover: hover) and (pointer: fine) {
   .header .theme-toggle-button:hover,
+  .header .language-switch-button:hover,
   .github-link:hover,
   .footer-commit:hover {
     color: var(--fg);

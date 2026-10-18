@@ -3,11 +3,12 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode, UIEvent as ReactUI
 import { Button } from './arc/button/button.tsx';
 import { getPlaygroundShortcut } from '../keyboardShortcuts.ts';
 import type { ConsoleOutputSegment, ConsoleStatusTone } from '../execution/useRunner.ts';
+import { useI18n } from '../i18n.tsx';
 
 interface ConsolePanelProps {
   readonly id?: string;
   readonly className?: string;
-  readonly label?: string;
+  readonly kind?: 'console' | 'debug';
   readonly ariaLabel?: string;
   readonly ariaKeyshortcuts?: string;
   readonly hidden?: boolean;
@@ -30,8 +31,8 @@ interface ConsolePanelProps {
 export const ConsolePanel = forwardRef<HTMLElement, ConsolePanelProps>(function ConsolePanel({
   id,
   className,
-  label = 'console',
-  ariaLabel = 'Consola',
+  kind = 'console',
+  ariaLabel,
   ariaKeyshortcuts,
   hidden = false,
   visible = true,
@@ -49,6 +50,7 @@ export const ConsolePanel = forwardRef<HTMLElement, ConsolePanelProps>(function 
   onInputFocus,
   onInputBlur,
 }, forwardedRef) {
+  const { t } = useI18n();
   const outputRef = useRef<HTMLPreElement>(null);
   const stdinRef = useRef<HTMLInputElement>(null);
   const previousInputRequest = useRef<number | null>(null);
@@ -99,14 +101,14 @@ export const ConsolePanel = forwardRef<HTMLElement, ConsolePanelProps>(function 
       ref={forwardedRef}
       id={id}
       className={`console${className ? ` ${className}` : ''}${inputRequestId !== null ? ' console-waiting' : ''}`}
-      aria-label={ariaLabel}
+      aria-label={ariaLabel ?? t(kind === 'debug' ? 'console.debugAriaLabel' : 'console.ariaLabel')}
       aria-keyshortcuts={ariaKeyshortcuts}
       aria-hidden={hidden || undefined}
       hidden={hidden}
       tabIndex={-1}
     >
       <div className="console-label">
-        <span>{label}</span>
+        <span>{t(kind === 'debug' ? 'console.debugLabel' : 'console.label')}</span>
         <div className="console-actions">
           {inputRequestId !== null && (
             <Button
@@ -114,7 +116,7 @@ export const ConsolePanel = forwardRef<HTMLElement, ConsolePanelProps>(function 
               variant="ghost"
               size="sm"
               type="button"
-              aria-label="Enviar fin de entrada (EOF)"
+              aria-label={t('console.sendEof')}
               onClick={onSendStdinEOF}
             >
               EOF
@@ -126,10 +128,10 @@ export const ConsolePanel = forwardRef<HTMLElement, ConsolePanelProps>(function 
               variant="ghost"
               size="sm"
               type="button"
-              aria-label="Detener depuración"
+              aria-label={t('console.stopDebugging')}
               onClick={onStop}
             >
-              Stop
+              {t('run.stop')}
             </Button>
           )}
           {actions}
@@ -146,13 +148,13 @@ export const ConsolePanel = forwardRef<HTMLElement, ConsolePanelProps>(function 
           <input
             ref={stdinRef}
             className="console-stdin"
-            aria-label="Entrada para el programa C"
-            aria-description="Escribe una línea y pulsa Enter para enviarla."
+            aria-label={t('console.stdinLabel')}
+            aria-description={t('console.stdinDescription')}
             aria-keyshortcuts="Enter"
             autoComplete="off"
             autoCapitalize="off"
             spellCheck={false}
-            placeholder="..."
+            placeholder={t('console.stdinPlaceholder')}
             value={stdinDraft}
             onChange={event => setStdinDraft(event.currentTarget.value)}
             onKeyDown={onStdinKeyDown}

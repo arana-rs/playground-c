@@ -1,47 +1,47 @@
-# UI condensada propia
+# Project Compact UI Style Guide
 
-Esta guía define la dirección visual del playground y del Memory Viewer. Describe la interfaz del proyecto; las implementaciones y sus valores vigentes siguen en los componentes y en `../src/style.css`. Antes de cambiar un estilo, reutiliza sus tokens y patrones existentes. No mantengas aquí una segunda copia de la paleta ni de las medidas CSS.
+This guide defines the visual direction for the playground and Memory Viewer. It describes the project interface; implementations and their current values live in the components and `../src/style.css`. Before changing a style, reuse the existing tokens and patterns. Do not keep a second copy of the palette or CSS measurements here.
 
-La interfaz es compacta para dejar espacio al código, la consola y las regiones de memoria. Usa superficies sobrias, separadores finos y radios pequeños. Reserva el acento para foco, selección, ejecución y acciones. La jerarquía debe venir del orden, el peso tipográfico y el contraste, sin marcos o sombras decorativas repetidos.
+The interface stays compact to leave room for code, the console, and memory regions. Use restrained surfaces, fine dividers, and small corner radii. Reserve the accent for focus, selection, execution, and actions. Establish hierarchy through order, type weight, and contrast, without repeated decorative borders or shadows.
 
-## Tokens y temas
+## Tokens and themes
 
-`../src/style.css` es la fuente única de los tokens visuales compartidos y sus valores por tema. Usa las variables existentes según su función: superficies (`--bg`, `--bg2`, `--bg3`, `--bg4`, `--chrome`), texto (`--fg`, `--dim`, `--faint`), divisores (`--line`), interacción (`--accent`, `--accent-fg`, `--selection`), sintaxis (`--syntax-*`), estados (`--status-*`) y memoria (`--memory-*`). Si una necesidad visual nueva encaja en uno de esos roles, reutiliza ese token en vez de crear un alias o una paleta local paralela. Mantén las variables específicas de componentes acotadas a su componente.
+`../src/style.css` is the single source of truth for shared visual tokens and their theme values. Use existing variables according to their role: surfaces (`--bg`, `--bg2`, `--bg3`, `--bg4`, `--chrome`), text (`--fg`, `--dim`, `--faint`), dividers (`--line`), interaction (`--accent`, `--accent-fg`, `--selection`), syntax (`--syntax-*`), status (`--status-*`), and memory (`--memory-*`). If a new visual need fits one of these roles, reuse that token instead of creating an alias or a parallel local palette. Keep component-specific variables scoped to their component.
 
-La aplicación admite `github-dark` y `github-light`, seleccionables desde el control de tema y guardados en `localStorage` con la clave `c-playground-color-theme`. Se aplican mediante `data-theme`; si no hay una preferencia válida o el almacenamiento no está disponible, se usa GitHub Dark. Conserva la sintaxis correspondiente a cada tema con los mismos roles `--syntax-*`; no fijes colores de sintaxis directamente en los componentes.
+The application supports `github-dark` and `github-light`, selectable from the theme control and saved in `localStorage` under the key `c-playground-color-theme`. They are applied through `data-theme`; if there is no valid preference or storage is unavailable, GitHub Dark is used. Preserve the syntax colors for each theme through the same `--syntax-*` roles; do not hard-code syntax colors in components.
 
-## Densidad, tipografía y estructura
+## Density, typography, and structure
 
-La interfaz usa la pila de sistema `--ui` y reserva `--mono` para código, salida, direcciones y valores. El tamaño base actual es 13 px. El editor usa 13,5 px con interlineado de 21 px y tabulación de cuatro espacios; la consola usa 12,5/18 px. Estos valores concretos se mantienen en CSS, que es la referencia al ajustarlos.
+The interface uses the system `--ui` stack and reserves `--mono` for code, output, addresses, and values. The current base size is 13 px. The editor uses 13.5 px with a 21 px line height and four-space tabs; the console uses 12.5/18 px. These specific values live in CSS, which is the reference when adjusting them.
 
-Mantén compactos el encabezado, la pestaña del archivo, los controles y las cabeceras de sección. El editor y los resultados ocupan el área de trabajo disponible; separadores finos organizan el encabezado, las pestañas, la consola y las regiones de memoria. El tamaño y la disposición pueden responder al viewport, teclado y redimensionamiento de la consola, conservando el contenido útil y los controles accesibles.
+Keep the header, file tab, controls, and section headers compact. The editor and results use the available workspace; fine dividers organize the header, tabs, console, and memory regions. Sizing and layout may respond to the viewport, keyboard, and console resizing while preserving useful content and accessible controls.
 
-Los paneles usan títulos breves y discretos; sus cabeceras distinguen el chrome del contenido sin competir con el código. La pestaña activa, el estado actual y la línea de ejecución se reconocen con acento o selección. Los estados también deben tener texto o una señal adicional al color. Conserva el foco visible en controles de teclado.
+Panels use short, understated titles; their headers distinguish the chrome from the content without competing with the code. Use the accent or selection color to identify the active tab, current state, and execution line. States must also have text or another cue in addition to color. Keep keyboard focus visible on controls.
 
-## Controles y ejecución
+## Controls and execution
 
-Reutiliza el `Button` de Arc para las acciones y su integración existente con la paleta compacta. Run y Stop conservan el tamaño y peso del chrome. Durante una ejecución, Run cambia a Stop y Stop sigue habilitado para cancelar. El mismo control de cancelación permanece disponible en la depuración cuando está activa.
+Reuse Arc's `Button` for actions and its existing integration with the compact palette. Run and Stop retain the size and weight of the chrome. During execution, Run changes to Stop, and Stop remains enabled for cancellation. The same cancellation control stays available while debugging is active.
 
-El selector de tema sigue siendo compacto y accesible. Los controles de modo, I/O, historial y cierre del Memory Viewer mantienen sus etiquetas, estados de foco y disponibilidad contextual.
+Keep the theme selector compact and accessible. The Memory Viewer mode, I/O, history, and close controls retain their labels, focus states, and contextual availability.
 
 ## Editor
 
-El editor da prioridad al texto de C, con números de línea y diagnósticos alineados en un gutter discreto. La línea de ejecución puede resaltarse sin ocultar el texto ni reemplazar el foco de edición. La sintaxis usa el escáner compartido del proyecto y los roles de color del tema activo.
+The editor prioritizes C text, with line numbers and diagnostics aligned in a quiet gutter. The execution line may be highlighted without obscuring text or taking focus away from editing. Syntax highlighting uses the project's shared scanner and the color roles of the active theme.
 
-Los cambios de presentación, las actualizaciones de estado y Run deben conservar las ediciones del usuario. Mantén selección y cursor, deshacer y rehacer, sangría, pares de delimitadores, composición IME y desplazamiento. El ejemplo inicial es `../src/examples/main.c`; no lo dupliques en la guía ni en componentes.
+Presentation changes, state updates, and Run must preserve the user's edits. Preserve selection and cursor position, undo and redo, indentation, delimiter pairs, IME composition, and scrolling. The initial example is `../src/examples/main.c`; do not duplicate it in this guide or in components.
 
-## Consola
+## Console
 
-La consola queda debajo del editor, separada por una línea fina y con divisor redimensionable. Su cabecera muestra el estado en texto y con una señal visual. La salida usa tipografía mono, conserva stdout y stderr y etiqueta stderr en el texto. Los mensajes del sistema, avisos y errores usan los roles de color existentes. Conserva la entrada interactiva, EOF y Stop cuando correspondan; no elimines salida parcial ni diagnósticos al mostrar un resultado.
+The console sits below the editor, separated by a fine line and a resizable divider. Its header shows the state in text and with a visual cue. Output uses monospace type, preserves stdout and stderr, and labels stderr in the text. System messages, warnings, and errors use the existing color roles. Preserve interactive input, EOF, and Stop where applicable; do not remove partial output or diagnostics when showing a result.
 
 ## Memory Viewer
 
-Las regiones se presentan en el orden Static → Stack → Heap. Static y Heap mantienen sus listas y Stack crece horizontalmente hacia la derecha. Los scopes aparecen al entrar en ellos y avanzan de izquierda a derecha desde el más antiguo al más reciente. El scope actual usa el amarillo de `--mark-active`; los scopes antecesores activos usan un tono más pálido. Los scopes que salen pueden conservar su señal temporal mientras se muestran sus objetos eliminados.
+Regions appear in the order Static → Stack → Heap. Static and Heap keep their lists, and Stack grows horizontally to the right. Scopes appear when entered and progress from left to right, oldest to newest. The current scope uses the yellow from `--mark-active`; active ancestor scopes use a paler shade. Scopes that exit may retain a temporary indicator while their removed objects are shown.
 
-Oculta solo el marcador visual del scope raíz de `main` que sirve como punto de entrada. Conserva sus variables, punteros, arrays y structs; conserva también los marcadores y datos de sus scopes anidados y de las demás funciones. La identidad accesible del scope raíz debe seguir disponible aunque no se dibuje su marcador.
+Hide only the visual marker for the root scope of `main`, which serves as the entry point. Preserve its variables, pointers, arrays, and structs; also preserve markers and data for its nested scopes and for other functions. The root scope's accessible identity must remain available even when its marker is not drawn.
 
-El visor mantiene los modos Minimal, Normal y Debug y el historial Anterior/Siguiente. Direcciones y valores usan mono; metadatos mantienen menor jerarquía. Las señales de cambio, destino de punteros, inicialización y salida de scope deben seguir legibles con foco y sin depender solo del color. El tamaño de las celdas y los límites de inspección siguen siendo los definidos por el código y la API del motor.
+The viewer retains Minimal, Normal, and Debug modes and Previous/Next history. Addresses and values use monospace type; metadata has lower visual priority. Change, pointer target, initialization, and scope-exit cues must remain clearly legible, including when focused, and must not rely on color alone. Cell sizes and inspection limits remain those defined by the code and engine API.
 
-## Referencias
+## References
 
-La guía propia sustituye al registro histórico de px0, que ya no se utiliza.
+This guide replaces the historical px0 record, which is no longer used.

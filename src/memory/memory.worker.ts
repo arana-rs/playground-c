@@ -230,7 +230,7 @@ function begin(command: Extract<MemoryViewerCommand, { type: 'debug-start' }>) {
     run.busy = true;
     resume(run, null);
   } catch (error) {
-    startupError(command.jobId, null, 'error', error instanceof Error ? error.message : 'No se pudo iniciar el visor de memoria.');
+    startupError(command.jobId, null, 'error', error instanceof Error ? error.message : 'Could not start the Memory Viewer.');
   }
 }
 
@@ -249,7 +249,7 @@ function step(command: Extract<MemoryViewerCommand, { type: 'debug-step' }>) {
     run.activeStepRequestId = null;
     post({
       type: 'debug-error', jobId: command.jobId, requestId: command.requestId, status: 'error',
-      message: error instanceof Error ? error.message : 'El motor no pudo completar el paso.',
+      message: error instanceof Error ? error.message : 'The engine could not complete the step.',
     });
   } finally {
     run.busy = false;
@@ -276,7 +276,7 @@ function receiveInput(command: Extract<MemoryViewerCommand, { type: 'debug-stdin
     run.activeStepRequestId = null;
     post({
       type: 'debug-error', jobId: command.jobId, requestId: command.requestId, status: 'error',
-      message: error instanceof Error ? error.message : 'El motor no pudo recibir la entrada.',
+      message: error instanceof Error ? error.message : 'The engine could not receive input.',
     });
   }
 }

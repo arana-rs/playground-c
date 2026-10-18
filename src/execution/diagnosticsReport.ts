@@ -61,7 +61,7 @@ export function formatTimeoutDiagnosticsReport(
           maxDepth: report.budgets.execute.maxDepth,
         },
       },
-      timingDescription: 'Duraciones observadas de reloj local en milisegundos. Algunas etapas pueden solaparse; no son tiempo de CPU y no deben sumarse.',
+      timingDescription: 'Observed local wall-clock durations in milliseconds. Stages may overlap; these are not CPU time and should not be added together.',
       stages: {
         workerCreateMs: report.stages.workerCreateMs,
         runPostMessageMs: report.stages.runPostMessageMs,

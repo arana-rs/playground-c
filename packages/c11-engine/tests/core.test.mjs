@@ -76,7 +76,7 @@ test('nested block scopes allow shadowing, release memory and preserve outer ass
 test('comments and CRLF preserve original file, line and column', () => {
   terminated('/* first\n second */ int x = 6; // hello\r\n return x * 7;', 42);
   const diagnostic = preparationError('int main(void) {\r\n  /* ignored */\r\n  return missing;\r\n}', 'UNKNOWN_IDENTIFIER');
-  assert.deepEqual(diagnostic, { code: 'UNKNOWN_IDENTIFIER', message: 'La variable «missing» no está declarada en este ámbito.', file: 'example.c', line: 3, column: 10 });
+  assert.deepEqual(diagnostic, { code: 'UNKNOWN_IDENTIFIER', message: 'Variable «missing» is not declared in this scope.', file: 'example.c', line: 3, column: 10 });
   const syntax = preparationError('int main(void) {\r\n return 1\r\n}', 'SYNTAX_ERROR');
   assert.equal(syntax.line, 3);
   assert.equal(syntax.column, 1);

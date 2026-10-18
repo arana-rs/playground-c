@@ -4,8 +4,8 @@ int main(void) {
     p++;
     *p = 99;
 
-    char texto[] = "hola";
-    char *q = texto;
+    char text[] = "code";
+    char *q = text;
     q++;
     q++;
     q++;

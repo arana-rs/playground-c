@@ -101,11 +101,11 @@ const fixtures = [
 for (const compiler of ['gcc', 'clang']) {
   const probe = spawnSync(compiler, ['--version'], { encoding: 'utf8', timeout: 5_000 });
   const skip = process.platform !== 'linux'
-    ? 'Los oráculos fijan el ABI x86-64 Linux LP64.'
-    : probe.error?.code === 'ENOENT' ? `${compiler} no está instalado; las pruebas del intérprete siguen disponibles.`
-      : probe.error?.code === 'EPERM' ? 'El sandbox impide crear procesos hijos; los oráculos nativos se ejecutan en CI.' : false;
+    ? 'The oracles target the x86-64 Linux LP64 ABI.'
+    : probe.error?.code === 'ENOENT' ? `${compiler} is not installed; interpreter tests remain available.`
+      : probe.error?.code === 'EPERM' ? 'The sandbox prevents child processes; native oracles run in CI.' : false;
 
-  test(`P5 coincide con ${compiler} para fixtures C11 definidos y finitos`, { skip }, async (t) => {
+  test(`P5 matches ${compiler} for defined, finite C11 fixtures`, { skip }, async (t) => {
     assert.ifError(probe.error);
     assert.equal(probe.status, 0, probe.stderr);
     const temporaryRoot = mkdtempSync(join(tmpdir(), 'c11-p5-oracle-'));

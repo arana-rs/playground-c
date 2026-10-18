@@ -25,18 +25,18 @@ function invalid(context: LibraryRuntimeContext, message: string, at: Location):
 }
 
 function argCount(args: readonly CValue[], min: number, max: number, name: string, context: LibraryRuntimeContext, at: Location): void {
-  if (args.length < min || args.length > max) invalid(context, `${name} recibió una cantidad de argumentos no válida.`, at);
+  if (args.length < min || args.length > max) invalid(context, `${name} received an invalid number of arguments.`, at);
 }
 
 function integerValue(value: CValue, at: Location, context: LibraryRuntimeContext): bigint {
-  if (typeof value.value !== 'bigint') invalid(context, 'Se esperaba un argumento entero.', at);
+  if (typeof value.value !== 'bigint') invalid(context, 'Expected an integer argument.', at);
   return value.value;
 }
 
 function pointerValue(value: CValue, at: Location, context: LibraryRuntimeContext, allowNull = false): CValue {
   if (value.value === null && allowNull) return value;
   if (typeof value.value !== 'object' || value.value === null || value.value.kind !== 'object-pointer') {
-    invalid(context, 'Se esperaba un puntero a objeto.', at);
+    invalid(context, 'Expected an object pointer.', at);
   }
   return value;
 }
@@ -53,7 +53,7 @@ function returnPointer(pointer: CValue, resultType?: CType): CValue {
 function returnVoid(): CValue { return { type: 'void', value: 0n }; }
 
 function cString(value: CValue, at: Location, context: LibraryRuntimeContext): Uint8Array {
-  if (value.value === null) invalid(context, 'No se puede leer una cadena desde un puntero nulo.', at);
+  if (value.value === null) invalid(context, 'Cannot read a string from a null pointer.', at);
   return context.readCString(value, at);
 }
 
@@ -205,7 +205,7 @@ export function dispatchLibraryBuiltin(
     const expression = decodeUtf8(cString(args[0], at, context));
     const file = decodeUtf8(cString(args[1], at, context));
     const line = integerValue(args[2], at, context);
-    return context.fail('ASSERTION_FAILED', `Falló assert(${expression}) en ${file}:${line}.`, at);
+    return context.fail('ASSERTION_FAILED', `assert(${expression}) failed at ${file}:${line}.`, at);
   }
   if (name.startsWith('is') && ['isalnum', 'isalpha', 'isblank', 'iscntrl', 'isdigit', 'isgraph', 'islower', 'isprint', 'ispunct', 'isspace', 'isupper', 'isxdigit'].includes(name) || name === 'tolower' || name === 'toupper') {
     argCount(args, 1, 1, name, context, at);
@@ -334,12 +334,12 @@ export function dispatchLibraryBuiltin(
     argCount(args, 2, 2, name, context, at);
     const numerator = integerValue(args[0], at, context);
     const denominator = integerValue(args[1], at, context);
-    if (denominator === 0n) return context.fail('DIVISION_BY_ZERO', 'imaxdiv no puede dividir entre cero.', at);
+    if (denominator === 0n) return context.fail('DIVISION_BY_ZERO', 'imaxdiv cannot divide by zero.', at);
     if (numerator === -(1n << 63n) && denominator === -1n) {
-      return context.fail('SIGNED_OVERFLOW', 'El cociente de imaxdiv excede intmax_t.', at);
+      return context.fail('SIGNED_OVERFLOW', 'imaxdiv quotient exceeds intmax_t.', at);
     }
     if (!resultType || typeof resultType !== 'object' || resultType.kind !== 'aggregate') {
-      return context.fail('ENGINE_INTERNAL_ERROR', 'imaxdiv necesita su tipo agregado de retorno.', at);
+      return context.fail('ENGINE_INTERNAL_ERROR', 'imaxdiv requires its aggregate return type.', at);
     }
     const value: AggregateValue = {
       kind: 'aggregate-value',
@@ -388,7 +388,7 @@ export function dispatchLibraryBuiltin(
 
 function checkedSize(value: CValue, name: string, context: LibraryRuntimeContext, at: Location): number {
   const amount = integerValue(value, at, context);
-  if (amount < 0n || amount > BigInt(Number.MAX_SAFE_INTEGER)) invalid(context, `${name} recibió un tamaño fuera del rango seguro.`, at);
+  if (amount < 0n || amount > BigInt(Number.MAX_SAFE_INTEGER)) invalid(context, `${name} received a size outside the safe range.`, at);
   return Number(amount);
 }
 
@@ -510,7 +510,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
   let total = 0;
   const pieces: Uint8Array[] = [];
   const reserve = (count: number): void => {
-    if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(total + count)) invalid(context, 'El resultado de formato excede el rango seguro.', at);
+    if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(total + count)) invalid(context, 'Formatted output exceeds the safe range.', at);
     context.preflightOutputBytes(total + count, at);
   };
   const append = (bytes: Uint8Array): void => {
@@ -519,7 +519,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
   };
   const take = (): CValue => {
     const value = args[argumentIndex++];
-    if (!value) invalid(context, 'La cadena de formato requiere más argumentos.', at);
+    if (!value) invalid(context, 'The format string requires more arguments.', at);
     return value;
   };
   const takeInteger = (): bigint => integerValue(take(), at, context);
@@ -555,19 +555,19 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
     let length = '';
     for (const candidate of ['hh', 'll', 'h', 'l', 'j', 'z', 't', 'L']) if (format.startsWith(candidate, index)) { length = candidate; index += candidate.length; break; }
     const specifier = format[index++];
-    if (!specifier) invalid(context, 'La cadena de formato termina dentro de una conversión.', at);
+    if (!specifier) invalid(context, 'The format string ends within a conversion.', at);
     if (specifier === 'n') {
       const pointer = take();
       context.writeScalar(pointer, context.makeInt(total, printfCountType(length)), at);
       continue;
     }
     if (length === 'l' && (specifier === 'c' || specifier === 's')) {
-      return context.fail('UNSUPPORTED_FEATURE', `La conversión wide printf «%l${specifier}» está fuera del alcance implementado.`, at);
+      return context.fail('UNSUPPORTED_FEATURE', `Wide printf conversion «%l${specifier}» is outside the implemented profile.`, at);
     }
     const value = take();
     const longDouble = length === 'L' && 'fFeEgGaA'.includes(specifier) ? asBinary80(value) : undefined;
     if (length === 'L' && 'fFeEgGaA'.includes(specifier) && !longDouble) {
-      return context.fail('LIBRARY_ARGUMENT', `La conversión «%L${specifier}» requiere un argumento long double.`, at);
+      return context.fail('LIBRARY_ARGUMENT', `Conversion «%L${specifier}» requires a long double argument.`, at);
     }
     let core: Uint8Array;
     let isNumeric = false;
@@ -589,7 +589,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
       core = encodePadded(sign + prefix, body, width ?? 0, flags, true, context, at);
     } else if ('aA'.includes(specifier)) {
       isNumeric = true;
-      if (precision !== undefined && precision > 100_000) return context.fail('UNSUPPORTED_FEATURE', 'La precisión hexadecimal supera el máximo implementado (100000 dígitos).', at);
+      if (precision !== undefined && precision > 100_000) return context.fail('UNSUPPORTED_FEATURE', 'Hexadecimal precision exceeds the implemented maximum (100000 digits).', at);
       reserve(Math.max(width ?? 0, (precision ?? 64) + 32));
       const uppercase = specifier === 'A';
       const { prefix, digits, negative, finite } = formatHexFloatValue(value, longDouble, precision, flags.includes('#'), uppercase, context, at);
@@ -598,7 +598,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
     } else if (length === 'L' && 'fFeEgG'.includes(specifier)) {
       isNumeric = true;
       const requestedPrecision = precision ?? 6;
-      if (requestedPrecision > 100) return context.fail('UNSUPPORTED_FEATURE', 'La precisión decimal supera el máximo implementado (100 dígitos).', at);
+      if (requestedPrecision > 100) return context.fail('UNSUPPORTED_FEATURE', 'Decimal precision exceeds the implemented maximum (100 digits).', at);
       const formatted = formatBinary80Decimal(longDouble!, specifier.toLowerCase() as 'f' | 'e' | 'g', requestedPrecision, flags.includes('#'));
       let digits = formatted.digits;
       if (specifier === specifier.toUpperCase()) digits = digits.toUpperCase();
@@ -611,7 +611,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
       const requestedPrecision = precision ?? 6;
       const estimated = Math.max(32, requestedPrecision + 32);
       reserve(Math.max(width ?? 0, estimated));
-      if (requestedPrecision > 100) return context.fail('UNSUPPORTED_FEATURE', 'La precisión decimal supera el máximo implementado (100 dígitos).', at);
+      if (requestedPrecision > 100) return context.fail('UNSUPPORTED_FEATURE', 'Decimal precision exceeds the implemented maximum (100 digits).', at);
       let digits: string;
       if (!Number.isFinite(numeric)) {
         digits = Number.isNaN(numeric) ? 'nan' : 'inf';
@@ -619,7 +619,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
         case 'f': digits = formatFixedFloat(Math.abs(numeric), requestedPrecision); break;
         case 'e': digits = normalizeDecimalExponent(Math.abs(numeric).toExponential(requestedPrecision)); break;
         case 'g': digits = formatGeneralFloat(Math.abs(numeric), requestedPrecision === 0 ? 1 : requestedPrecision, flags.includes('#')); break;
-        default: return context.fail('ENGINE_INTERNAL_ERROR', 'Conversión de formato flotante no reconocida.', at);
+        default: return context.fail('ENGINE_INTERNAL_ERROR', 'Unrecognized floating-point format conversion.', at);
       }
       if (specifier === specifier.toUpperCase()) digits = digits.toUpperCase();
       if (flags.includes('#') && Number.isFinite(numeric) && !digits.includes('.')) {
@@ -641,7 +641,7 @@ function formatOutput(formatValue: CValue, args: readonly CValue[], context: Lib
     } else if (specifier === 'p') {
       const text = context.formatPointer(value, at);
       core = padBytes(new TextEncoder().encode(text), width ?? 0, flags.includes('-'), context, at, total);
-    } else invalid(context, `La conversión «%${length}${specifier}» no está implementada.`, at);
+    } else invalid(context, `Conversion «%${length}${specifier}» is not implemented.`, at);
     if (isNumeric && flags.includes('0') && !flags.includes('-') && precision === undefined) {
       // Numeric fields are padded in encodePadded before allocation.
     }
@@ -781,7 +781,7 @@ function safeFormatNumber(text: string, context: LibraryRuntimeContext, at: Loca
   const value = BigInt(text);
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
     context.preflightOutputBytes(Number.MAX_SAFE_INTEGER, at);
-    invalid(context, 'El ancho o la precisión de formato excede el rango seguro.', at);
+    invalid(context, 'The format width or precision exceeds the safe range.', at);
   }
   return Number(value);
 }
@@ -894,7 +894,7 @@ function* streamInputBuiltin(
 ): ResumableLibraryBuiltin {
   const requireStream = (file: CValue): VirtualStream => {
     const stream = context.streamFor(file, at);
-    if (!stream) { context.errno.set(ERRNO.EBADF); invalid(context, `${name} requiere un flujo FILE válido.`, at); }
+    if (!stream) { context.errno.set(ERRNO.EBADF); invalid(context, `${name} requires a valid FILE stream.`, at); }
     return stream;
   };
   const eof = (): CValue => returnInteger(EOF_VALUE, resultType, context);
@@ -926,7 +926,7 @@ function* streamInputBuiltin(
     argCount(args, 4, 4, name, context, at);
     const size = checkedSize(args[1], name, context, at), count = checkedSize(args[2], name, context, at);
     if (!size || !count) return returnInteger(0, resultType, context);
-    if (count > Math.floor(Number.MAX_SAFE_INTEGER / size)) invalid(context, `${name} solicitó un tamaño no representable.`, at);
+    if (count > Math.floor(Number.MAX_SAFE_INTEGER / size)) invalid(context, `${name} requested an unrepresentable size.`, at);
     const requested = size * count;
     const stream = requireStream(args[3]);
     const chunks: Uint8Array[] = [];
@@ -972,13 +972,13 @@ function* streamInputBuiltin(
     }
     return returnInteger(Math.floor(bytesRead / size), resultType, context);
   }
-  return context.fail('ENGINE_INTERNAL_ERROR', `No se reconoce la lectura de stream «${name}».`, at);
+  return context.fail('ENGINE_INTERNAL_ERROR', `Stream read «${name}» is not recognized.`, at);
 }
 
 function streamBuiltin(name: string, args: readonly CValue[], resultType: CType | undefined, context: LibraryRuntimeContext, at: Location): CValue {
   const requireStream = (file: CValue): VirtualStream => {
     const stream = context.streamFor(file, at);
-    if (!stream) { context.errno.set(ERRNO.EBADF); invalid(context, `${name} requiere un flujo FILE válido.`, at); }
+    if (!stream) { context.errno.set(ERRNO.EBADF); invalid(context, `${name} requires a valid FILE stream.`, at); }
     return stream;
   };
   const eof = (): CValue => returnInteger(EOF_VALUE, resultType, context);
@@ -1018,7 +1018,7 @@ function streamBuiltin(name: string, args: readonly CValue[], resultType: CType 
     argCount(args, 4, 4, name, context, at);
     const size = checkedSize(args[1], name, context, at), count = checkedSize(args[2], name, context, at);
     if (!size || !count) return returnInteger(0, resultType, context);
-    if (count > Math.floor(Number.MAX_SAFE_INTEGER / size)) invalid(context, `${name} solicitó un tamaño no representable.`, at);
+    if (count > Math.floor(Number.MAX_SAFE_INTEGER / size)) invalid(context, `${name} requested an unrepresentable size.`, at);
     const requested = size * count;
     const stream = requireStream(args[3]);
     context.preflightOutputBytes(requested, at);
@@ -1207,7 +1207,7 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
   let inputFailure = false;
   const takeDestination = (): CValue => {
     const pointer = args[argumentIndex++];
-    if (!pointer) invalid(context, 'La cadena de formato scanf requiere más punteros destino.', at);
+    if (!pointer) invalid(context, 'The scanf format string requires more destination pointers.', at);
     return pointerValue(pointer, at, context);
   };
   const skipSpace = function* (): Generator<LibraryBuiltinRequest, void, CValue | void> {
@@ -1242,9 +1242,9 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     let length = '';
     for (const candidate of ['hh', 'll', 'h', 'l', 'j', 'z', 't', 'L']) if (format.startsWith(candidate, index)) { length = candidate; index += candidate.length; break; }
     let specifier = format[index++];
-    if (!specifier) invalid(context, 'La cadena de formato scanf termina dentro de una conversión.', at);
+    if (!specifier) invalid(context, 'The scanf format string ends within a conversion.', at);
     if (length === 'l' && (specifier === 'c' || specifier === 's' || specifier === '[')) {
-      return context.fail('UNSUPPORTED_FEATURE', `La conversión wide scanf «%l${specifier}» está fuera del alcance implementado.`, at);
+      return context.fail('UNSUPPORTED_FEATURE', `Wide scanf conversion «%l${specifier}» is outside the implemented profile.`, at);
     }
     let scanset: Set<number> | undefined;
     let scansetInvert = false;
@@ -1262,7 +1262,7 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
           for (let byte = Math.min(first, last); byte <= Math.max(first, last); byte++) scanset.add(byte);
         } else scanset.add(first);
       }
-      if (!closed) invalid(context, 'La lista de conversión %[ no tiene cierre ].', at);
+      if (!closed) invalid(context, 'The %[ conversion set is missing its closing ].', at);
     }
     if (specifier === 'n') {
       if (!suppress) context.writeScalar(takeDestination(), context.makeInt(input.consumed, scanIntegerType('d', length)), at);
@@ -1305,9 +1305,9 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     }
     const integerConversion = 'diuoxX'.includes(specifier);
     const floatConversion = 'fFeEgGaA'.includes(specifier);
-    if (!integerConversion && !floatConversion && specifier !== 'p') invalid(context, `La conversión scanf «%${length}${specifier}» no está implementada.`, at);
-    if (floatConversion && !['', 'l', 'L'].includes(length)) invalid(context, `El modificador «${length}» no es válido para scanf «%${specifier}».`, at);
-    if (integerConversion && length === 'L') invalid(context, `El modificador «L» no es válido para scanf «%${specifier}».`, at);
+    if (!integerConversion && !floatConversion && specifier !== 'p') invalid(context, `scanf conversion «%${length}${specifier}» is not implemented.`, at);
+    if (floatConversion && !['', 'l', 'L'].includes(length)) invalid(context, `Modifier «${length}» is invalid for scanf «%${specifier}».`, at);
+    if (integerConversion && length === 'L') invalid(context, `Modifier «L» is invalid for scanf «%${specifier}».`, at);
     const accepted = specifier === 'p' ? /[0-9a-fA-FxX()nil]/ : null;
     let floatToken = '';
     let integerToken = '';
@@ -1330,7 +1330,7 @@ function* scanfBuiltin(name: string, args: readonly CValue[], resultType: CType 
     if (specifier === 'p') {
       if (!bytes.length) { mismatch((yield* scanPeek(input)) < 0); break; }
       if (!context.parsePointer) {
-        return context.fail('UNSUPPORTED_FEATURE', 'La conversión scanf «%p» requiere el lector de punteros de la máquina virtual.', at);
+        return context.fail('UNSUPPORTED_FEATURE', 'scanf conversion «%p» requires the virtual machine pointer reader.', at);
       }
       const pointer = context.parsePointer(token, at);
       if (!suppress) {

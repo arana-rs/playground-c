@@ -86,13 +86,13 @@ function checked(value: bigint, type: CType, location: Location): CValue {
   const info = integers[integerType]!;
   if (info.unsigned) return { type, value: normalize(value, type) };
   const range = bounds(type);
-  if (value < range.min || value > range.max) failure('SIGNED_OVERFLOW', `Overflow de ${integerType} firmado de ${info.bits} bits: comportamiento indefinido en C11.`, location);
+  if (value < range.min || value > range.max) failure('SIGNED_OVERFLOW', `Signed ${integerType} overflow for a ${info.bits}-bit integer: undefined behavior in C11.`, location);
   return { type, value };
 }
 function int(value: boolean | number): CValue { return { type: 'int', value: BigInt(value ? (typeof value === 'number' ? value : 1) : 0) }; }
 function floating(value: number, type: 'float' | 'double'): CValue { return { type, value: type === 'float' ? Math.fround(value) : value }; }
 function arithmetic(value: CValue, location: Location): void {
-  if (!isArithmetic(value.type)) failure('INVALID_OPERAND_TYPE', 'Se requiere un operando aritmético.', location);
+  if (!isArithmetic(value.type)) failure('INVALID_OPERAND_TYPE', 'An arithmetic operand is required.', location);
 }
 
 function isBinary80(value: unknown): value is Binary80Value {
@@ -101,7 +101,7 @@ function isBinary80(value: unknown): value is Binary80Value {
 
 function numericData(value: CValue, location: Location): bigint | number | Binary80Value {
   if (typeof value.value === 'bigint' || typeof value.value === 'number' || isBinary80(value.value)) return value.value;
-  failure('INVALID_OPERAND_TYPE', 'El valor no es aritmético.', location);
+  failure('INVALID_OPERAND_TYPE', 'The value is not arithmetic.', location);
 }
 
 // Round a positive rational directly to the requested binary format. This avoids
@@ -136,7 +136,7 @@ export function truth(value: CValue, location: Location = defaultLocation): bool
     if (value.value.kind === 'object-pointer') return true;
     if (value.value.kind === 'function-pointer') return value.value.functionIndex !== null;
   }
-  failure('INVALID_OPERAND_TYPE', 'Una condición requiere un escalar.', location);
+  failure('INVALID_OPERAND_TYPE', 'A condition requires a scalar.', location);
 }
 export function convert(value: CValue, type: CType, location: Location, aggregates: AggregateContext = []): CValue {
   void aggregates;
@@ -145,40 +145,40 @@ export function convert(value: CValue, type: CType, location: Location, aggregat
   if (type === '_Bool') return { type, value: truth(value, location) ? 1n : 0n };
   if (pointerType(type)) {
     if (pointerType(value.type)) {
-      if (!canConvertPointerType(value.type, type)) failure('INVALID_CONVERSION', 'Los tipos de puntero no son compatibles para esta conversión.', location);
+      if (!canConvertPointerType(value.type, type)) failure('INVALID_CONVERSION', 'The pointer types are incompatible for this conversion.', location);
       const pointerValue = value.value;
       if (pointerValue !== null && (typeof pointerValue !== 'object' || !['object-pointer', 'function-pointer'].includes(pointerValue.kind))) {
-        failure('INVALID_CONVERSION', 'El valor no representa un puntero.', location);
+        failure('INVALID_CONVERSION', 'The value does not represent a pointer.', location);
       }
       if (!!functionType(pointedToType(type) ?? 'void') !== (pointerValue !== null && typeof pointerValue === 'object' && pointerValue.kind === 'function-pointer')) {
-        failure('INVALID_CONVERSION', 'No se puede convertir un puntero a función en uno a objeto ni a void*.', location);
+        failure('INVALID_CONVERSION', 'A function pointer cannot be converted to an object pointer or void*.', location);
       }
       return { type, value: pointerValue as CValue['value'] };
     }
     if (isInteger(value.type) && typeof value.value === 'bigint' && value.value === 0n) return { type, value: null };
-    failure('INVALID_CONVERSION', 'Un puntero solo acepta otro puntero compatible o una constante de puntero nulo.', location);
+    failure('INVALID_CONVERSION', 'A pointer only accepts another compatible pointer or a null pointer constant.', location);
   }
   if (!isArithmetic(type)) {
     if (aggregateType(type) && compatibleType(value.type, type) && typeof value.value === 'object' && value.value !== null && value.value.kind === 'aggregate-value') {
       return { type, value: value.value };
     }
-    failure('INVALID_CONVERSION', `La conversión a ${typeof type === 'string' ? type : 'un tipo agregado'} no pertenece a las conversiones escalares P3.`, location);
+    failure('INVALID_CONVERSION', `Conversion to ${typeof type === 'string' ? type : 'an aggregate type'} is outside the P3 scalar conversions.`, location);
   }
   arithmetic(value, location);
   if (isInteger(type)) {
     const numeric = numericData(value, location);
     if (typeof numeric === 'bigint') return { type, value: normalize(numeric, type) };
     if (isBinary80(numeric)) {
-      if (numeric.classification !== 'finite') failure('FLOAT_TO_INTEGER_RANGE', 'NaN o infinito no puede convertirse a un entero en C11.', location);
+      if (numeric.classification !== 'finite') failure('FLOAT_TO_INTEGER_RANGE', 'NaN or infinity cannot be converted to an integer in C11.', location);
       const truncated = binary80ToBigIntTrunc(numeric);
       const range = bounds(type);
-      if (truncated < range.min || truncated > range.max) failure('FLOAT_TO_INTEGER_RANGE', `El valor flotante truncado no es representable como ${type}: comportamiento indefinido en C11.`, location);
+      if (truncated < range.min || truncated > range.max) failure('FLOAT_TO_INTEGER_RANGE', `Truncated floating-point value is not representable as ${type}: undefined behavior in C11.`, location);
       return { type, value: truncated };
     }
-    if (!Number.isFinite(numeric)) failure('FLOAT_TO_INTEGER_RANGE', 'NaN o infinito no puede convertirse a un entero en C11.', location);
+    if (!Number.isFinite(numeric)) failure('FLOAT_TO_INTEGER_RANGE', 'NaN or infinity cannot be converted to an integer in C11.', location);
     const truncated = BigInt(Math.trunc(numeric));
     const range = bounds(type);
-    if (truncated < range.min || truncated > range.max) failure('FLOAT_TO_INTEGER_RANGE', `El valor flotante truncado no es representable como ${type}: comportamiento indefinido en C11.`, location);
+    if (truncated < range.min || truncated > range.max) failure('FLOAT_TO_INTEGER_RANGE', `Truncated floating-point value is not representable as ${type}: undefined behavior in C11.`, location);
     return { type, value: truncated };
   }
   const numeric = numericData(value, location);
@@ -187,7 +187,7 @@ export function convert(value: CValue, type: CType, location: Location, aggregat
     if (typeof numeric === 'number') return { type, value: binary80FromNumber(numeric) };
     return { type, value: binary80FromRational(numeric < 0n ? -numeric : numeric, 1n, { negative: numeric < 0n }) };
   }
-  if (type !== 'float' && type !== 'double') failure('INVALID_CONVERSION', `No se puede convertir a ${String(type)} como tipo flotante.`, location);
+  if (type !== 'float' && type !== 'double') failure('INVALID_CONVERSION', `Cannot convert to ${String(type)} as a floating-point type.`, location);
   if (typeof numeric === 'number') return floating(numeric, type);
   if (isBinary80(numeric)) return { type, value: binary80ToNumber(numeric, type === 'float' ? 'binary32' : 'binary64') };
   const negative = numeric < 0n;
@@ -196,7 +196,7 @@ export function convert(value: CValue, type: CType, location: Location, aggregat
 }
 
 function character(text: string, location: Location): CValue {
-  if (!text.startsWith("'") || !text.endsWith("'")) failure('UNSUPPORTED_FEATURE', 'P2 no implementa constantes de carácter ancho ni Unicode.', location);
+  if (!text.startsWith("'") || !text.endsWith("'")) failure('UNSUPPORTED_FEATURE', 'P2 does not implement wide-character or Unicode character constants.', location);
   const content = text.slice(1, -1);
   let code: number;
   if (content.startsWith('\\')) {
@@ -205,10 +205,10 @@ function character(text: string, location: Location): CValue {
     if (Object.hasOwn(simple, escape)) code = simple[escape];
     else if (/^[0-7]{1,3}$/.test(escape)) code = Number.parseInt(escape, 8);
     else if (/^x[0-9a-fA-F]+$/.test(escape)) code = Number.parseInt(escape.slice(1), 16);
-    else failure('UNSUPPORTED_FEATURE', 'P2 admite caracteres simples y escapes estándar, octales o hexadecimales de un byte.', location);
-    if (code > 255) failure('SYNTAX_ERROR', 'El escape de carácter excede el rango de un byte del target.', location);
+    else failure('UNSUPPORTED_FEATURE', 'P2 supports single-byte characters and standard, octal, or hexadecimal escapes.', location);
+    if (code > 255) failure('SYNTAX_ERROR', 'The character escape exceeds the target byte range.', location);
   } else {
-    if (content.length !== 1 || content.charCodeAt(0) > 127) failure('UNSUPPORTED_FEATURE', 'P2 admite un único carácter ASCII por constante de carácter.', location);
+    if (content.length !== 1 || content.charCodeAt(0) > 127) failure('UNSUPPORTED_FEATURE', 'P2 supports one ASCII character per character constant.', location);
     code = content.charCodeAt(0);
   }
   return { type: 'int', value: BigInt.asIntN(8, BigInt(code)) };
@@ -219,11 +219,11 @@ function parseFloating(text: string, location: Location): CValue {
     ? /^0[xX]((?:[0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?|\.[0-9a-fA-F]+))[pP]([+-]?[0-9]+)([fFlL]?)$/
     : /^((?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)([fFlL]?)$/;
   const match = pattern.exec(text);
-  if (!match) failure('SYNTAX_ERROR', `Constante flotante C11 inválida: «${text}».`, location);
+  if (!match) failure('SYNTAX_ERROR', `Invalid C11 floating-point constant: «${text}».`, location);
   const suffix = match[hex ? 3 : 2];
   if (/^[lL]$/.test(suffix)) {
     const value = parseBinary80(text);
-    if (value.classification === 'infinity') failure('FLOAT_LITERAL_RANGE', 'El literal excede el rango de long double binary80.', location);
+    if (value.classification === 'infinity') failure('FLOAT_LITERAL_RANGE', 'Literal exceeds the long double binary80 range.', location);
     return { type: 'long double', value };
   }
   const type = /^[fF]$/.test(suffix) ? 'float' : 'double';
@@ -239,7 +239,7 @@ function parseFloating(text: string, location: Location): CValue {
   if (!digits) return { type, value: 0 };
   exponent -= fractionalDigits * (hex ? 4 : 1);
   const order = exponent + digits.length * (hex ? 4 : 1);
-  if (order > (hex ? 1100 : 310)) failure('FLOAT_LITERAL_RANGE', `El literal excede el rango de ${type}.`, location);
+  if (order > (hex ? 1100 : 310)) failure('FLOAT_LITERAL_RANGE', `Literal exceeds the ${type} range.`, location);
   if (order < (hex ? -1100 : -330)) return { type, value: 0 };
   // Every binary32/64 halfway point has a terminating decimal representation
   // shorter than 1200 significant digits (or 300 hex digits). Additional digits
@@ -252,16 +252,16 @@ function parseFloating(text: string, location: Location): CValue {
   if (exponent >= 0) numerator = hex ? numerator << BigInt(exponent) : numerator * 10n ** BigInt(exponent);
   else denominator = hex ? 1n << BigInt(-exponent) : 10n ** BigInt(-exponent);
   const result = roundedRational(numerator, denominator, type, sticky);
-  if (!Number.isFinite(result)) failure('FLOAT_LITERAL_RANGE', `El literal excede el rango de ${type}.`, location);
+  if (!Number.isFinite(result)) failure('FLOAT_LITERAL_RANGE', `Literal exceeds the ${type} range.`, location);
   return { type, value: result };
 }
 export function parseLiteral(text: string, location: Location): CValue {
   if (text.includes("'")) return character(text, location);
-  if (/^0[bB]/.test(text)) failure('UNSUPPORTED_FEATURE', 'Los literales binarios 0b no forman parte de C11; P2 admite bases decimal, octal y hexadecimal.', location);
+  if (/^0[bB]/.test(text)) failure('UNSUPPORTED_FEATURE', 'Binary 0b literals are not part of C11; P2 supports decimal, octal, and hexadecimal bases.', location);
   const hex = /^0[xX]/.test(text);
   if (hex ? /[.pP]/.test(text) : /[.eE]/.test(text)) return parseFloating(text, location);
   const match = /^(0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)([uU](?:[lL]|ll|LL)?|(?:[lL]|ll|LL)[uU]?)?$/.exec(text);
-  if (!match) failure('SYNTAX_ERROR', `Constante entera C11 inválida: «${text}».`, location);
+  if (!match) failure('SYNTAX_ERROR', `Invalid C11 integer constant: «${text}».`, location);
   const decimal = /^[1-9]/.test(match[1]);
   const suffix = (match[2] ?? '').toLowerCase();
   const unsigned = suffix.includes('u'), longs = suffix.replace('u', '').length;
@@ -271,10 +271,10 @@ export function parseLiteral(text: string, location: Location): CValue {
   else if (longs === 1) candidates = decimal ? ['long', 'long long'] : ['long', 'unsigned long', 'long long', 'unsigned long long'];
   else candidates = decimal ? ['int', 'long', 'long long'] : ['int', 'unsigned int', 'long', 'unsigned long', 'long long', 'unsigned long long'];
   const digits = match[1].replace(/^0[xX]/, '').replace(/^0+/, '') || '0';
-  if (digits.length > (hex ? 16 : decimal ? 20 : 22)) failure('UNSUPPORTED_FEATURE', 'El literal requiere un tipo entero extendido, fuera del target LP64 de P2.', location);
+  if (digits.length > (hex ? 16 : decimal ? 20 : 22)) failure('UNSUPPORTED_FEATURE', 'The literal requires an extended integer type, outside the P2 LP64 target.', location);
   const value = BigInt(hex ? `0x${digits}` : decimal ? digits : `0o${digits}`);
   for (const type of candidates) if (value <= bounds(type).max) return { type, value };
-  failure('UNSUPPORTED_FEATURE', 'El literal no es representable por los tipos enteros candidatos de C11 en el target LP64.', location);
+  failure('UNSUPPORTED_FEATURE', 'The literal is not representable by the candidate C11 integer types on the LP64 target.', location);
 }
 
 export function unary(operator: string, value: CValue, location: Location): CValue {
@@ -287,14 +287,14 @@ export function unary(operator: string, value: CValue, location: Location): CVal
     const numeric = numericData(promoted, location);
     if (typeof numeric === 'bigint') return checked(-numeric, type, location);
     if (isBinary80(numeric)) return { type: 'long double', value: binary80Negate(numeric) };
-    if (type !== 'float' && type !== 'double') failure('ENGINE_INTERNAL_ERROR', 'El operando long double perdió su representación binary80.', location);
+    if (type !== 'float' && type !== 'double') failure('ENGINE_INTERNAL_ERROR', 'The long double operand lost its binary80 representation.', location);
     return floating(-numeric, type);
   }
   if (operator === '~') {
-    if (!isInteger(type)) failure('INVALID_OPERAND_TYPE', 'El operador ~ requiere un tipo entero.', location);
+    if (!isInteger(type)) failure('INVALID_OPERAND_TYPE', 'The ~ operator requires an integer type.', location);
     return { type, value: normalize(~(numericData(promoted, location) as bigint), type) };
   }
-  failure('UNSUPPORTED_FEATURE', `Operador unario no implementado: «${operator}».`, location);
+  failure('UNSUPPORTED_FEATURE', `Unimplemented unary operator: «${operator}».`, location);
 }
 export function binary(operator: string, left: CValue, right: CValue, location: Location): CValue {
   if (operator === ',') return right;
@@ -305,22 +305,22 @@ export function binary(operator: string, left: CValue, right: CValue, location: 
   }
   arithmetic(left, location); arithmetic(right, location);
   if (operator === '<<' || operator === '>>') {
-    if (!isInteger(left.type) || !isInteger(right.type)) failure('INVALID_OPERAND_TYPE', 'Los desplazamientos requieren dos operandos enteros.', location);
+    if (!isInteger(left.type) || !isInteger(right.type)) failure('INVALID_OPERAND_TYPE', 'Shift operations require two integer operands.', location);
     const type = promote(left.type), countType = promote(right.type);
     const value = numericData(convert(left, type, location), location) as bigint;
     const count = numericData(convert(right, countType, location), location) as bigint;
     const info = integers[String(type)]!;
-    if (count < 0n || count >= BigInt(info.bits)) failure('INVALID_SHIFT', 'La cantidad de desplazamiento es negativa o alcanza el ancho del operando promovido: comportamiento indefinido en C11.', location);
+    if (count < 0n || count >= BigInt(info.bits)) failure('INVALID_SHIFT', 'The shift count is negative or reaches the width of the promoted operand, which is undefined behavior in C11.', location);
     if (operator === '>>') return { type, value: value >> count };
-    if (!info.unsigned && value < 0n) failure('INVALID_SHIFT', 'Desplazar a la izquierda un entero firmado negativo es comportamiento indefinido en C11.', location);
+    if (!info.unsigned && value < 0n) failure('INVALID_SHIFT', 'Left-shifting a negative signed integer is undefined behavior in C11.', location);
     return checked(value << count, type, location);
   }
   const type = commonType(left.type, right.type);
-  if (type === 'void') failure('INVALID_OPERAND_TYPE', `Los tipos de los operandos de «${operator}» no son compatibles.`, location);
+  if (type === 'void') failure('INVALID_OPERAND_TYPE', `The operand types for «${operator}» are incompatible.`, location);
   const a = numericData(convert(left, type, location), location), b = numericData(convert(right, type, location), location);
   if (isBinary80(a) || isBinary80(b)) {
     if (!isBinary80(a) || !isBinary80(b) || type !== 'long double') {
-      failure('ENGINE_INTERNAL_ERROR', 'Los operandos binary80 no conservaron un tipo común long double.', location);
+      failure('ENGINE_INTERNAL_ERROR', 'The binary80 operands did not retain a common long double type.', location);
     }
     if (['==', '!=', '<', '>', '<=', '>='].includes(operator)) {
       const comparison = binary80Compare(a, b);
@@ -339,7 +339,7 @@ export function binary(operator: string, left: CValue, right: CValue, location: 
       case '-': return { type, value: binary80Subtract(a, b) };
       case '*': return { type, value: binary80Multiply(a, b) };
       case '/': return { type, value: binary80Divide(a, b) };
-      default: failure('INVALID_OPERAND_TYPE', `El operador «${operator}» requiere operandos enteros.`, location);
+      default: failure('INVALID_OPERAND_TYPE', `Operator «${operator}» requires integer operands.`, location);
     }
   }
   switch (operator) {
@@ -351,19 +351,19 @@ export function binary(operator: string, left: CValue, right: CValue, location: 
     case '>=': return int(a >= b);
   }
   if (typeof a === 'number' && typeof b === 'number') {
-    if (type !== 'float' && type !== 'double') failure('ENGINE_INTERNAL_ERROR', 'El valor long double no contiene una representación binary80.', location);
+    if (type !== 'float' && type !== 'double') failure('ENGINE_INTERNAL_ERROR', 'The long double value does not contain a binary80 representation.', location);
     switch (operator) {
       case '+': return floating(a + b, type);
       case '-': return floating(a - b, type);
       case '*': return floating(a * b, type);
       case '/': return floating(a / b, type);
-      default: failure('INVALID_OPERAND_TYPE', `El operador «${operator}» requiere operandos enteros.`, location);
+      default: failure('INVALID_OPERAND_TYPE', `Operator «${operator}» requires integer operands.`, location);
     }
   }
-  if (type === 'long double') failure('ENGINE_INTERNAL_ERROR', 'El valor long double no contiene una representación binary80.', location);
+  if (type === 'long double') failure('ENGINE_INTERNAL_ERROR', 'The long double value does not contain a binary80 representation.', location);
   const x = a as bigint, y = b as bigint;
-  if ((operator === '/' || operator === '%') && y === 0n) failure('DIVISION_BY_ZERO', 'División o resto entero por cero: comportamiento indefinido en C11.', location);
-  if ((operator === '/' || operator === '%') && !integers[String(type)]!.unsigned && x === bounds(type).min && y === -1n) failure('SIGNED_OVERFLOW', `El mínimo de ${type} dividido por -1 no es representable.`, location);
+  if ((operator === '/' || operator === '%') && y === 0n) failure('DIVISION_BY_ZERO', 'Integer division or remainder by zero: undefined behavior in C11.', location);
+  if ((operator === '/' || operator === '%') && !integers[String(type)]!.unsigned && x === bounds(type).min && y === -1n) failure('SIGNED_OVERFLOW', `The minimum ${type} value divided by -1 is not representable.`, location);
   switch (operator) {
     case '+': return checked(x + y, type, location);
     case '-': return checked(x - y, type, location);
@@ -373,17 +373,17 @@ export function binary(operator: string, left: CValue, right: CValue, location: 
     case '&': return { type, value: normalize(x & y, type) };
     case '|': return { type, value: normalize(x | y, type) };
     case '^': return { type, value: normalize(x ^ y, type) };
-    default: failure('UNSUPPORTED_FEATURE', `Operador binario no implementado: «${operator}».`, location);
+    default: failure('UNSUPPORTED_FEATURE', `Unimplemented binary operator: «${operator}».`, location);
   }
 }
 
 function comparePointers(operator: string, left: CValue, right: CValue, location: Location): CValue {
   const leftPointer = isPointer(left.type), rightPointer = isPointer(right.type);
   if (operator === '==' || operator === '!=') {
-    if (leftPointer && rightPointer && !compatibleType(left.type, right.type)) failure('INVALID_OPERAND_TYPE', 'La comparación necesita punteros compatibles.', location);
+    if (leftPointer && rightPointer && !compatibleType(left.type, right.type)) failure('INVALID_OPERAND_TYPE', 'The comparison requires compatible pointers.', location);
     const nullLeft = leftPointer && typeof right.value === 'bigint' && right.value === 0n;
     const nullRight = rightPointer && typeof left.value === 'bigint' && left.value === 0n;
-    if (!(leftPointer && rightPointer) && !nullLeft && !nullRight) failure('INVALID_OPERAND_TYPE', 'La comparación de punteros requiere dos punteros compatibles o una constante de puntero nulo.', location);
+    if (!(leftPointer && rightPointer) && !nullLeft && !nullRight) failure('INVALID_OPERAND_TYPE', 'Pointer comparison requires two compatible pointers or a null pointer constant.', location);
     const a = nullLeft ? null : left.value;
     const b = nullRight ? null : right.value;
     let equal = false;
@@ -391,17 +391,17 @@ function comparePointers(operator: string, left: CValue, right: CValue, location
     else if (typeof a === 'object' && typeof b === 'object') {
       if (a.kind === 'object-pointer' && b.kind === 'object-pointer') equal = a.allocationId === b.allocationId && a.byteOffset === b.byteOffset;
       else if (a.kind === 'function-pointer' && b.kind === 'function-pointer') equal = a.functionIndex === b.functionIndex;
-      else failure('INVALID_OPERAND_TYPE', 'No se comparan punteros a función con punteros a objeto.', location);
+      else failure('INVALID_OPERAND_TYPE', 'Function pointers cannot be compared with object pointers.', location);
     }
     return int(operator === '==' ? equal : !equal);
   }
   if (!leftPointer || !rightPointer || !compatibleType(left.type, right.type) ||
       typeof left.value !== 'object' || left.value === null || left.value.kind !== 'object-pointer' ||
       typeof right.value !== 'object' || right.value === null || right.value.kind !== 'object-pointer') {
-    failure('INVALID_OPERAND_TYPE', 'La comparación relacional requiere punteros a elementos del mismo array.', location);
+    failure('INVALID_OPERAND_TYPE', 'Relational comparison requires pointers to elements of the same array.', location);
   }
   if (left.value.allocationId !== right.value.allocationId || left.value.arrayId !== right.value.arrayId) {
-    failure('INVALID_POINTER_COMPARISON', 'La comparación relacional de punteros de objetos distintos no está definida.', location);
+    failure('INVALID_POINTER_COMPARISON', 'Relational comparison of pointers to distinct objects is undefined.', location);
   }
   const a = left.value.byteOffset, b = right.value.byteOffset;
   return int(operator === '<' ? a < b : operator === '>' ? a > b : operator === '<=' ? a <= b : a >= b);
@@ -455,9 +455,9 @@ for (const name of HEAP_ALLOCATOR_BUILTINS) {
 BUILTINS.free = { returnType: 'void', parameters: [pointerTo('void')] };
 export function callBuiltin(name: string, args: CValue[], location: Location): CValue {
   const signature = BUILTINS[name];
-  if (!signature) failure('UNSUPPORTED_FEATURE', `La función «${name}» no pertenece a la biblioteca P2.`, location);
-  if ((HEAP_ALLOCATOR_BUILTINS as readonly string[]).includes(name) || name === 'free') failure('ENGINE_INTERNAL_ERROR', `La función «${name}» debe ejecutarse con el almacén virtual.`, location);
-  if (args.length !== signature.parameters.length) failure('ARGUMENT_COUNT', `«${name}» requiere ${signature.parameters.length} argumentos.`, location);
+  if (!signature) failure('UNSUPPORTED_FEATURE', `Function «${name}» is not part of the P2 library.`, location);
+  if ((HEAP_ALLOCATOR_BUILTINS as readonly string[]).includes(name) || name === 'free') failure('ENGINE_INTERNAL_ERROR', `Function «${name}» must run with the virtual store.`, location);
+  if (args.length !== signature.parameters.length) failure('ARGUMENT_COUNT', `«${name}» requires ${signature.parameters.length} arguments.`, location);
   if (name === '__c11_nan') return { type: 'float', value: NaN };
   if (name === '__c11_inf') return { type: 'float', value: Infinity };
   if (classification.has(name)) {
@@ -488,7 +488,7 @@ export function callBuiltin(name: string, args: CValue[], location: Location): C
   const base = signature.returnType === 'float' ? name.slice(0, -1) : name;
   const result = unaryMath[base] ? unaryMath[base](values[0]) : binaryMath[base](values[0], values[1]);
   if (signature.returnType !== 'float' && signature.returnType !== 'double') {
-    failure('ENGINE_INTERNAL_ERROR', `La función matemática «${name}» tiene un tipo de retorno no admitido.`, location);
+    failure('ENGINE_INTERNAL_ERROR', `Math function «${name}» has an unsupported return type.`, location);
   }
   return floating(result, signature.returnType);
 }

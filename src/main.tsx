@@ -4,6 +4,7 @@ import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { Button, ButtonSpinner } from './components/arc/button/button.tsx';
 import { ConsolePanel } from './components/ConsolePanel.tsx';
+import { LanguageSwitch } from './components/LanguageSwitch.tsx';
 import { ThemeSwitch } from './components/arc/theme-switch/theme-switch.tsx';
 import { SelectedFileTab } from './components/SelectedFileTab.tsx';
 import { CodeEditor } from './editor/CodeEditor.tsx';
@@ -25,6 +26,8 @@ import {
   isKeyboardViewportShrunk,
 } from './consoleLayout.ts';
 import { getPlaygroundShortcut, isMacPlatform } from './keyboardShortcuts.ts';
+import { LanguageProvider, useI18n } from './i18n.tsx';
+import type { TranslationKey } from './i18n/en.ts';
 import initialSource from './examples/main.c?raw';
 import './style.css';
 
@@ -112,6 +115,7 @@ function useStopLabelPhase(isRunning: boolean) {
 }
 
 function Playground() {
+  const { t } = useI18n();
   const [colorTheme, setColorTheme] = useState<ColorTheme>(initialColorTheme);
   const requestedColorTheme = useRef(colorTheme);
   const themeTransitionGeneration = useRef(0);
@@ -167,8 +171,15 @@ function Playground() {
   );
   const playgroundRows = getPlaygroundRows(viewportRect.height, keyboardViewportActive, consoleVisible);
   const consoleStatus = getConsoleStatus(state);
+  const consoleStatusKey: TranslationKey = `console.status.${consoleStatus.key}`;
+  const consoleStatusLabel = t(consoleStatusKey);
   const inputRequestId = state.status === 'running' ? state.inputRequestId : null;
   const consoleSegments = useMemo(() => formatConsoleSegments(state), [state]);
+
+  useEffect(() => {
+    document.title = t('app.documentTitle');
+    document.querySelector<HTMLMetaElement>('meta[name="description"]')?.setAttribute('content', t('app.description'));
+  }, [t]);
 
   useLayoutEffect(() => {
     requestedColorTheme.current = colorTheme;
@@ -220,25 +231,25 @@ function Playground() {
       try {
         const transition = startViewTransition.call(document, commitRequestedTheme);
         void transition.ready.catch(error => {
-          if (!isAbortError(error)) console.error('No se pudo preparar la transición de tema.', error);
+          if (!isAbortError(error)) console.error('Could not prepare the theme transition.', error);
         });
         void transition.updateCallbackDone.catch(error => {
-          if (!isAbortError(error)) console.error('No se pudo aplicar el tema dentro de la transición.', error);
+          if (!isAbortError(error)) console.error('Could not apply the theme during the transition.', error);
           try {
             commitRequestedTheme();
           } catch (commitError) {
             clearSweepOrigin();
-            console.error('No se pudo aplicar el tema después del fallo de transición.', commitError);
+            console.error('Could not apply the theme after the transition failed.', commitError);
           }
         });
         void transition.finished.then(clearSweepOrigin, error => {
           clearSweepOrigin();
-          if (!isAbortError(error)) console.error('La transición de tema terminó con un error.', error);
+          if (!isAbortError(error)) console.error('The theme transition failed.', error);
         });
         return;
       } catch (error) {
         clearSweepOrigin();
-        console.error('No se pudo iniciar la transición de tema.', error);
+        console.error('Could not start the theme transition.', error);
       }
     }
 
@@ -502,16 +513,18 @@ function Playground() {
           <ThemeSwitch
             className="theme-toggle-button"
             theme={colorTheme === 'github-dark' ? 'dark' : 'light'}
-            label={`Cambiar al tema ${colorTheme === 'github-dark' ? 'claro' : 'oscuro'}`}
-            title={`Cambiar al tema ${colorTheme === 'github-dark' ? 'claro' : 'oscuro'}`}
+            label={t(colorTheme === 'github-dark' ? 'theme.switchToLight' : 'theme.switchToDark')}
+            title={t(colorTheme === 'github-dark' ? 'theme.switchToLight' : 'theme.switchToDark')}
             onThemeChange={changeColorTheme}
           />
+          <LanguageSwitch />
           <Button
             ref={memoryViewerButtonRef}
             className="memory-viewer-open-button"
             variant="secondary"
             size="sm"
             type="button"
+            aria-label={t('memoryViewer.open')}
             aria-haspopup="dialog"
             aria-expanded={memoryViewerOpen}
             onClick={openMemoryViewer}
@@ -522,7 +535,7 @@ function Playground() {
               </svg>
             )}
           >
-            Memory Viewer
+            {t('memoryViewer.title')}
           </Button>
         </div>
       </header>
@@ -535,7 +548,8 @@ function Playground() {
           type="button"
           aria-keyshortcuts={`${isMacPlatform() ? 'Meta' : 'Control'}+Enter`}
           aria-busy={isRunning || undefined}
-          aria-description={isRunning ? 'La ejecución está activa. Pulsa para detenerla.' : undefined}
+          aria-label={t(isRunning ? 'run.stop' : 'run.label')}
+          aria-description={isRunning ? t('run.stopDescription') : undefined}
           onClick={onRun}
           leadingIcon={
             isRunning && !showStop ? <ButtonSpinner /> : (
@@ -545,7 +559,7 @@ function Playground() {
             )
           }
         >
-          {showStop ? 'Stop' : 'Run'}
+          {t(showStop ? 'run.stop' : 'run.label')}
         </Button>
       </div>
       <main className="editor-pane">
@@ -561,7 +575,7 @@ function Playground() {
         ref={consoleResizerRef}
         className="console-resizer"
         role="separator"
-        aria-label="Ajustar altura de la consola"
+        aria-label={t('console.resize')}
         aria-keyshortcuts="Control+Backquote"
         aria-controls="console-panel"
         aria-hidden={!consoleVisible}
@@ -570,7 +584,7 @@ function Playground() {
         aria-valuemin={consoleHeightBounds.min}
         aria-valuemax={consoleHeightBounds.max}
         aria-valuenow={consoleHeight}
-        aria-valuetext={`${consoleHeight} píxeles de alto`}
+        aria-valuetext={t('console.heightPixels', { height: consoleHeight })}
         tabIndex={0}
         onPointerDown={onConsoleResizePointerDown}
         onPointerMove={onConsoleResizePointerMove}
@@ -586,7 +600,7 @@ function Playground() {
         hidden={!consoleVisible}
         visible={consoleVisible}
         inputResetKey={runConsoleResetKey.current}
-        statusLabel={consoleStatus.label}
+        statusLabel={consoleStatusLabel}
         statusTone={consoleStatus.tone}
         segments={consoleSegments}
         inputRequestId={inputRequestId}
@@ -599,18 +613,18 @@ function Playground() {
               variant="ghost"
               size="sm"
               type="button"
-              aria-label="Copiar diagnóstico de timeout"
+              aria-label={t('timeout.copyLabel')}
               title={copyFeedback === 'failed'
-                ? 'No se pudo copiar. Pulsa para volver a intentarlo.'
-                : copyFeedback === 'copied' ? 'Diagnóstico copiado al portapapeles.' : 'Copiar diagnóstico de timeout'}
+                ? t('timeout.copyFailed')
+                : copyFeedback === 'copied' ? t('timeout.copied') : t('timeout.copyLabel')}
               onClick={copyTimeoutReport}
             >
-              {copyFeedback === 'copied' ? 'Copiado' : copyFeedback === 'failed' ? 'Falló' : 'Copiar diagnóstico'}
+              {copyFeedback === 'copied' ? t('timeout.copiedShort') : copyFeedback === 'failed' ? t('timeout.failedShort') : t('timeout.copy')}
             </Button>
             <span className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
               {copyFeedback === 'copied'
-                ? 'Diagnóstico copiado al portapapeles.'
-                : copyFeedback === 'failed' ? 'No se pudo copiar el diagnóstico. Pulsa el botón para volver a intentarlo.' : ''}
+                ? t('timeout.copied')
+                : copyFeedback === 'failed' ? t('timeout.copyFailed') : ''}
             </span>
           </>
         )}
@@ -625,8 +639,8 @@ function Playground() {
             href={GITHUB_REPOSITORY_URL}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="Ver Playground for C en GitHub"
-            title="Ver proyecto en GitHub"
+            aria-label={t('github.viewProject')}
+            title={t('github.viewProjectTitle')}
           >
             <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
               <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
@@ -638,18 +652,18 @@ function Playground() {
               href={`${GITHUB_REPOSITORY_URL}/commit/${buildCommit}`}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label={`Ver commit ${buildCommit} en GitHub`}
-              title={`Commit base de esta compilación: ${buildCommit}`}
+              aria-label={t('build.viewCommit', { commit: buildCommit })}
+              title={t('build.commitTitle', { commit: buildCommit })}
             >
               {buildCommit.slice(0, 7)}
             </a>
           ) : (
-            <span className="footer-commit footer-commit-local" title="Compilación local sin información de commit">
+            <span className="footer-commit footer-commit-local" title={t('build.local')}>
               local
             </span>
           )}
         </div>
-        <span className="footer-cursor">Ln {cursor.line} Col {cursor.column}</span>
+        <span className="footer-cursor">{t('editor.cursorPosition', { line: cursor.line, column: cursor.column })}</span>
       </footer>
       {memoryViewerSource !== null && (
         <MemoryViewer source={memoryViewerSource} onClose={closeMemoryViewer} />
@@ -660,6 +674,8 @@ function Playground() {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <Playground />
+    <LanguageProvider>
+      <Playground />
+    </LanguageProvider>
   </StrictMode>,
 );

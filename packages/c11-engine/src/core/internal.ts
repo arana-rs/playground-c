@@ -276,16 +276,16 @@ export class EngineFailure extends Error {
 }
 export function failure(code: string, message: string, location: Location): never { throw new EngineFailure(code, message, location); }
 export function enforceLimit(resource: LimitResource, actual: number, limit: number | null, location: Location): void {
-  if (limit !== null && actual > limit) throw new EngineFailure('LIMIT_EXCEEDED', `Se superó ${resource}: límite ${limit}.`, location, resource, limit);
+  if (limit !== null && actual > limit) throw new EngineFailure('LIMIT_EXCEEDED', `${resource} limit exceeded: ${limit}.`, location, resource, limit);
 }
 export function normalizedLimits<T extends object>(defaults: T, supplied: Partial<T> | undefined, location: Location): T {
-  if (supplied !== undefined && (supplied === null || typeof supplied !== 'object' || Array.isArray(supplied))) failure('INVALID_OPTIONS', 'limits debe ser un objeto.', location);
+  if (supplied !== undefined && (supplied === null || typeof supplied !== 'object' || Array.isArray(supplied))) failure('INVALID_OPTIONS', 'limits must be an object.', location);
   const result = { ...defaults };
   for (const key of Object.keys(supplied ?? {})) {
-    if (!Object.hasOwn(defaults, key)) failure('INVALID_OPTIONS', `Límite desconocido: ${key}.`, location);
+    if (!Object.hasOwn(defaults, key)) failure('INVALID_OPTIONS', `Unknown limit: ${key}.`, location);
     const value = (supplied as Record<string, unknown>)[key];
     if (value === undefined) continue;
-    if (value !== null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)) failure('INVALID_OPTIONS', `${key} debe ser un entero seguro no negativo o null.`, location);
+    if (value !== null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)) failure('INVALID_OPTIONS', `${key} must be a nonnegative safe integer or null.`, location);
     (result as Record<string, unknown>)[key] = value;
   }
   return result;

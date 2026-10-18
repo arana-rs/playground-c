@@ -10,7 +10,7 @@ test('worker returns a startup error when project preparation setup throws', asy
   try {
     await import('../src/execution/engine.worker.ts?startup-error-test');
     const file = {
-      get name() { throw new Error('falló la lectura del nombre'); },
+      get name() { throw new Error('failed to read the file name'); },
       async text() { return 'int main(void) { return 0; }'; },
     };
     scope.onmessage({ data: {
@@ -28,7 +28,7 @@ test('worker returns a startup error when project preparation setup throws', asy
       type: 'error',
       jobId: 41,
       phase: 'startup',
-      message: 'falló la lectura del nombre',
+      message: 'failed to read the file name',
     });
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
@@ -44,7 +44,7 @@ test('worker reports transition timings and counter snapshots around interactive
 
   try {
     await import('../src/execution/engine.worker.ts?stdin-progress-test');
-    const source = '#include <stdio.h>\nint main(void) {\n  int value = 0;\n  printf("valor? ");\n  if (scanf("%d", &value) != 1) return 1;\n  printf("%d\\n", value);\n  return 0;\n}\n';
+    const source = '#include <stdio.h>\nint main(void) {\n  int value = 0;\n  printf("value? ");\n  if (scanf("%d", &value) != 1) return 1;\n  printf("%d\\n", value);\n  return 0;\n}\n';
     scope.onmessage({ data: {
       type: 'run',
       jobId: 52,

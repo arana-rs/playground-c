@@ -3,13 +3,13 @@ import type { RunCliWorkerData, RunCliWorkerMessage, RunCliWorkerRequest } from 
 import { formatDiagnosticLocation } from '../src/execution/diagnosticFormatting.ts';
 import { RUN_CONFIGURATION } from '../src/execution/configuration.ts';
 
-const USAGE = 'Uso: pnpm run-c <archivo.c>\n     pnpm run-c -- --help\n';
+const USAGE = 'Usage: pnpm run-c <file.c>\n     pnpm run-c -- --help\n';
 const workerData: RunCliWorkerData | undefined = parseArguments(process.argv.slice(2));
 
 function parseArguments(args: string[]): RunCliWorkerData | undefined {
   if (args[0] === '--') args = args.slice(1);
   if (args.length === 1 && args[0] === '--help') {
-    process.stdout.write(`${USAGE}\nEjecuta una fuente C con el motor del proyecto. La entrada virtual se llama main.c.\n`);
+    process.stdout.write(`${USAGE}\nRun a C source file with the project engine. The virtual input file is named main.c.\n`);
     process.exitCode = 0;
     return undefined;
   }
@@ -33,7 +33,7 @@ function runFile(data: RunCliWorkerData): void {
     worker = new Worker(new URL('./run-c.worker.ts', import.meta.url), { workerData: data });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`run-c: no se pudo iniciar la ejecución: ${message}\n`);
+    process.stderr.write(`run-c: could not start execution: ${message}\n`);
     process.exitCode = 1;
     return;
   }
@@ -107,7 +107,7 @@ function runFile(data: RunCliWorkerData): void {
 
   function onTimeout(): void {
     const timeout = RUN_CONFIGURATION.timeoutMs;
-    finish(1, `run-c: la ejecución superó ${timeout} ms de tiempo activo.`);
+    finish(1, `run-c: execution exceeded ${timeout} ms of active time.`);
   }
 
   function sendQueuedInput(): void {
@@ -144,7 +144,7 @@ function runFile(data: RunCliWorkerData): void {
   }
 
   function onStdinError(error: Error): void {
-    finish(1, `run-c: error al leer stdin: ${error.message}`);
+    finish(1, `run-c: failed to read stdin: ${error.message}`);
   }
 
   function onSigint(): void {
@@ -161,7 +161,7 @@ function runFile(data: RunCliWorkerData): void {
       return;
     }
     if (message.type === 'read-error') {
-      finish(1, `run-c: no se pudo leer ${JSON.stringify(data.filePath)}: ${message.message}`);
+      finish(1, `run-c: could not read ${JSON.stringify(data.filePath)}: ${message.message}`);
       return;
     }
     if (message.type === 'worker-error') {
@@ -187,8 +187,8 @@ function runFile(data: RunCliWorkerData): void {
   stdin.resume();
 
   worker.on('message', onMessage);
-  worker.on('error', (error: Error) => finish(1, `run-c: no se pudo iniciar la ejecución: ${error.message}`));
+  worker.on('error', (error: Error) => finish(1, `run-c: could not start execution: ${error.message}`));
   worker.on('exit', (code: number) => {
-    if (!done) finish(1, `run-c: el worker terminó inesperadamente (código ${code}).`, false);
+    if (!done) finish(1, `run-c: worker exited unexpectedly (code ${code}).`, false);
   });
 }

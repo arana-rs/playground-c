@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-test('el Worker real prepara main, avanza por líneas y drena solo eventos lifecycle', async () => {
+test('the real Worker prepares main, advances by line, and drains only lifecycle events', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -17,20 +17,20 @@ test('el Worker real prepara main, avanza por líneas y drena solo eventos lifec
     assert.deepEqual(responses[0].location, { file: 'main.c', line: 2, column: responses[0].location.column });
     assert.ok(responses[0].location.column > 0);
     assert.ok(responses[0].events.some(event => event.kind === 'scope-enter' && event.scopeName === 'main'));
-    assert.deepEqual(responses[0].stackScalars, [], 'entrar en main no publica declaraciones futuras');
+    assert.deepEqual(responses[0].stackScalars, [], 'entering main does not publish future declarations');
     assert.ok(!responses[0].events.some(event => event.kind === 'object-create' && (event.name === 'value' || event.name === 'pending')));
     const staticValue = responses[0].staticObjects.find(object => object.name === 'global_value');
-    assert.ok(staticValue, 'debug-ready incluye los escalares globales reales');
+    assert.ok(staticValue, 'debug-ready includes actual global scalars');
     assert.equal(staticValue.origin, 'variable');
     assert.equal(staticValue.displayValue, '23');
     assert.equal(staticValue.size, 4);
     assert.match(staticValue.address, /^0x[\da-f]+$/iu);
     assert.ok(
       responses[0].staticObjects.every(object => object.origin !== 'string-literal'),
-      'el Worker no publica previews de literales en staticObjects',
+      'the Worker does not publish string previews in staticObjects',
     );
     const stringLiteral = responses[0].arrays.find(object => object.origin === 'string-literal');
-    assert.ok(stringLiteral, 'debug-ready incluye el literal como raíz de array');
+    assert.ok(stringLiteral, 'debug-ready includes the string literal as an array root');
     assert.equal(stringLiteral.type, 'char[3]');
     assert.equal(stringLiteral.size, 3);
     assert.equal(stringLiteral.status, 'available');
@@ -42,7 +42,7 @@ test('el Worker real prepara main, avanza por líneas y drena solo eventos lifec
     assert.equal(responses[1].progress.kind, 'paused');
     assert.equal(responses[1].progress.location.line, 3);
     const valueCreateEvent = responses[1].events.find(event => event.kind === 'object-create' && event.name === 'value');
-    assert.ok(valueCreateEvent, 'la declaración publica el objeto al ejecutar su inicializador');
+    assert.ok(valueCreateEvent, 'the declaration publishes the object when its initializer executes');
     assert.equal(responses[1].stackScalars.length, 1);
     const initializedValue = responses[1].stackScalars[0];
     assert.equal(initializedValue.name, 'value');
@@ -55,12 +55,12 @@ test('el Worker real prepara main, avanza por líneas y drena solo eventos lifec
     assert.equal(typeof initializedValue.frameId, 'number');
     assert.match(initializedValue.address, /^0x[\da-f]+$/iu);
     assert.equal(initializedValue.initialized, true);
-    assert.equal(initializedValue.displayValue, '1', 'la instantánea corresponde a la ubicación nueva');
+    assert.equal(initializedValue.displayValue, '1', 'the snapshot corresponds to the new location');
 
     scope.onmessage({ data: { type: 'debug-step', jobId: 73, requestId: 2 } });
     assert.equal(responses[2].progress.location.line, 4);
     const pendingCreateEvent = responses[2].events.find(event => event.kind === 'object-create' && event.name === 'pending');
-    assert.ok(pendingCreateEvent, 'la declaración sin inicializador también crea un objeto observable');
+    assert.ok(pendingCreateEvent, 'a declaration without an initializer also creates an observable object');
     assert.equal(responses[2].stackScalars.length, 2);
     assert.equal(responses[2].stackScalars[0].id, valueCreateEvent.allocationId);
     assert.equal(responses[2].stackScalars[0].displayValue, '1');
@@ -75,7 +75,7 @@ test('el Worker real prepara main, avanza por líneas y drena solo eventos lifec
 
     scope.onmessage({ data: { type: 'debug-step', jobId: 73, requestId: 4 } });
     assert.equal(responses[4].progress.kind, 'terminated');
-    assert.deepEqual(responses[4].stackScalars, [], 'la inspección terminal refleja el cierre normal del scope');
+    assert.deepEqual(responses[4].stackScalars, [], 'terminal inspection reflects normal scope exit');
     assert.ok(responses.flatMap(response => response.events ?? []).every(event => !('value' in event)));
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
@@ -83,7 +83,7 @@ test('el Worker real prepara main, avanza por líneas y drena solo eventos lifec
   }
 });
 
-test('el Worker conserva los valores escalares, las conversiones exactas y los scopes entre pausas', async () => {
+test('the Worker retains scalar values, exact conversions, and scopes across pauses', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -92,31 +92,31 @@ test('el Worker conserva los valores escalares, las conversiones exactas y los s
   try {
     await import('../src/memory/memory.worker.ts?memory-viewer-scalar-mutations-test');
     const source = [
-      'static int visitas;',
+      'static int visits;',
       'int main(void) {',
-      '    int pendiente;',
-      '    pendiente = 0;',
-      '    int valor = 4;',
-      '    valor = valor + 1;',
-      '    valor += 2;',
-      '    int anterior_incremento = valor++;',
-      '    int resultado_incremento = ++valor;',
-      '    int anterior_decremento = valor--;',
-      '    int resultado_decremento = --valor;',
-      '    long exacto = 9007199254740993L;',
-      '    int resultado = exacto > 0 ? valor : 0;',
+      '    int uninitialized;',
+      '    uninitialized = 0;',
+      '    int value = 4;',
+      '    value = value + 1;',
+      '    value += 2;',
+      '    int previous_increment = value++;',
+      '    int increment_result = ++value;',
+      '    int previous_decrement = value--;',
+      '    int decrement_result = --value;',
+      '    long exact = 9007199254740993L;',
+      '    int result = exact > 0 ? value : 0;',
       '    {',
-      '        int resultado = 10;',
-      '        resultado--;',
+      '        int result = 10;',
+      '        result--;',
       '    }',
-      '    visitas += 1;',
+      '    visits += 1;',
       '    return 0;',
       '}',
     ].join('\n');
     scope.onmessage({ data: { type: 'debug-start', jobId: 74, fileName: 'main.c', source } });
 
     assert.equal(responses[0].type, 'debug-ready');
-    assert.equal(responses[0].staticObjects.find(object => object.name === 'visitas')?.displayValue, '0');
+    assert.equal(responses[0].staticObjects.find(object => object.name === 'visits')?.displayValue, '0');
 
     let terminal;
     for (let requestId = 1; requestId <= 40; requestId += 1) {
@@ -128,48 +128,48 @@ test('el Worker conserva los valores escalares, las conversiones exactas y los s
         break;
       }
     }
-    assert.ok(terminal, 'la demo llega a un estado terminal dentro del presupuesto de pasos');
+    assert.ok(terminal, 'the example reaches a terminal state within the step budget');
     assert.equal(terminal.progress.kind, 'terminated');
 
     const steps = responses.slice(1);
     const snapshots = name => steps.flatMap(response => response.stackScalars.filter(scalar => scalar.name === name));
-    assert.ok(snapshots('pendiente').some(scalar => !scalar.initialized && scalar.displayValue === '?'));
-    assert.ok(snapshots('pendiente').some(scalar => scalar.initialized && scalar.displayValue === '0'), 'la asignación simple inicializa el objeto');
+    assert.ok(snapshots('uninitialized').some(scalar => !scalar.initialized && scalar.displayValue === '?'));
+    assert.ok(snapshots('uninitialized').some(scalar => scalar.initialized && scalar.displayValue === '0'), 'a simple assignment initializes the object');
 
     const valueChanges = [];
     for (const response of steps) {
-      const scalar = response.stackScalars.find(item => item.name === 'valor');
+      const scalar = response.stackScalars.find(item => item.name === 'value');
       if (scalar && valueChanges.at(-1) !== scalar.displayValue) valueChanges.push(scalar.displayValue);
     }
     assert.deepEqual(valueChanges, ['4', '5', '7', '8', '9', '8', '7']);
     for (const [name, value] of [
-      ['anterior_incremento', '7'],
-      ['resultado_incremento', '9'],
-      ['anterior_decremento', '9'],
-      ['resultado_decremento', '7'],
+      ['previous_increment', '7'],
+      ['increment_result', '9'],
+      ['previous_decrement', '9'],
+      ['decrement_result', '7'],
     ]) {
-      assert.ok(snapshots(name).some(scalar => scalar.displayValue === value), `${name} conserva ${value}`);
+      assert.ok(snapshots(name).some(scalar => scalar.displayValue === value), `${name} retains ${value}`);
     }
-    assert.ok(snapshots('exacto').some(scalar => scalar.type === 'long' && scalar.displayValue === '9007199254740993'));
+    assert.ok(snapshots('exact').some(scalar => scalar.type === 'long' && scalar.displayValue === '9007199254740993'));
 
-    const shadowed = steps.find(response => response.stackScalars.filter(scalar => scalar.name === 'resultado').length === 2);
-    assert.ok(shadowed, 'el scope anidado muestra ambas declaraciones con el mismo nombre');
-    const results = shadowed.stackScalars.filter(scalar => scalar.name === 'resultado');
+    const shadowed = steps.find(response => response.stackScalars.filter(scalar => scalar.name === 'result').length === 2);
+    assert.ok(shadowed, 'the nested scope shows both declarations with the same name');
+    const results = shadowed.stackScalars.filter(scalar => scalar.name === 'result');
     assert.deepEqual(results.map(scalar => scalar.displayValue), ['7', '10']);
     assert.notEqual(results[0].id, results[1].id);
     assert.notEqual(results[0].scopeId, results[1].scopeId);
     const afterShadowScope = steps.slice(steps.indexOf(shadowed) + 1)
-      .find(response => response.stackScalars.filter(scalar => scalar.name === 'resultado').length === 1);
-    assert.equal(afterShadowScope?.stackScalars.find(scalar => scalar.name === 'resultado')?.displayValue, '7');
+      .find(response => response.stackScalars.filter(scalar => scalar.name === 'result').length === 1);
+    assert.equal(afterShadowScope?.stackScalars.find(scalar => scalar.name === 'result')?.displayValue, '7');
 
-    assert.ok(steps.some(response => response.staticObjects.find(object => object.name === 'visitas')?.displayValue === '1'));
+    assert.ok(steps.some(response => response.staticObjects.find(object => object.name === 'visits')?.displayValue === '1'));
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
     else delete globalThis.self;
   }
 });
 
-test('el Worker diagnostica ++ sobre una automática sin inicializar y conserva su estado', async () => {
+test('the Worker reports ++ on an uninitialized automatic and retains its state', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -179,7 +179,7 @@ test('el Worker diagnostica ++ sobre una automática sin inicializar y conserva 
     await import('../src/memory/memory.worker.ts?memory-viewer-uninitialized-increment-test');
     scope.onmessage({ data: {
       type: 'debug-start', jobId: 75, fileName: 'main.c',
-      source: 'int main(void) {\n    int pendiente;\n    pendiente++;\n    return 0;\n}\n',
+      source: 'int main(void) {\n    int uninitialized;\n    uninitialized++;\n    return 0;\n}\n',
     } });
     assert.equal(responses[0].type, 'debug-ready');
 
@@ -197,7 +197,7 @@ test('el Worker diagnostica ++ sobre una automática sin inicializar y conserva 
     assert.deepEqual(
       failed.stackScalars.map(({ initialized, displayValue }) => ({ initialized, displayValue })),
       [{ initialized: false, displayValue: '?' }],
-      'el incremento fallido no inicializa ni modifica el objeto',
+      'the failed increment does not initialize or modify the object',
     );
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
@@ -205,7 +205,7 @@ test('el Worker diagnostica ++ sobre una automática sin inicializar y conserva 
   }
 });
 
-test('el Worker inspecciona bloques heap vivos por dirección, tamaño e identidad de asignación', async () => {
+test('the Worker inspects live heap blocks by address, size, and allocation identity', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -249,14 +249,14 @@ test('el Worker inspecciona bloques heap vivos por dirección, tamaño e identid
     });
 
     const freedResponse = responses.find(response => response.events?.some(event => event.kind === 'object-delete' && event.origin === 'heap'));
-    assert.deepEqual(freedResponse.heapObjects, [], 'free retira el bloque de la inspección activa');
+    assert.deepEqual(freedResponse.heapObjects, [], 'free removes the block from active inspection');
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
     else delete globalThis.self;
   }
 });
 
-test('el Worker conserva el scanf suspendido, sus efectos parciales y la salida incremental', async () => {
+test('the Worker retains suspended scanf, its partial effects, and incremental output', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -290,16 +290,16 @@ test('el Worker conserva el scanf suspendido, sus efectos parciales y la salida 
         firstWait = progress;
         break;
       }
-      assert.equal(progress.progress.kind, 'paused', 'la VM permanece viva hasta alcanzar scanf');
+      assert.equal(progress.progress.kind, 'paused', 'the VM remains alive until it reaches scanf');
       requestId += 1;
     }
-    assert.ok(firstWait, 'scanf solicita entrada sin finalizar la sesión');
+    assert.ok(firstWait, 'scanf requests input without ending the session');
     assert.ok(firstWait.inputRequestId > 0);
-    assert.equal('stdout' in firstWait.progress, false, 'input-needed no clona snapshots de salida acumulados');
+    assert.equal('stdout' in firstWait.progress, false, 'input-needed does not clone accumulated output snapshots');
     assert.equal('stderr' in firstWait.progress, false);
     const waitIndex = responses.indexOf(firstWait);
     const firstOutput = responses.findIndex(response => response.type === 'debug-output');
-    assert.ok(firstOutput >= 0 && firstOutput < waitIndex, 'el prompt llega antes del evento input-needed');
+    assert.ok(firstOutput >= 0 && firstOutput < waitIndex, 'the prompt arrives before the input-needed event');
     assert.equal(new TextDecoder().decode(responses[firstOutput].chunk), 'prompt> ');
 
     const stepRequestId = firstWait.requestId;
@@ -309,7 +309,7 @@ test('el Worker conserva el scanf suspendido, sus efectos parciales y la salida 
       type: 'debug-stdin', jobId: 111, requestId: stepRequestId, inputRequestId: firstInputToken + 1,
       bytes: new TextEncoder().encode('999\n'),
     } });
-    assert.equal(responses.length, responseCount, 'un token de entrada obsoleto no reanuda el scanf');
+    assert.equal(responses.length, responseCount, 'a stale input token does not resume scanf');
 
     scope.onmessage({ data: {
       type: 'debug-stdin', jobId: 111, requestId: stepRequestId, inputRequestId: firstInputToken,
@@ -317,14 +317,14 @@ test('el Worker conserva el scanf suspendido, sus efectos parciales y la salida 
     } });
     const secondWait = responses.at(-1);
     assert.equal(secondWait.type, 'debug-progress');
-    assert.equal(secondWait.progress.kind, 'input-needed', 'el segundo %d sigue esperando el resto de la misma llamada');
-    assert.equal('stdout' in secondWait.progress, false, 'los waits repetidos transportan solo deltas de salida');
+    assert.equal(secondWait.progress.kind, 'input-needed', 'the second %d still waits for the rest of the same call');
+    assert.equal('stdout' in secondWait.progress, false, 'repeated waits carry only output deltas');
     assert.equal('stderr' in secondWait.progress, false);
-    assert.equal(secondWait.requestId, stepRequestId, 'la continuación conserva la solicitud del mismo paso');
-    assert.notEqual(secondWait.inputRequestId, firstInputToken, 'el segundo wait tiene un token nuevo');
+    assert.equal(secondWait.requestId, stepRequestId, 'the continuation retains the request for the same step');
+    assert.notEqual(secondWait.inputRequestId, firstInputToken, 'the second wait has a new token');
     const array = secondWait.arrays.find(item => item.name === 'values');
-    assert.equal(array.elements[0].displayValue, '12', 'la primera conversión ya fue asignada antes de la segunda espera');
-    assert.equal(secondWait.stackScalars.find(item => item.name === 'index').displayValue, '1', 'el argumento &values[index++] no se evalúa otra vez');
+    assert.equal(array.elements[0].displayValue, '12', 'the first conversion was assigned before the second wait');
+    assert.equal(secondWait.stackScalars.find(item => item.name === 'index').displayValue, '1', 'the &values[index++] argument is not evaluated again');
 
     scope.onmessage({ data: {
       type: 'debug-stdin', jobId: 111, requestId: stepRequestId, inputRequestId: secondWait.inputRequestId,
@@ -333,17 +333,17 @@ test('el Worker conserva el scanf suspendido, sus efectos parciales y la salida 
     const resumed = responses.at(-1);
     assert.equal(resumed.type, 'debug-progress');
     assert.equal(resumed.progress.kind, 'paused');
-    assert.equal('stdout' in resumed.progress, false, 'una pausa intermedia tampoco duplica el prefijo de salida');
+    assert.equal('stdout' in resumed.progress, false, 'an intermediate pause also avoids duplicating the output prefix');
     assert.equal('stderr' in resumed.progress, false);
     assert.equal(resumed.requestId, stepRequestId);
-    assert.equal(resumed.progress.location.line, 9, 'la línea scanf termina y la VM se detiene en la instrucción siguiente');
+    assert.equal(resumed.progress.location.line, 9, 'the scanf line ends and the VM pauses at the next instruction');
     assert.equal(resumed.stackScalars.find(item => item.name === 'index').displayValue, '1');
 
     requestId += 1;
     scope.onmessage({ data: { type: 'debug-step', jobId: 111, requestId } });
     const outputEvents = responses.filter(response => response.type === 'debug-output' && response.stream === 'stdout');
     const outputText = outputEvents.map(response => new TextDecoder().decode(response.chunk)).join('');
-    assert.equal(outputText, 'prompt> values=12,34 index=1 count=2\n', 'cada byte producido se envía una sola vez y en orden');
+    assert.equal(outputText, 'prompt> values=12,34 index=1 count=2\n', 'each output byte is sent once and in order');
     assert.ok(outputEvents.every((response, index) => index === 0 || response.sequence > outputEvents[index - 1].sequence));
 
     requestId += 1;
@@ -355,7 +355,7 @@ test('el Worker conserva el scanf suspendido, sus efectos parciales y la salida 
   }
 });
 
-test('el Worker transmite el origen real de parámetros y locales en el mismo scope', async () => {
+test('the Worker transmits the real origin of parameters and locals in the same scope', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -397,7 +397,7 @@ test('el Worker transmite el origen real de parámetros y locales en el mismo sc
       }
     }
 
-    assert.ok(helperScopeEntryResponse, 'el Worker publica la entrada al scope raíz de helper');
+    assert.ok(helperScopeEntryResponse, 'the Worker publishes entry to helper root scope');
     const helperScopeEntry = helperScopeEntryResponse.events.find(event => event.kind === 'scope-enter' && event.scopeName === 'helper');
     const parametersAtEntry = helperScopeEntryResponse.stackScalars.filter(scalar => scalar.frameId === helperScopeEntry.frameId);
     assert.deepEqual(parametersAtEntry.map(({ name, origin }) => [name, origin]), [
@@ -405,15 +405,15 @@ test('el Worker transmite el origen real de parámetros y locales en el mismo sc
       ['ratio', 'parameter'],
       ['enabled', 'parameter'],
     ]);
-    assert.equal(parametersAtEntry.some(scalar => scalar.name === 'local'), false, 'la entrada no inventa locales antes de ejecutar su declaración');
+    assert.equal(parametersAtEntry.some(scalar => scalar.name === 'local'), false, 'entry does not invent locals before their declaration executes');
     assert.deepEqual(parametersAtEntry.map(scalar => scalar.displayValue), ['2', '1.5', '1']);
 
-    assert.ok(localResponse, 'el Worker añade el local después de ejecutar su declaración');
+    assert.ok(localResponse, 'the Worker adds the local after its declaration executes');
     const local = localResponse.stackScalars.find(scalar => scalar.name === 'local');
     const count = localResponse.stackScalars.find(scalar => scalar.name === 'count');
     assert.equal(local.origin, 'variable');
-    assert.equal(local.type, count.type, 'parámetro y local comparten tipo int');
-    assert.equal(local.scopeId, count.scopeId, 'parámetro y local pertenecen al scope raíz de helper');
+    assert.equal(local.type, count.type, 'the parameter and local share int type');
+    assert.equal(local.scopeId, count.scopeId, 'the parameter and local belong to helper root scope');
     assert.equal(local.frameId, count.frameId);
     assert.notEqual(local.id, count.id);
 
@@ -433,14 +433,14 @@ test('el Worker transmite el origen real de parámetros y locales en el mismo sc
     const firstParameterCreate = helperCreates.find(event => event.origin === 'parameter');
     const localCreate = helperCreates.find(event => event.name === 'local');
     assert.ok(helperFrameEntry.sequence < helperScope.sequence && helperScope.sequence < firstParameterCreate.sequence);
-    assert.ok(firstParameterCreate.sequence < localCreate.sequence, 'la metadata de origen sigue el orden real de creación');
+    assert.ok(firstParameterCreate.sequence < localCreate.sequence, 'origin metadata follows the actual creation order');
 
-    assert.ok(terminalResponse, 'la llamada termina dentro del presupuesto de pasos de la fixture');
+    assert.ok(terminalResponse, 'the call terminates within the fixture step budget');
     assert.deepEqual(terminalResponse.stackScalars, []);
     const deletesById = new Map(events.filter(event => event.kind === 'object-delete').map(event => [event.allocationId, event]));
     for (const created of helperCreates) {
       const deleted = deletesById.get(created.allocationId);
-      assert.ok(deleted, `${created.name} cierra el mismo objeto creado`);
+      assert.ok(deleted, `${created.name} closes the same object that was created`);
       assert.equal(deleted.frameId, created.frameId);
       assert.equal(deleted.scopeId, created.scopeId);
       assert.equal(deleted.origin, created.origin);

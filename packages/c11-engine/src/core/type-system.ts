@@ -202,10 +202,10 @@ const fallbackLocation: Location = { file: 'main.c', line: 1, column: 1 };
 const layingOut = new Set<number>();
 
 export function layoutAggregate(definition: AggregateDefinition, aggregates: AggregateContext, at: Location = definition.location): void {
-  if (!definition.complete) failure('INCOMPLETE_TYPE', `El tipo ${definition.kind} ${definition.tag ?? ''} todavía está incompleto.`, at);
+  if (!definition.complete) failure('INCOMPLETE_TYPE', `Type ${definition.kind} ${definition.tag ?? ''} is still incomplete.`, at);
   if (definition.size !== undefined && definition.alignment !== undefined) return;
-  if (layingOut.has(definition.id)) failure('INCOMPLETE_TYPE', 'Un agregado no puede contenerse directamente a sí mismo por valor.', at);
-  if (definition.members.length === 0) failure('TYPE_ERROR', 'Un struct o union debe declarar al menos un miembro con nombre.', at);
+  if (layingOut.has(definition.id)) failure('INCOMPLETE_TYPE', 'An aggregate cannot directly contain itself by value.', at);
+  if (definition.members.length === 0) failure('TYPE_ERROR', 'A struct or union must declare at least one named member.', at);
   layingOut.add(definition.id);
   try {
     let size = 0;
@@ -235,7 +235,7 @@ export function layoutAggregate(definition: AggregateDefinition, aggregates: Agg
         const unitSize = sizeOfType(declaredType, aggregates, member.location);
         const info = integerInfo(member.type);
         if (!info || bits.width < 0 || bits.width > info.bits || bits.width > unitSize * 8 || unqualifiedType(member.type) === '_Bool' && bits.width > 1) {
-          failure('TYPE_ERROR', 'El ancho de un bit-field debe caber en su tipo entero declarado.', member.location);
+          failure('TYPE_ERROR', 'A bit-field width must fit in its declared integer type.', member.location);
         }
         bits.storageUnitSize = unitSize;
         bits.signed = !info.unsigned;
@@ -248,7 +248,7 @@ export function layoutAggregate(definition: AggregateDefinition, aggregates: Agg
           continue;
         }
         if (bits.width === 0) {
-          if (!member.unnamedBitField) failure('TYPE_ERROR', 'Un bit-field de ancho cero debe ser anónimo.', member.location);
+          if (!member.unnamedBitField) failure('TYPE_ERROR', 'A zero-width bit-field must be unnamed.', member.location);
           openUnit = undefined;
           size = alignUp(size, unitSize);
           bits.storageUnitOffset = size;
@@ -291,7 +291,7 @@ export function layoutAggregate(definition: AggregateDefinition, aggregates: Agg
         if (definition.kind !== 'struct' || !flexibleType || flexibleType.length !== null || flexibleMemberIndex !== undefined ||
             member.index !== definition.members.length - 1 ||
             !definition.members.slice(0, member.index).some((prior) => !!prior.name)) {
-          failure('TYPE_ERROR', 'Un miembro flexible debe ser un array incompleto final de un struct.', member.location);
+          failure('TYPE_ERROR', 'A flexible member must be the final incomplete array in a struct.', member.location);
         }
         flexibleMemberIndex = member.index;
         size = alignUp(size, memberAlignment);
@@ -300,7 +300,7 @@ export function layoutAggregate(definition: AggregateDefinition, aggregates: Agg
       }
 
       if (containsFlexibleAggregate(member.type, aggregates)) {
-        failure('TYPE_ERROR', 'Un tipo que contiene un miembro flexible no puede ser miembro de otro agregado ni de un array.', member.location);
+        failure('TYPE_ERROR', 'A type containing a flexible member cannot be a member of another aggregate or an array.', member.location);
       }
 
       const memberSize = sizeOfType(member.type, aggregates, member.location);
@@ -337,21 +337,21 @@ export function containsFlexibleAggregate(type: CType, aggregates: AggregateCont
 const alignUp = (value: number, alignment: number): number => Math.ceil(value / alignment) * alignment;
 function aggregateDefinition(type: AggregateCType, aggregates: AggregateContext, at: Location): AggregateDefinition {
   const definition = aggregates.find((item) => item.id === type.id);
-  if (!definition || !definition.complete) failure('INCOMPLETE_TYPE', `El tipo agregado ${type.id} está incompleto.`, at);
+  if (!definition || !definition.complete) failure('INCOMPLETE_TYPE', `Aggregate type ${type.id} is incomplete.`, at);
   return definition;
 }
 export function sizeOfType(type: CType, aggregates: AggregateContext = [], at: Location = fallbackLocation): number {
   type = unqualifiedType(type);
-  if (type === 'void' || isFunction(type)) failure('INCOMPLETE_TYPE', 'El tipo no tiene tamaño de objeto en C11.', at);
+  if (type === 'void' || isFunction(type)) failure('INCOMPLETE_TYPE', 'The type has no object size in C11.', at);
   if (pointerType(type)) return 8;
   const enumeration = enumType(type);
-  if (enumeration && !enumeration.definition.complete) failure('INCOMPLETE_TYPE', 'El tipo enum todavía está incompleto.', at);
+  if (enumeration && !enumeration.definition.complete) failure('INCOMPLETE_TYPE', 'The enum type is still incomplete.', at);
   const array = arrayType(type);
   if (array) {
-    if (array.length === null) failure('INCOMPLETE_TYPE', 'No se puede calcular sizeof de un array incompleto.', at);
+    if (array.length === null) failure('INCOMPLETE_TYPE', 'Cannot compute sizeof for an incomplete array.', at);
     const stride = sizeOfType(array.element, aggregates, at);
     const size = stride * array.length;
-    if (!Number.isSafeInteger(size)) failure('TYPE_SIZE_RANGE', 'El tamaño del objeto excede el perfil virtual representable.', at);
+    if (!Number.isSafeInteger(size)) failure('TYPE_SIZE_RANGE', 'The object size exceeds the representable virtual profile.', at);
     return size;
   }
   const aggregate = aggregateType(type);
@@ -361,15 +361,15 @@ export function sizeOfType(type: CType, aggregates: AggregateContext = [], at: L
     return definition.size!;
   }
   const size = scalarSize(type);
-  if (!size) failure('INCOMPLETE_TYPE', `El tipo «${String(type)}» no tiene tamaño de objeto.`, at);
+  if (!size) failure('INCOMPLETE_TYPE', `Type «${String(type)}» has no object size.`, at);
   return size;
 }
 export function alignOfType(type: CType, aggregates: AggregateContext = [], at: Location = fallbackLocation): number {
   type = unqualifiedType(type);
-  if (type === 'void' || isFunction(type)) failure('INCOMPLETE_TYPE', 'El tipo no tiene alineación de objeto en C11.', at);
+  if (type === 'void' || isFunction(type)) failure('INCOMPLETE_TYPE', 'The type has no object alignment in C11.', at);
   if (pointerType(type)) return 8;
   const enumeration = enumType(type);
-  if (enumeration && !enumeration.definition.complete) failure('INCOMPLETE_TYPE', 'El tipo enum todavía está incompleto.', at);
+  if (enumeration && !enumeration.definition.complete) failure('INCOMPLETE_TYPE', 'The enum type is still incomplete.', at);
   const array = arrayType(type);
   if (array) return alignOfType(array.element, aggregates, at);
   const aggregate = aggregateType(type);
@@ -379,7 +379,7 @@ export function alignOfType(type: CType, aggregates: AggregateContext = [], at: 
     return definition.alignment!;
   }
   const alignment = scalarAlignment(type);
-  if (!alignment) failure('INCOMPLETE_TYPE', `El tipo «${String(type)}» no tiene alineación de objeto.`, at);
+  if (!alignment) failure('INCOMPLETE_TYPE', `Type «${String(type)}» has no object alignment.`, at);
   return alignment;
 }
 

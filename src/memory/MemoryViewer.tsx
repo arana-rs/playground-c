@@ -51,6 +51,8 @@ import {
   mergeMemoryViewerHeapObjects,
 } from './heapSnapshots.ts';
 import { useStackHorizontalScroll } from './useStackHorizontalScroll.ts';
+import { useI18n } from '../i18n.tsx';
+import type { Translate } from '../i18n.tsx';
 
 interface MemoryViewerProps {
   source: string;
@@ -60,16 +62,17 @@ interface MemoryViewerProps {
 function getStatusLabel(
   status: ReturnType<typeof useMemoryViewer>['status'],
   isPlaying: boolean,
+  t: Translate,
 ) {
   switch (status) {
-    case 'starting': return 'Preparando…';
-    case 'paused': return isPlaying ? 'Reproduciendo…' : 'En pausa';
-    case 'running': return isPlaying ? 'Reproduciendo…' : 'Avanzando…';
-    case 'waiting-input': return 'Esperando entrada';
-    case 'terminated': return 'Fin del programa';
-    case 'cancelled': return 'Depuración detenida';
-    case 'error': return 'Error de ejecución';
-    case 'limit': return 'Límite de ejecución';
+    case 'starting': return t('memoryViewer.status.preparing');
+    case 'paused': return isPlaying ? t('memoryViewer.status.playing') : t('memoryViewer.status.paused');
+    case 'running': return isPlaying ? t('memoryViewer.status.playing') : t('memoryViewer.status.stepping');
+    case 'waiting-input': return t('memoryViewer.status.waitingInput');
+    case 'terminated': return t('memoryViewer.status.programEnded');
+    case 'cancelled': return t('memoryViewer.status.stopped');
+    case 'error': return t('memoryViewer.status.error');
+    case 'limit': return t('memoryViewer.status.limit');
   }
 }
 
@@ -78,24 +81,24 @@ function getDebugConsoleStatus(
   isPlaying: boolean,
   isViewingHistory: boolean,
   inputRequestId: number | null,
+  t: Translate,
 ): { label: string; tone: ConsoleStatusTone } {
-  if (status === 'cancelled') return { label: 'Depuración detenida', tone: 'cancelled' };
-  if (isViewingHistory) return { label: 'Historial seleccionado', tone: 'ready' };
-  if (inputRequestId !== null || status === 'waiting-input') return { label: 'Esperando entrada', tone: 'waiting' };
-  if (status === 'starting') return { label: 'Preparando depuración', tone: 'running' };
-  if (status === 'running' || (status === 'paused' && isPlaying)) return { label: 'Avanzando', tone: 'running' };
-  if (status === 'terminated') return { label: 'Finalizado', tone: 'finished' };
-  if (status === 'error') return { label: 'Error', tone: 'error' };
-  if (status === 'limit') return { label: 'Límite alcanzado', tone: 'stopped' };
-  return { label: 'En pausa', tone: 'ready' };
+  if (status === 'cancelled') return { label: t('memoryViewer.status.stopped'), tone: 'cancelled' };
+  if (isViewingHistory) return { label: t('memoryViewer.status.historySelected'), tone: 'ready' };
+  if (inputRequestId !== null || status === 'waiting-input') return { label: t('memoryViewer.status.waitingInput'), tone: 'waiting' };
+  if (status === 'starting') return { label: t('memoryViewer.status.preparing'), tone: 'running' };
+  if (status === 'running' || (status === 'paused' && isPlaying)) return { label: t('memoryViewer.status.stepping'), tone: 'running' };
+  if (status === 'terminated') return { label: t('memoryViewer.status.finished'), tone: 'finished' };
+  if (status === 'error') return { label: t('memoryViewer.status.error'), tone: 'error' };
+  if (status === 'limit') return { label: t('memoryViewer.status.limitReached'), tone: 'stopped' };
+  return { label: t('memoryViewer.status.paused'), tone: 'ready' };
 }
 
 type MemoryRegion = 'static' | 'stack' | 'heap';
-const MEMORY_VIEWER_UNINITIALIZED_LABEL = 'Sin inicializar';
 const MEMORY_VIEWER_MODES = [
-  { value: 'minimal', label: 'Minimal' },
-  { value: 'normal', label: 'Normal' },
-  { value: 'debug', label: 'Debug' },
+  { value: 'minimal' },
+  { value: 'normal' },
+  { value: 'debug' },
 ] as const;
 type MemoryViewerMode = (typeof MEMORY_VIEWER_MODES)[number]['value'];
 
@@ -275,9 +278,10 @@ function isOutsideDialogBounds(dialog: HTMLDialogElement, clientX: number, clien
 
 function scalarCardRecord(
   scalar: DebugScalarSnapshot | DebugStaticObjectSnapshot,
+  t: Translate,
   valueChanged = false,
 ): MemoryViewerCardRecord {
-  const valueLabel = scalar.initialized ? scalar.displayValue : MEMORY_VIEWER_UNINITIALIZED_LABEL;
+  const valueLabel = scalar.initialized ? scalar.displayValue : t('memoryViewer.uninitialized');
   return {
     id: scalar.id,
     arrayElementKey: null,
@@ -288,7 +292,7 @@ function scalarCardRecord(
     size: scalar.size,
     origin: scalar.origin,
     duration: 'duration' in scalar ? scalar.duration : 'automatic',
-    label: scalar.name ?? 'Literal de cadena',
+    label: scalar.name ?? t('memoryViewer.stringLiteral'),
     typeLabel: scalar.type,
     valueTitle: valueLabel,
     valueContent: scalar.initialized ? truncateMemoryViewerScalarValue(scalar.displayValue) : '—',
@@ -310,40 +314,41 @@ function pointerValueTitle(pointer: {
   readonly status: DebugPointerSnapshot['status'] | undefined;
   readonly displayValue: string;
   readonly target?: DebugPointerSnapshot['target'];
-}): string {
+}, t: Translate): string {
   if (pointer.initialized !== true || pointer.status === 'uninitialized') {
-    return 'Sin inicializar: todavía no hay una dirección almacenada.';
+    return t('memoryViewer.pointerTitle.uninitialized');
   }
   if (pointer.status === 'null') {
-    return `NULL, puntero nulo; dirección almacenada ${pointer.displayValue}.`;
+    return t('memoryViewer.pointerTitle.null', { address: pointer.displayValue });
   }
   if (pointer.status === 'live') {
     if (pointer.target && pointer.target.byteOffset !== 0) {
-      return `Dirección almacenada ${pointer.displayValue}; apunta dentro de una asignación (offset ${pointer.target.byteOffset}). Solo se resalta si coincide con una celda visible del mismo tipo.`;
+      return t('memoryViewer.pointerTitle.interior', { address: pointer.displayValue, offset: pointer.target.byteOffset });
     }
     return pointer.target
-      ? `Dirección almacenada ${pointer.displayValue}; destino vivo${pointer.target.name ? ` ${pointer.target.name}` : ''} con identidad de asignación. Se resalta cuando su raíz aparece como objeto o celda visible en el visor.`
-      : `Dirección almacenada ${pointer.displayValue}; destino vivo sin identidad resoluble.`;
+      ? t('memoryViewer.pointerTitle.liveNamed', { address: pointer.displayValue, name: pointer.target.name ?? '' })
+      : t('memoryViewer.pointerTitle.live', { address: pointer.displayValue });
   }
   if (pointer.status === 'one-past') {
-    return `Dirección almacenada ${pointer.displayValue}; apunta una posición después del objeto.`;
+    return t('memoryViewer.pointerTitle.onePast', { address: pointer.displayValue });
   }
   if (pointer.status === 'dangling') {
-    return `Dirección almacenada ${pointer.displayValue}; puntero colgante, la asignación ya no está viva.`;
+    return t('memoryViewer.pointerTitle.dangling', { address: pointer.displayValue });
   }
   if (pointer.status === 'unmapped') {
-    return `Dirección almacenada ${pointer.displayValue}; no hay una asignación observada para esta dirección.`;
+    return t('memoryViewer.pointerTitle.unobserved', { address: pointer.displayValue });
   }
-  return `Dirección almacenada ${pointer.displayValue}; puntero a función, sin destino de memoria visualizado.`;
+  return t('memoryViewer.pointerTitle.function', { address: pointer.displayValue });
 }
 
 function pointerCardRecord(
   pointer: DebugPointerSnapshot,
   valueChanged: boolean,
   isPointerTarget: boolean,
+  t: Translate,
 ): MemoryViewerCardRecord {
   const isUninitialized = !pointer.initialized || pointer.status === 'uninitialized';
-  const valueTitle = pointerValueTitle(pointer);
+  const valueTitle = pointerValueTitle(pointer, t);
   return {
     id: pointer.id,
     arrayElementKey: null,
@@ -357,7 +362,7 @@ function pointerCardRecord(
     label: pointer.name,
     typeLabel: pointer.type,
     valueTitle,
-    uninitializedVisualLabel: isUninitialized ? MEMORY_VIEWER_UNINITIALIZED_LABEL : undefined,
+    uninitializedVisualLabel: isUninitialized ? t('memoryViewer.uninitialized') : undefined,
     valueContent: isUninitialized
       ? '—'
       : pointer.status === 'null' ? 'NULL' : truncateMemoryViewerScalarValue(pointer.displayValue),
@@ -393,11 +398,12 @@ function arrayElementCardRecord(
   array: MemoryViewerArrayElementCardContext,
   element: DebugArrayElementSnapshot,
   valueChanged: boolean,
+  t: Translate,
   isPointerTarget = false,
 ): MemoryViewerCardRecord {
   const valueTitle = element.initialized
-    ? element.valueTruncated ? `${element.displayValue} (valor truncado por presupuesto de inspección)` : element.displayValue
-    : 'Sin inicializar';
+    ? element.valueTruncated ? t('memoryViewer.truncatedValue', { value: element.displayValue }) : element.displayValue
+    : t('memoryViewer.uninitialized');
   const valueContent = element.initialized
     ? truncateMemoryViewerScalarValue(arrayElementContent(element.type, element.displayValue))
     : '—';
@@ -428,7 +434,7 @@ function arrayElementCardRecord(
   };
 }
 
-function heapCardRecord(block: DebugHeapObjectSnapshot): MemoryViewerCardRecord {
+function heapCardRecord(block: DebugHeapObjectSnapshot, t: Translate): MemoryViewerCardRecord {
   return {
     id: block.id,
     arrayElementKey: null,
@@ -439,9 +445,9 @@ function heapCardRecord(block: DebugHeapObjectSnapshot): MemoryViewerCardRecord 
     size: block.size,
     origin: block.origin,
     duration: 'heap',
-    label: 'Bloque',
-    typeLabel: 'bloque de heap',
-    valueTitle: 'Contenido desconocido (?)',
+    label: t('memoryViewer.heapBlock'),
+    typeLabel: 'heap block',
+    valueTitle: t('memoryViewer.unknownContents'),
     valueContent: '?',
     initialized: null,
     valueChanged: false,
@@ -457,14 +463,15 @@ function heapCardRecord(block: DebugHeapObjectSnapshot): MemoryViewerCardRecord 
 }
 
 function MemoryViewerMetadataFooter({ name, type, size, readOnly = false, objectKind, wrapperClassName }: MemoryViewerMetadataFooterProps) {
+  const { t } = useI18n();
   const contents = (
     <>
       <span className={`memory-viewer-object-name memory-viewer-${objectKind}-name`} title={name}>{name}</span>
       <span
         className="memory-viewer-object-metadata"
-        title={wrapperClassName ? `${type ?? 'desconocido'} · ${size} B${readOnly ? ' · solo lectura' : ''}` : undefined}
+        title={wrapperClassName ? `${type ?? t('memoryViewer.unknown')} · ${size} B${readOnly ? ` · ${t('memoryViewer.readOnly')}` : ''}` : undefined}
       >
-        {type ?? 'desconocido'} · {size} B{readOnly ? ' · solo lectura' : ''}
+        {type ?? t('memoryViewer.unknown')} · {size} B{readOnly ? ` · ${t('memoryViewer.readOnly')}` : ''}
       </span>
     </>
   );
@@ -479,8 +486,19 @@ function MemoryViewerScalarCard({
   onPointerHoverChange,
   onPointerFocusChange,
 }: MemoryViewerScalarCardProps) {
-  const accessibleType = record.typeLabel ? ` (${record.typeLabel})` : '';
-  const accessibleLabel = `${record.label}${accessibleType}${record.isParameter ? ', parámetro' : ''}${record.duration === 'thread-local' ? ', duración thread-local' : ''}, dirección ${record.address}, ${record.valueTitle}${record.isPointerTarget ? ', destino resaltado de un puntero' : ''}${record.valueChanged ? ', valor distinto entre snapshots seleccionados' : ''}${record.isHeapBlock ? `, tamaño ${record.size} bytes` : ''}${exiting ? ', nodo saliendo' : ''}`;
+  const { t } = useI18n();
+  const accessibleLabel = [
+    record.label,
+    record.typeLabel ? `(${record.typeLabel})` : null,
+    record.isParameter ? t('memoryViewer.parameter') : null,
+    record.duration === 'thread-local' ? t('memoryViewer.threadLocalDuration') : null,
+    t('memoryViewer.address', { address: record.address }),
+    record.valueTitle,
+    record.isPointerTarget ? t('memoryViewer.pointerTarget') : null,
+    record.valueChanged ? t('memoryViewer.changedValue') : null,
+    record.isHeapBlock ? t('memoryViewer.sizeBytes', { size: record.size }) : null,
+    exiting ? t('memoryViewer.exitingNode') : null,
+  ].filter(Boolean).join(', ');
   const pointerIdentity = record.isPointer ? record.pointerIdentity : null;
   const isAggregateMember = record.aggregateMemberKey !== null;
 
@@ -514,7 +532,7 @@ function MemoryViewerScalarCard({
       <span
         className="memory-viewer-scalar-value"
         title={record.valueTitle}
-        aria-label={record.isHeapBlock ? `Contenido: ${record.valueTitle}` : `Valor: ${record.valueTitle}`}
+        aria-label={t(record.isHeapBlock ? 'memoryViewer.contents' : 'memoryViewer.value', { value: record.valueTitle })}
       >
         {record.initialized === false ? (
           <span className="memory-viewer-scalar-uninitialized" aria-hidden="true">
@@ -527,7 +545,7 @@ function MemoryViewerScalarCard({
           <span className="memory-viewer-aggregate-member-placeholder" title={record.valueTitle}>
             {record.aggregateUnsupportedReason === 'array'
               ? 'array'
-              : record.aggregateUnsupportedReason === 'flexible-array' ? 'FAM' : 'agregado'}
+              : record.aggregateUnsupportedReason === 'flexible-array' ? 'FAM' : 'aggregate'}
           </span>
         ) : record.valueContent}
         {record.valueChanged && <span className="memory-viewer-scalar-change-marker" aria-hidden="true">Δ</span>}
@@ -536,7 +554,7 @@ function MemoryViewerScalarCard({
         )}
         {isAggregateMember && (
           <span className="memory-viewer-aggregate-field-name" aria-hidden="true">
-            {record.aggregateMemberName || '(anónimo)'}
+            {record.aggregateMemberName || t('memoryViewer.anonymousMember')}
           </span>
         )}
       </span>
@@ -560,12 +578,12 @@ interface MemoryViewerArrayBlockProps {
   fading?: boolean;
 }
 
-function arrayStatusMessage(array: DebugArraySnapshot): string | null {
+function arrayStatusMessage(array: DebugArraySnapshot, t: Translate): string | null {
   switch (array.status) {
     case 'available': return null;
-    case 'too-many-elements': return 'Máximo 10 elementos';
-    case 'multidimensional': return 'Matriz pendiente';
-    case 'unsupported-element-type': return 'Tipo de elemento pendiente';
+    case 'too-many-elements': return t('memoryViewer.maxElements');
+    case 'multidimensional': return t('memoryViewer.arrayPending');
+    case 'unsupported-element-type': return t('memoryViewer.elementTypePending');
   }
 }
 
@@ -576,9 +594,18 @@ function MemoryViewerArrayBlock({
   exiting = false,
   fading = false,
 }: MemoryViewerArrayBlockProps) {
-  const name = array.name ?? 'Literal de cadena';
-  const accessibleLabel = `${name}, tipo ${array.type}, longitud ${array.length}${array.duration === 'thread-local' ? ', duración thread-local' : ''}, dirección ${array.address}, tamaño ${array.size} bytes${array.readOnly ? ', solo lectura' : ''}`;
-  const placeholder = arrayStatusMessage(array);
+  const { t } = useI18n();
+  const name = array.name ?? t('memoryViewer.stringLiteral');
+  const accessibleLabel = [
+    name,
+    t('memoryViewer.typeLabel', { type: array.type }),
+    t('memoryViewer.arrayLength', { length: array.length }),
+    array.duration === 'thread-local' ? t('memoryViewer.durationLabel', { duration: 'thread-local' }) : null,
+    t('memoryViewer.address', { address: array.address }),
+    t('memoryViewer.sizeBytes', { size: array.size }),
+    array.readOnly ? t('memoryViewer.readOnlyLabel') : null,
+  ].filter(Boolean).join(', ');
+  const placeholder = arrayStatusMessage(array, t);
   return (
     <div
       className={`memory-viewer-array${array.readOnly ? ' memory-viewer-array--readonly' : ''}${exiting ? ' memory-viewer-array--exiting' : ''}${fading ? ' memory-viewer-array--fading' : ''}`}
@@ -593,19 +620,20 @@ function MemoryViewerArrayBlock({
     >
       <div className="memory-viewer-array-body">
         {placeholder === null ? (
-          <ol className="memory-viewer-array-cells" aria-label={`Elementos de ${name}`}>
+          <ol className="memory-viewer-array-cells" aria-label={t('memoryViewer.elementsOf', { name })}>
             {array.elements.map(element => (
               <li key={element.key}>
                 <MemoryViewerScalarCard
                   record={arrayElementCardRecord(
                     {
-                      name: array.name ?? 'Literal de cadena',
+                      name: array.name ?? t('memoryViewer.stringLiteral'),
                       origin: array.origin,
                       duration: array.duration,
                       elementSize: array.length > 0 ? Math.max(1, Math.floor(array.size / array.length)) : 1,
                     },
                     element,
                     changedElementKeys.has(element.key),
+                    t,
                     element.key === pointerTargetElementKey,
                   )}
                 />
@@ -634,11 +662,11 @@ function MemoryViewerArrayBlock({
   );
 }
 
-function aggregateStatusMessage(aggregate: DebugAggregateSnapshot): string | null {
+function aggregateStatusMessage(aggregate: DebugAggregateSnapshot, t: Translate): string | null {
   switch (aggregate.status) {
     case 'available': return null;
-    case 'too-many-members': return 'Máximo 10 miembros directos';
-    case 'unsupported-union': return 'Union pendiente';
+    case 'too-many-members': return t('memoryViewer.maxMembers');
+    case 'unsupported-union': return t('memoryViewer.unionPending');
   }
 }
 
@@ -647,12 +675,13 @@ function aggregateMemberCardRecord(
   member: DebugAggregateSnapshot['members'][number],
   valueChanged: boolean,
   isPointerTarget: boolean,
+  t: Translate,
 ): MemoryViewerCardRecord {
   const isPointer = member.kind === 'pointer';
   const isUninitialized = member.initialized === false || member.pointerStatus === 'uninitialized';
   const reasonLabel = member.unsupportedReason === 'array'
-    ? 'Array de campo pendiente'
-    : member.unsupportedReason === 'flexible-array' ? 'Miembro flexible de array' : 'Agregado de campo pendiente';
+    ? t('memoryViewer.pendingArrayField')
+    : member.unsupportedReason === 'flexible-array' ? t('memoryViewer.flexibleArrayMember') : t('memoryViewer.pendingAggregateField');
   const bitRange = member.bitWidth === undefined || member.bitOffset === undefined
     ? null
     : `${member.bitOffset}–${member.bitOffset + member.bitWidth - 1}`;
@@ -662,16 +691,28 @@ function aggregateMemberCardRecord(
       status: member.pointerStatus,
       displayValue: member.displayValue ?? '?',
       target: member.target,
-    })
+    }, t)
     : member.kind === 'unsupported'
       ? member.flexibleArray
-        ? `${reasonLabel}: ${member.flexibleArray.length} elementos, ${member.flexibleArray.capacityBytes} bytes de capacidad, ${member.flexibleArray.elementSize} bytes por elemento; offset ${member.offset}.`
-        : `${reasonLabel}; offset ${member.offset}, tamaño ${member.size} bytes.`
+        ? t('memoryViewer.flexibleArrayDetails', {
+          reason: reasonLabel,
+          length: member.flexibleArray.length,
+          capacity: member.flexibleArray.capacityBytes,
+          elementSize: member.flexibleArray.elementSize,
+          offset: member.offset,
+        })
+        : t('memoryViewer.memberDetails', { reason: reasonLabel, offset: member.offset, size: member.size })
       : member.bitWidth !== undefined
-        ? `${member.initialized === true ? member.displayValue : 'Sin inicializar'}; campo de bits de ${member.bitWidth} bits${bitRange === null ? '' : ` en posiciones ${bitRange}`} de una unidad compartida de ${member.storageUnitSize ?? member.size} bytes en offset ${member.offset}.`
+        ? t('memoryViewer.bitField', {
+          value: member.initialized === true ? member.displayValue ?? '?' : t('memoryViewer.uninitialized'),
+          width: member.bitWidth,
+          positions: bitRange === null ? '' : t('memoryViewer.bitPositions', { positions: bitRange }),
+          unitSize: member.storageUnitSize ?? member.size,
+          offset: member.offset,
+        })
       : member.initialized === true
         ? member.displayValue ?? '?'
-        : 'Sin inicializar';
+        : t('memoryViewer.uninitialized');
   const valueContent = isUninitialized
     ? '—'
     : isPointer && member.pointerStatus === 'null'
@@ -690,10 +731,10 @@ function aggregateMemberCardRecord(
     size: member.size,
     origin: aggregate.origin,
     duration: aggregate.duration,
-    label: member.name || '(anónimo)',
+    label: member.name || t('memoryViewer.anonymousMember'),
     typeLabel: member.type,
     valueTitle,
-    uninitializedVisualLabel: isUninitialized ? MEMORY_VIEWER_UNINITIALIZED_LABEL : undefined,
+    uninitializedVisualLabel: isUninitialized ? t('memoryViewer.uninitialized') : undefined,
     valueContent,
     initialized: member.kind === 'unsupported' ? null : member.initialized,
     valueChanged,
@@ -712,37 +753,50 @@ function aggregateFlexibleArrayElementCardRecord(
   aggregate: DebugAggregateSnapshot,
   member: DebugAggregateSnapshot['members'][number],
   element: DebugArrayElementSnapshot,
+  t: Translate,
 ): MemoryViewerCardRecord {
   const flexibleArray = member.flexibleArray;
-  if (!flexibleArray) throw new Error('Se esperaba el snapshot de un miembro FAM.');
+  if (!flexibleArray) throw new Error('Expected a flexible array member snapshot.');
   return arrayElementCardRecord({
     name: `${aggregate.name ?? aggregate.type}.${member.name}`,
     origin: aggregate.origin,
     duration: aggregate.duration,
     elementSize: flexibleArray.elementSize,
-  }, element, false);
+  }, element, false, t);
 }
 
-function flexibleArrayStatusMessage(status: NonNullable<DebugAggregateSnapshot['members'][number]['flexibleArray']>['status']): string | null {
+function flexibleArrayStatusMessage(status: NonNullable<DebugAggregateSnapshot['members'][number]['flexibleArray']>['status'], t: Translate): string | null {
   switch (status) {
     case 'available':
     case 'too-many-elements': return null;
-    case 'multidimensional': return 'Matriz pendiente';
-    case 'unsupported-element-type': return 'Tipo de elemento pendiente';
+    case 'multidimensional': return t('memoryViewer.arrayPending');
+    case 'unsupported-element-type': return t('memoryViewer.elementTypePending');
   }
 }
 
-function aggregateMemberMetadata(member: DebugAggregateSnapshot['members'][number]): string {
+function aggregateMemberMetadata(member: DebugAggregateSnapshot['members'][number], t: Translate): string {
   if (member.flexibleArray) {
-    return `FAM · ${member.flexibleArray.length} × ${member.flexibleArray.elementSize} B · ${member.flexibleArray.capacityBytes} B · +${member.offset}`;
+    return t('memoryViewer.flexibleArrayMetadata', {
+      length: member.flexibleArray.length,
+      elementSize: member.flexibleArray.elementSize,
+      capacity: member.flexibleArray.capacityBytes,
+      offset: member.offset,
+    });
   }
   if (member.bitWidth !== undefined) {
     const positions = member.bitOffset === undefined
       ? ''
       : ` · bits ${member.bitOffset}–${member.bitOffset + member.bitWidth - 1}`;
-    return `${member.type} · ${member.bitWidth} bit${member.bitWidth === 1 ? '' : 's'}${positions} · unidad compartida ${member.storageUnitSize ?? member.size} B · +${member.offset}`;
+    return t('memoryViewer.bitFieldMetadata', {
+      type: member.type,
+      width: member.bitWidth,
+      suffix: member.bitWidth === 1 ? '' : 's',
+      positions,
+      unitSize: member.storageUnitSize ?? member.size,
+      offset: member.offset,
+    });
   }
-  return `${member.type} · ${member.size} B · +${member.offset}`;
+  return t('memoryViewer.fieldMetadata', { type: member.type, size: member.size, offset: member.offset });
 }
 
 type MemoryViewerAggregateLayoutItem =
@@ -770,21 +824,31 @@ export function MemoryViewerAggregateBlock({
   onPointerHoverChange,
   onPointerFocusChange,
 }: MemoryViewerAggregateBlockProps) {
-  const name = aggregate.name ?? (aggregate.region === 'heap' ? 'Agregado en heap' : 'Agregado temporal');
-  const placeholder = aggregateStatusMessage(aggregate);
+  const { t } = useI18n();
+  const name = aggregate.name ?? (aggregate.region === 'heap'
+    ? t('memoryViewer.aggregateOnHeap')
+    : t('memoryViewer.temporaryAggregate'));
+  const placeholder = aggregateStatusMessage(aggregate, t);
   const flexibleArrayMember = aggregate.members.find(member => member.flexibleArray !== undefined);
   const flexibleArray = flexibleArrayMember?.flexibleArray;
   const hasFlexibleArrayValues = flexibleArray !== undefined && flexibleArray.length > 0;
   const aggregateTypeName = aggregate.type.startsWith(`${aggregate.kind} `)
     ? aggregate.type.slice(aggregate.kind.length + 1)
     : aggregate.type.startsWith(`${aggregate.kind}#`)
-      ? 'anónimo'
+      ? t('memoryViewer.anonymous')
       : aggregate.type;
   const layoutItems: MemoryViewerAggregateLayoutItem[] = [
     ...aggregate.members.map(member => ({ kind: 'member' as const, offset: member.offset, member })),
     ...aggregate.padding.map(span => ({ kind: 'padding' as const, offset: span.offset, size: span.size, key: span.key })),
   ].sort((left, right) => left.offset - right.offset || (left.kind === 'padding' ? -1 : 1));
-  const accessibleLabel = `${name}, ${aggregate.kind} ${aggregate.type}${aggregate.duration === 'thread-local' ? ', duración thread-local' : ''}, dirección ${aggregate.address}, tamaño ${aggregate.size} bytes${aggregate.readOnly ? ', solo lectura' : ''}`;
+  const accessibleLabel = [
+    name,
+    `${aggregate.kind} ${aggregate.type}`,
+    aggregate.duration === 'thread-local' ? t('memoryViewer.durationLabel', { duration: 'thread-local' }) : null,
+    t('memoryViewer.address', { address: aggregate.address }),
+    t('memoryViewer.sizeBytes', { size: aggregate.size }),
+    aggregate.readOnly ? t('memoryViewer.readOnlyLabel') : null,
+  ].filter(Boolean).join(', ');
 
   return (
     <div
@@ -803,9 +867,9 @@ export function MemoryViewerAggregateBlock({
       <div className="memory-viewer-aggregate-body">
         {placeholder === null ? (
           aggregate.members.length === 0 ? (
-            <div className="memory-viewer-array-placeholder" role="status">Sin miembros visibles</div>
+            <div className="memory-viewer-array-placeholder" role="status">{t('memoryViewer.noVisibleMembers')}</div>
           ) : (
-            <ol className="memory-viewer-aggregate-members" aria-label={`Miembros de ${name}`}>
+            <ol className="memory-viewer-aggregate-members" aria-label={t('memoryViewer.membersOf', { name })}>
               {layoutItems.map(item => item.kind === 'member' ? (
                 <li key={item.member.key}>
                   <MemoryViewerScalarCard
@@ -814,6 +878,7 @@ export function MemoryViewerAggregateBlock({
                       item.member,
                       changedMemberKeys.has(item.member.key),
                       item.member.key === pointerTargetFieldKey,
+                      t,
                     )}
                     onPointerHoverChange={onPointerHoverChange}
                     onPointerFocusChange={onPointerFocusChange}
@@ -825,8 +890,8 @@ export function MemoryViewerAggregateBlock({
                   >
                     <span className="memory-viewer-scalar-address-value">{item.member.address}</span>
                   </span>
-                  <span className="memory-viewer-aggregate-member-metadata" title={aggregateMemberMetadata(item.member)}>
-                    {aggregateMemberMetadata(item.member)}
+                  <span className="memory-viewer-aggregate-member-metadata" title={aggregateMemberMetadata(item.member, t)}>
+                    {aggregateMemberMetadata(item.member, t)}
                   </span>
                 </li>
               ) : (
@@ -836,8 +901,8 @@ export function MemoryViewerAggregateBlock({
                   data-aggregate-kind={aggregate.kind}
                   data-padding-offset={item.offset}
                   data-padding-size={item.size}
-                  title={`Padding de ${aggregate.type} · +${item.offset} · ${item.size} B`}
-                  aria-label={`Padding de ${aggregate.type} · offset +${item.offset} · ${item.size} B`}
+                  title={t('memoryViewer.paddingTitle', { type: aggregate.type, offset: item.offset, size: item.size })}
+                  aria-label={t('memoryViewer.paddingLabel', { type: aggregate.type, offset: item.offset, size: item.size })}
                 />
               ))}
             </ol>
@@ -853,14 +918,14 @@ export function MemoryViewerAggregateBlock({
             data-memory-viewer-fam-length={flexibleArray.length}
             data-memory-viewer-fam-capacity={flexibleArray.capacityBytes}
             role="group"
-            aria-label={`Elementos de ${flexibleArrayMember.name}`}
+            aria-label={t('memoryViewer.elementsOf', { name: flexibleArrayMember.name })}
           >
-            {flexibleArrayStatusMessage(flexibleArray.status) === null ? (
-              <ol className="memory-viewer-array-cells memory-viewer-aggregate-fam-cells" aria-label={`Elementos de ${flexibleArrayMember.name}`}>
+            {flexibleArrayStatusMessage(flexibleArray.status, t) === null ? (
+              <ol className="memory-viewer-array-cells memory-viewer-aggregate-fam-cells" aria-label={t('memoryViewer.elementsOf', { name: flexibleArrayMember.name })}>
                 {flexibleArray.elements.map(element => (
                   <li key={element.key}>
                     <MemoryViewerScalarCard
-                      record={aggregateFlexibleArrayElementCardRecord(aggregate, flexibleArrayMember, element)}
+                      record={aggregateFlexibleArrayElementCardRecord(aggregate, flexibleArrayMember, element, t)}
                     />
                     <span
                       className="memory-viewer-scalar-address memory-viewer-array-cell-address"
@@ -874,12 +939,12 @@ export function MemoryViewerAggregateBlock({
               </ol>
             ) : (
               <div className="memory-viewer-array-placeholder" role="status">
-                {flexibleArrayStatusMessage(flexibleArray.status)}
+                {flexibleArrayStatusMessage(flexibleArray.status, t)}
               </div>
             )}
             {flexibleArray.omittedElements > 0 && (
               <span className="memory-viewer-aggregate-fam-omitted" role="status">
-                +{flexibleArray.omittedElements} elementos omitidos
+                {t('memoryViewer.omittedElements', { count: flexibleArray.omittedElements })}
               </span>
             )}
           </div>
@@ -887,7 +952,7 @@ export function MemoryViewerAggregateBlock({
         <span
           className="memory-viewer-aggregate-root-address"
           data-memory-viewer-aggregate-address={aggregate.address}
-          aria-label={`Dirección raíz ${aggregate.address}`}
+          aria-label={t('memoryViewer.rootAddress', { address: aggregate.address })}
           title={aggregate.address}
         >
           {aggregate.address}
@@ -972,6 +1037,7 @@ function MemoryViewerRegions({
   stepIndex,
   status,
 }: MemoryViewerRegionsProps) {
+  const { t } = useI18n();
   const idPrefix = useId();
   const [expanded, setExpanded] = useState<Record<MemoryRegion, boolean>>({
     static: false,
@@ -1429,8 +1495,8 @@ function MemoryViewerRegions({
 
     return (
       <div className={`memory-viewer-scope-track${visibleScopes.length === 0 ? ' memory-viewer-scope-track--empty' : ''}`} style={scopeNameFrameStyle}>
-        {visibleScopes.length === 0 ? <span className="memory-viewer-region-empty">Vacío</span> : (
-          <ol className="memory-viewer-scope-list" aria-label="Ámbitos de pila, del más antiguo al más reciente">
+        {visibleScopes.length === 0 ? <span className="memory-viewer-region-empty">{t('memoryViewer.scopesEmpty')}</span> : (
+          <ol className="memory-viewer-scope-list" aria-label={t('memoryViewer.stackScopes')}>
             {visibleScopes.map(scope => {
               const isExitingScope = isCurrentPresentation && !activeScopeIds.has(scope.id);
               const isFadingScope = isExitingScope && exitPresentation.phase === 'fading';
@@ -1444,7 +1510,7 @@ function MemoryViewerRegions({
               const isFunctionRoot = functionRootScopeId === undefined
                 ? scope.scopeName === scope.functionName
                 : functionRootScopeId === scope.id;
-              const isAnonymousScope = scope.scopeName === 'bloque' && !isFunctionRoot;
+              const isAnonymousScope = scope.scopeName === 'block' && !isFunctionRoot;
               const accessibleScopeName = isAnonymousScope ? 'scope' : scope.scopeName;
               const visibleScopeName = isAnonymousScope
                 ? mode === 'minimal' ? null : 'scope'
@@ -1455,8 +1521,8 @@ function MemoryViewerRegions({
                   className={`memory-viewer-scope${isAncestorScope ? ' memory-viewer-scope--ancestor' : ''}${isExitingScope ? ' memory-viewer-scope--exiting' : ''}${isFadingScope ? ' memory-viewer-scope--fading' : ''}`}
                   key={scope.id}
                   aria-label={isEntrypointMainRoot
-                    ? 'Variables, punteros, arrays y structs locales de main'
-                    : isExitingScope ? `Ámbito finalizado de ${accessibleScopeName}` : `Ámbito activo de ${accessibleScopeName}`}
+                    ? t('memoryViewer.mainRootDescription')
+                    : t(isExitingScope ? 'memoryViewer.exitedScope' : 'memoryViewer.activeScope', { scope: accessibleScopeName })}
                 >
                   {!isEntrypointMainRoot && (
                     <>
@@ -1473,7 +1539,7 @@ function MemoryViewerRegions({
                         <MemoryViewerScalarCard
                           key={`scalar-${object.id}`}
                           record={{
-                            ...scalarCardRecord(object.snapshot, changedScalarIds.has(object.id)),
+                            ...scalarCardRecord(object.snapshot, t, changedScalarIds.has(object.id)),
                             isPointerTarget: object.id === highlightedPointerTargetId,
                           }}
                           exiting={isExitingScalar}
@@ -1490,6 +1556,7 @@ function MemoryViewerRegions({
                           object.snapshot,
                           changedPointerIds.has(object.id),
                           object.id === highlightedPointerTargetId,
+                          t,
                         )}
                         exiting={isExitingPointer}
                         fading={isExitingPointer && exitPresentation.phase === 'fading'}
@@ -1553,18 +1620,18 @@ function MemoryViewerRegions({
     const staticAggregates = aggregates.filter(aggregate => aggregate.region === 'static');
     const staticItems = staticMemoryObjects(staticScalars, staticArrays, pointers, staticAggregates);
     return staticItems.length === 0 ? (
-      <span className="memory-viewer-region-empty">Vacío</span>
+      <span className="memory-viewer-region-empty">{t('memoryViewer.empty')}</span>
     ) : (
-      <ol className="memory-viewer-static-list" aria-label="Objetos de duración estática o thread-local">
+      <ol className="memory-viewer-static-list" aria-label={t('memoryViewer.staticObjects')}>
         {staticItems.map(item => (
           <li key={`${item.kind}-${item.id}`}>
             {item.kind === 'scalar' ? (
               <MemoryViewerScalarCard
-                record={{ ...scalarCardRecord(item.snapshot, changedObjectIds.has(item.id)), isPointerTarget: item.id === highlightedPointerTargetId }}
+                record={{ ...scalarCardRecord(item.snapshot, t, changedObjectIds.has(item.id)), isPointerTarget: item.id === highlightedPointerTargetId }}
               />
             ) : item.kind === 'pointer' ? (
               <MemoryViewerScalarCard
-                record={pointerCardRecord(item.snapshot, changedPointerIds.has(item.id), item.id === highlightedPointerTargetId)}
+                record={pointerCardRecord(item.snapshot, changedPointerIds.has(item.id), item.id === highlightedPointerTargetId, t)}
                 onPointerHoverChange={updatePointerHover}
                 onPointerFocusChange={updatePointerFocus}
               />
@@ -1611,16 +1678,16 @@ function MemoryViewerRegions({
       : []);
 
     return visibleItems.length === 0 ? (
-      <span className="memory-viewer-region-empty">Vacío</span>
+      <span className="memory-viewer-region-empty">{t('memoryViewer.empty')}</span>
     ) : (
-      <ol className="memory-viewer-heap-list" aria-label="Bloques del heap, ordenados por dirección">
+      <ol className="memory-viewer-heap-list" aria-label={t('memoryViewer.heapBlocks')}>
         {visibleItems.map(item => {
           const isExitingBlock = item.kind === 'block' && deletedObjectIds.has(item.id);
           return (
             <li key={`${item.kind}-${item.id}`}>
               {item.kind === 'block' ? (
                 <MemoryViewerScalarCard
-                  record={heapCardRecord(item.snapshot)}
+                  record={heapCardRecord(item.snapshot, t)}
                   exiting={isExitingBlock}
                   fading={isExitingBlock && heapExitPresentation.phase === 'fading'}
                 />
@@ -1713,15 +1780,15 @@ function MemoryViewerRegions({
   }
 
   return (
-    <section className="memory-viewer-regions" aria-label="Regiones de memoria">
+    <section className="memory-viewer-regions" aria-label={t('memoryViewer.regionLabel')}>
       {omittedArrayObjects > 0 && (
         <div className="memory-viewer-array-omitted" role="status">
-          Se omitieron {omittedArrayObjects} arrays por el límite de inspección.
+          {t(omittedArrayObjects === 1 ? 'memoryViewer.arraysOmitted.one' : 'memoryViewer.arraysOmitted.other', { count: omittedArrayObjects })}
         </div>
       )}
       {omittedAggregateObjects > 0 && (
         <div className="memory-viewer-array-omitted" role="status">
-          Se omitieron {omittedAggregateObjects} structs por el límite de inspección.
+          {t(omittedAggregateObjects === 1 ? 'memoryViewer.structsOmitted.one' : 'memoryViewer.structsOmitted.other', { count: omittedAggregateObjects })}
         </div>
       )}
       {renderRegion('static', 'Static / TLS')}
@@ -1732,6 +1799,7 @@ function MemoryViewerRegions({
 }
 
 export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
+  const { language, t } = useI18n();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
@@ -1788,7 +1856,7 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
     () => formatConsoleSegments({ status: 'running', transcript: consoleTranscript, inputRequestId }),
     [consoleTranscript, inputRequestId],
   );
-  const consoleStatus = getDebugConsoleStatus(status, isPlaying, isViewingHistory, inputRequestId);
+  const consoleStatus = getDebugConsoleStatus(status, isPlaying, isViewingHistory, inputRequestId, t);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -1839,7 +1907,7 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
   const locationLabel = location
     ? hasMainSourceLocation
       ? `main.c:${location.line}:${location.column}`
-      : `Ubicación en ${location.file}:${location.line}:${location.column}; fuera de main.c`
+      : t('memoryViewer.location', { file: location.file, line: location.line, column: location.column })
     : '';
 
   return (
@@ -1855,14 +1923,14 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
     >
       <div className="memory-viewer-window" data-memory-viewer-mode={mode}>
         <header className="memory-viewer-header">
-          <div className="memory-viewer-controls" aria-label="Controles del visualizador">
+          <div className="memory-viewer-controls" aria-label={t('memoryViewer.controls')}>
             <Button
               className="memory-viewer-control memory-viewer-icon-control"
               variant="ghost"
               size="sm"
               type="button"
-              aria-label={isPlaying ? 'Pausar reproducción' : 'Reproducir'}
-              title={isPlaying ? 'Pausar reproducción' : 'Reproducir'}
+              aria-label={t(isPlaying ? 'memoryViewer.pause' : 'memoryViewer.play')}
+              title={t(isPlaying ? 'memoryViewer.pause' : 'memoryViewer.play')}
               disabled={status === 'starting' || status === 'waiting-input' || status === 'terminated' || status === 'cancelled' || status === 'error' || status === 'limit'}
               onClick={togglePlay}
             >
@@ -1881,8 +1949,8 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
               variant="ghost"
               size="sm"
               type="button"
-              aria-label="Retroceder un paso"
-              title="Retroceder un paso"
+              aria-label={t('memoryViewer.previous')}
+              title={t('memoryViewer.previous')}
               disabled={!canPrevious}
               onClick={previous}
             >
@@ -1895,8 +1963,8 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
               variant="ghost"
               size="sm"
               type="button"
-              aria-label="Avanzar un paso"
-              title="Avanzar un paso"
+              aria-label={t('memoryViewer.next')}
+              title={t('memoryViewer.next')}
               disabled={!canNext}
               onClick={next}
             >
@@ -1905,26 +1973,28 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
               </svg>
             </Button>
           </div>
-          <h2 id="memory-viewer-title">Memory Viewer</h2>
+          <h2 id="memory-viewer-title">{t('memoryViewer.title')}</h2>
           <div className="memory-viewer-header-actions">
-            <label className="memory-viewer-io-toggle" data-disabled={!hasStdioInclude || undefined} title={hasStdioInclude ? 'Mostrar u ocultar la consola de depuración' : 'Disponible cuando el fuente incluye stdio.h'}>
+            <label className="memory-viewer-io-toggle" data-disabled={!hasStdioInclude || undefined} title={t(hasStdioInclude ? 'memoryViewer.ioToggle' : 'memoryViewer.ioUnavailable')}>
               <input
                 type="checkbox"
                 checked={showIoConsole}
                 disabled={!hasStdioInclude}
                 onChange={event => setIoPreference(event.currentTarget.checked)}
               />
-              <span>I/O</span>
+              <span>{t('memoryViewer.io')}</span>
             </label>
             <select
               className="memory-viewer-mode-select"
-              aria-label="Modo visual de memoria"
-              title="Modo visual de memoria"
+              aria-label={t('memoryViewer.mode')}
+              title={t('memoryViewer.mode')}
               value={mode}
               onChange={event => setMode(event.currentTarget.value as MemoryViewerMode)}
             >
               {MEMORY_VIEWER_MODES.map(option => (
-                <option key={option.value} value={option.value}>{option.label}</option>
+                <option key={option.value} value={option.value}>
+                  {t(option.value === 'minimal' ? 'memoryViewer.mode.minimal' : option.value === 'normal' ? 'memoryViewer.mode.normal' : 'memoryViewer.mode.debug')}
+                </option>
               ))}
             </select>
             {canStop && !showIoConsole && (
@@ -1933,11 +2003,11 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
                 variant="ghost"
                 size="sm"
                 type="button"
-                aria-label="Detener depuración"
-                title="Detener depuración"
+                aria-label={t('memoryViewer.stopDebugging')}
+                title={t('memoryViewer.stopDebugging')}
                 onClick={stop}
               >
-                Stop
+                {t('run.stop')}
               </Button>
             )}
             <Button
@@ -1946,7 +2016,7 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
               variant="ghost"
               size="sm"
               type="button"
-              aria-label="Cerrar Memory Viewer"
+              aria-label={t('memoryViewer.close')}
               onClick={onClose}
             >
               <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -1958,13 +2028,15 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
         <div className="memory-viewer-filebar">
           <SelectedFileTab fileName="main.c" />
           <span className="memory-viewer-status" role="status" aria-live="polite" aria-atomic="true">
-            {isViewingHistory ? 'Historial seleccionado' : getStatusLabel(status, isPlaying)}
+            {isViewingHistory ? t('memoryViewer.status.historySelected') : getStatusLabel(status, isPlaying, t)}
           </span>
           {locationLabel && <span className="memory-viewer-location">{locationLabel}</span>}
         </div>
         {historyNotice && (
           <p className="memory-viewer-history-notice" role="status" aria-live="polite">
-            {historyNotice}
+            {t(historyNotice === 1 ? 'memoryViewer.historyNotice.one' : 'memoryViewer.historyNotice.other', {
+              count: new Intl.NumberFormat(language).format(historyNotice),
+            })}
           </p>
         )}
         {errorMessage && (
@@ -2001,8 +2073,7 @@ export function MemoryViewer({ source, onClose }: MemoryViewerProps) {
         />
         <ConsolePanel
           className="memory-viewer-console"
-          label="debug"
-          ariaLabel="Consola de depuración"
+          kind="debug"
           hidden={!showIoConsole}
           statusLabel={consoleStatus.label}
           statusTone={consoleStatus.tone}

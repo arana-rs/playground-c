@@ -43,31 +43,32 @@ export type RunnerState =
   | { status: 'timeout'; file: string; timeoutMs: number; diagnosticsReport: RunDiagnosticsReport; transcript: readonly ConsoleEntry[] };
 
 export type ConsoleStatusTone = 'ready' | 'running' | 'waiting' | 'finished' | 'stopped' | 'cancelled' | 'error';
+export type ConsoleStatusKey = 'ready' | 'running' | 'waitingInput' | 'cancelled' | 'error' | 'timedOut' | 'stopped' | 'finished';
 
 export interface ConsoleStatus {
-  label: string;
+  key: ConsoleStatusKey;
   tone: ConsoleStatusTone;
 }
 
-/** A visible label derived directly from the runner's current state. */
+/** A display key and tone derived directly from the runner's current state. */
 export function getConsoleStatus(state: RunnerState): ConsoleStatus {
-  if (state.status === 'idle') return { label: 'Listo', tone: 'ready' };
+  if (state.status === 'idle') return { key: 'ready', tone: 'ready' };
   if (state.status === 'running') {
     return state.inputRequestId == null
-      ? { label: 'Ejecutando', tone: 'running' }
-      : { label: 'Esperando entrada', tone: 'waiting' };
+      ? { key: 'running', tone: 'running' }
+      : { key: 'waitingInput', tone: 'waiting' };
   }
-  if (state.status === 'cancelled') return { label: 'Cancelado', tone: 'cancelled' };
-  if (state.status === 'error') return { label: 'Error', tone: 'error' };
-  if (state.status === 'timeout') return { label: 'Tiempo agotado', tone: 'stopped' };
+  if (state.status === 'cancelled') return { key: 'cancelled', tone: 'cancelled' };
+  if (state.status === 'error') return { key: 'error', tone: 'error' };
+  if (state.status === 'timeout') return { key: 'timedOut', tone: 'stopped' };
 
   switch (state.result.kind) {
-    case 'cancelled': return { label: 'Cancelado', tone: 'cancelled' };
-    case 'limit': return { label: 'Detenido', tone: 'stopped' };
+    case 'cancelled': return { key: 'cancelled', tone: 'cancelled' };
+    case 'limit': return { key: 'stopped', tone: 'stopped' };
     case 'prepare-error':
     case 'read-error':
-    case 'runtime-error': return { label: 'Error', tone: 'error' };
-    case 'terminated': return { label: 'Finalizado', tone: 'finished' };
+    case 'runtime-error': return { key: 'error', tone: 'error' };
+    case 'terminated': return { key: 'finished', tone: 'finished' };
   }
 }
 
@@ -180,11 +181,11 @@ function diagnosticBudgets(configuration: RunConfiguration): RunDiagnosticBudget
 }
 
 function errorText(file: string, reason: 'start' | 'run' | 'response' | 'send', message: string): string {
-  const quotedFile = `«${file}»`;
-  if (reason === 'start') return `No se pudo iniciar el motor de ejecución para ${quotedFile}: ${message}`;
-  if (reason === 'response') return `El motor terminó, pero no se pudo leer su respuesta para ${quotedFile}: ${message}`;
-  if (reason === 'send') return `No se pudo enviar ${quotedFile} al motor de ejecución: ${message}`;
-  return `El motor de ejecución falló mientras procesaba ${quotedFile}: ${message}`;
+  const quotedFile = `"${file}"`;
+  if (reason === 'start') return `Could not start the execution engine for ${quotedFile}: ${message}`;
+  if (reason === 'response') return `The engine finished, but its response for ${quotedFile} could not be read: ${message}`;
+  if (reason === 'send') return `Could not send ${quotedFile} to the execution engine: ${message}`;
+  return `The execution engine failed while processing ${quotedFile}: ${message}`;
 }
 
 export class RunnerController {
@@ -243,7 +244,7 @@ export class RunnerController {
     const diagnosticsReport = this.timeoutReport(current);
     const transcript = addSystemEntry(
       this.flushDecoders(current),
-      `Se agotó el tiempo máximo (${formatDuration(this.configuration.timeoutMs)}) mientras se iniciaba, leía, preparaba o ejecutaba «${current.fileName}»; se detuvo la ejecución. Revisa código lento, como bucles o recursión; un programa válido también puede necesitar más tiempo.`,
+      `The ${formatDuration(this.configuration.timeoutMs)} time limit expired while starting, reading, preparing, or running "${current.fileName}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
       'warning',
     );
     this.finish(current, {
@@ -311,7 +312,7 @@ export class RunnerController {
       metrics: { ...current.metrics },
       diagnostic: {
         code: 'RUN_TIMEOUT_UI',
-        message: `El watchdog de interfaz detuvo el Worker tras ${formatDuration(this.configuration.timeoutMs)} de tiempo activo; la espera de stdin queda excluida del presupuesto.`,
+        message: `The interface watchdog stopped the Worker after ${formatDuration(this.configuration.timeoutMs)} of active time; stdin waits are excluded from the budget.`,
       },
     };
   }
@@ -363,7 +364,7 @@ export class RunnerController {
       worker = this.workerFactory();
       workerCreateMs = performance.now() - workerCreateStartedAt;
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'El navegador no pudo iniciar el motor de ejecución.';
+      const message = error instanceof Error ? error.message : 'The browser could not start the execution engine.';
       this.publish({
         status: 'error', file: file.name, reason: 'start', message,
         transcript: [{ stream: 'system', text: errorText(file.name, 'start', message), tone: 'error' }],
@@ -401,11 +402,11 @@ export class RunnerController {
     worker.onerror = event => {
       this.observeWorkerEvent(current);
       event.preventDefault();
-      this.fail(current, 'run', event.message || 'El motor de ejecución terminó inesperadamente sin devolver un diagnóstico.');
+      this.fail(current, 'run', event.message || 'The execution engine stopped unexpectedly without returning a diagnostic.');
     };
     worker.onmessageerror = () => {
       this.observeWorkerEvent(current);
-      this.fail(current, 'response', 'El navegador no pudo leer la respuesta del motor de ejecución.');
+      this.fail(current, 'response', 'The browser could not read the execution engine response.');
     };
 
     this.armWatchdog(current);
@@ -417,7 +418,7 @@ export class RunnerController {
       worker.postMessage(request);
       current.stages.runPostMessageMs = Math.max(0, performance.now() - dispatchStartedAt);
     } catch (error) {
-      this.fail(current, 'send', error instanceof Error ? error.message : 'El navegador no pudo enviar el archivo al motor.');
+      this.fail(current, 'send', error instanceof Error ? error.message : 'The browser could not send the file to the engine.');
     }
   }
 
@@ -465,7 +466,7 @@ export class RunnerController {
       this.setObservedStage(current, RUN_DIAGNOSTIC_STAGE.stdinDispatch);
       current.worker.postMessage(command);
     } catch (error) {
-      this.fail(current, 'send', error instanceof Error ? error.message : 'El navegador no pudo enviar la entrada al motor.');
+      this.fail(current, 'send', error instanceof Error ? error.message : 'The browser could not send input to the engine.');
       return false;
     }
     const state = this.currentState;
@@ -491,7 +492,7 @@ export class RunnerController {
       this.setObservedStage(current, RUN_DIAGNOSTIC_STAGE.stdinDispatch);
       current.worker.postMessage(command);
     } catch (error) {
-      this.fail(current, 'send', error instanceof Error ? error.message : 'El navegador no pudo enviar el fin de entrada al motor.');
+      this.fail(current, 'send', error instanceof Error ? error.message : 'The browser could not send end of input to the engine.');
       return false;
     }
     const state = this.currentState;
@@ -509,7 +510,7 @@ export class RunnerController {
   stop(): void {
     const current = this.active;
     if (!current) return;
-    const transcript = addSystemEntry(this.flushDecoders(current), 'Ejecución cancelada por el usuario.', 'warning');
+    const transcript = addSystemEntry(this.flushDecoders(current), 'Execution cancelled by the user.', 'warning');
     this.finish(current, { status: 'cancelled', transcript });
   }
 
@@ -570,44 +571,44 @@ type LimitResource = LimitRunResult['resource'];
 
 const limitDescriptions: Record<LimitResource, { label: string; unit: string; reason: string }> = {
   maxSourceChars: {
-    label: 'tamaño del código fuente',
-    unit: 'caracteres',
-    reason: 'Este tope mantiene acotada la lectura y preparación de archivos grandes.',
+    label: 'source code size',
+    unit: 'characters',
+    reason: 'This limit bounds reading and preparation of large files.',
   },
   maxTokens: {
-    label: 'tamaño del código analizado',
+    label: 'analyzed code size',
     unit: 'tokens',
-    reason: 'Este tope mantiene acotado el análisis de programas grandes.',
+    reason: 'This limit bounds analysis of large programs.',
   },
   maxPreprocessSteps: {
-    label: 'trabajo del preprocesador',
-    unit: 'pasos',
-    reason: 'Una expansión grande de macros o archivos incluidos puede alcanzar este tope.',
+    label: 'preprocessor work',
+    unit: 'steps',
+    reason: 'A large macro or include expansion can reach this limit.',
   },
   maxDepth: {
-    label: 'profundidad de anidamiento',
-    unit: 'niveles',
-    reason: 'Revisa expresiones, bloques o llamadas muy anidadas; esto no identifica por sí solo la causa.',
+    label: 'nesting depth',
+    unit: 'levels',
+    reason: 'Check for deeply nested expressions, blocks, or calls; this limit alone does not identify the cause.',
   },
   maxInstructions: {
-    label: 'pasos de ejecución',
-    unit: 'pasos',
-    reason: 'Revisa bucles o recursión extensos; un cálculo válido también puede superar este presupuesto.',
+    label: 'execution steps',
+    unit: 'steps',
+    reason: 'Check for long loops or recursion; a valid calculation can also exceed this budget.',
   },
   maxMemoryBytes: {
-    label: 'memoria del programa',
+    label: 'program memory',
     unit: 'bytes',
-    reason: 'El presupuesto protege el playground de datos u objetos de gran tamaño.',
+    reason: 'This budget protects the playground from large data or objects.',
   },
   maxIOBytes: {
-    label: 'datos de entrada y salida',
+    label: 'input and output data',
     unit: 'bytes',
-    reason: 'El presupuesto cubre los datos que el programa puede leer y escribir.',
+    reason: 'This budget covers data that the program can read and write.',
   },
 };
 
 function formatCount(value: number) {
-  return new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 }).format(value);
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value);
 }
 
 function formatDuration(milliseconds: number) {
@@ -627,14 +628,14 @@ function limitUsage(result: LimitRunResult): number | undefined {
 
 function formatLimit(result: LimitRunResult) {
   const description = limitDescriptions[result.resource];
-  const stage = result.stage === 'prepare' ? 'La preparación se detuvo' : 'La ejecución se detuvo';
+  const stage = result.stage === 'prepare' ? 'Preparation stopped' : 'Execution stopped';
   const usage = limitUsage(result);
   const counts = usage === undefined || usage <= result.limit
-    ? `${formatCount(result.limit)} ${description.unit} permitidos`
-    : `${formatCount(result.limit)} ${description.unit} permitidos; se contabilizaron ${formatCount(usage)}`;
+    ? `${formatCount(result.limit)} ${description.unit} allowed`
+    : `${formatCount(result.limit)} ${description.unit} allowed; ${formatCount(usage)} were counted`;
   const locations = result.diagnostics.map(formatLocation).join('\n');
   return appendConsoleSection(
-    `${stage}: se alcanzó el límite de ${description.label} (${counts}). ${description.reason}`,
+    `${stage}: the ${description.label} limit was reached (${counts}). ${description.reason}`,
     locations,
   );
 }
@@ -649,7 +650,7 @@ function formatResultSummary(result: RunResult): ConsoleSystemMessage {
     return { tone: 'system', text: `exit code: ${result.exitCode}` };
   }
   if (result.kind === 'cancelled') {
-    return { tone: 'warning', text: `La ejecución se canceló durante la etapa de ${result.stage}.` };
+    return { tone: 'warning', text: `Execution was cancelled during the ${result.stage} stage.` };
   }
   if (result.kind === 'limit') {
     return { tone: 'warning', text: formatLimit(result) };
@@ -657,18 +658,18 @@ function formatResultSummary(result: RunResult): ConsoleSystemMessage {
   if (result.kind === 'runtime-error') {
     return {
       tone: 'error',
-      text: appendConsoleSection('Error durante la ejecución:', result.diagnostics.map(formatDiagnostic).join('\n')),
+      text: appendConsoleSection('Runtime error:', result.diagnostics.map(formatDiagnostic).join('\n')),
     };
   }
   if (result.kind === 'prepare-error') {
     return {
       tone: 'error',
-      text: appendConsoleSection('No se pudo preparar el programa:', result.diagnostics.map(formatDiagnostic).join('\n')),
+      text: appendConsoleSection('Could not prepare the program:', result.diagnostics.map(formatDiagnostic).join('\n')),
     };
   }
   return {
     tone: 'error',
-    text: appendConsoleSection('No se pudo leer el archivo para ejecutar el programa:', result.diagnostics.map(formatDiagnostic).join('\n')),
+    text: appendConsoleSection('Could not read the file for execution:', result.diagnostics.map(formatDiagnostic).join('\n')),
   };
 }
 
@@ -677,14 +678,14 @@ export function formatConsoleSegments(state: RunnerState): readonly ConsoleOutpu
   const transcript = 'transcript' in state ? state.transcript : undefined;
   if (transcript?.length) return formatTranscriptSegments(transcript);
   if (state.status === 'running') return [];
-  if (state.status === 'cancelled') return [{ tone: 'warning', text: 'Ejecución cancelada por el usuario.' }];
+  if (state.status === 'cancelled') return [{ tone: 'warning', text: 'Execution cancelled by the user.' }];
   if (state.status === 'error') {
     return [{ tone: 'error', text: errorText(state.file, state.reason, state.message) }];
   }
   if (state.status === 'timeout') {
     return [{
       tone: 'warning',
-      text: `Se agotó el tiempo máximo (${formatDuration(state.timeoutMs)}) mientras se iniciaba, leía, preparaba o ejecutaba «${state.file}»; se detuvo la ejecución. Revisa código lento, como bucles o recursión; un programa válido también puede necesitar más tiempo.`,
+      text: `The ${formatDuration(state.timeoutMs)} time limit expired while starting, reading, preparing, or running "${state.file}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
     }];
   }
   const segments = formatOutputSegments(state.result);

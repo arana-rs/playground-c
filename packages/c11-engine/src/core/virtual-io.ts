@@ -52,7 +52,7 @@ export class VirtualStream {
 
   readByte(at: VirtualLocation): number {
     const result = this.readByteResult(at);
-    if (result.kind === 'pending') throw new VirtualIOError('INPUT_PENDING', 'La lectura de stdin requiere más entrada.');
+    if (result.kind === 'pending') throw new VirtualIOError('INPUT_PENDING', 'Reading stdin requires more input.');
     return result.kind === 'byte' ? result.value : -1;
   }
 
@@ -169,7 +169,7 @@ export class VirtualStream {
   }
 
   preflightWriteBytes(count: number, at: VirtualLocation): void {
-    if (!Number.isSafeInteger(count) || count < 0) throw new VirtualIOError('INVALID_IO_SIZE', 'El tamaño de escritura no es representable.');
+    if (!Number.isSafeInteger(count) || count < 0) throw new VirtualIOError('INVALID_IO_SIZE', 'The write size is not representable.');
     const start = this.append ? this.state.data.length : this.cursor;
     const growth = this.kind === 'stdout' || this.kind === 'stderr'
       ? count : Math.max(0, start + count - this.state.data.length);
@@ -243,17 +243,17 @@ export class VirtualIO {
     this.currentLocation = { file: config.entry, line: 1, column: 1 };
     const options = config.io ?? {};
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
-      throw new VirtualIOError('INVALID_IO_OPTIONS', 'io debe ser un objeto.');
+      throw new VirtualIOError('INVALID_IO_OPTIONS', 'io must be an object.');
     }
     const normalizedEntry = normalizeVirtualPath(config.entry) ?? virtualBasename(config.entry);
     const defaultArgv = [virtualBasename(normalizedEntry)];
     const suppliedArgv = options.argv;
     if (suppliedArgv !== undefined && !Array.isArray(suppliedArgv)) {
-      throw new VirtualIOError('INVALID_IO_OPTIONS', 'argv debe ser un vector de strings C sin bytes NUL.');
+      throw new VirtualIOError('INVALID_IO_OPTIONS', 'argv must be a vector of C strings without NUL bytes.');
     }
     const argv = suppliedArgv === undefined ? defaultArgv : [...suppliedArgv];
     if (argv.some((value) => typeof value !== 'string' || value.includes('\0'))) {
-      throw new VirtualIOError('INVALID_IO_OPTIONS', 'argv debe ser un vector de strings C sin bytes NUL.');
+      throw new VirtualIOError('INVALID_IO_OPTIONS', 'argv must be a vector of C strings without NUL bytes.');
     }
     this.argv = Object.freeze(argv.slice());
 
@@ -268,14 +268,14 @@ export class VirtualIO {
     stdinState.data = stdin;
 
     const seededFiles = options.files === undefined ? [] : options.files;
-    if (!Array.isArray(seededFiles)) throw new VirtualIOError('INVALID_IO_OPTIONS', 'io.files debe ser una lista de archivos virtuales.');
+    if (!Array.isArray(seededFiles)) throw new VirtualIOError('INVALID_IO_OPTIONS', 'io.files must be a list of virtual files.');
     for (const file of seededFiles) {
       if (!file || typeof file.name !== 'string' || !(typeof file.data === 'string' || file.data instanceof Uint8Array)) {
-        throw new VirtualIOError('INVALID_IO_OPTIONS', 'Cada archivo virtual requiere name y data de texto o bytes.');
+        throw new VirtualIOError('INVALID_IO_OPTIONS', 'Each virtual file requires name and text or byte data.');
       }
       const name = normalizeVirtualPath(file.name);
-      if (!name) throw new VirtualIOError('INVALID_IO_PATH', `La ruta virtual «${file.name}» no es válida.`);
-      if (this.files.has(name)) throw new VirtualIOError('INVALID_IO_PATH', `La ruta virtual «${name}» está duplicada.`);
+      if (!name) throw new VirtualIOError('INVALID_IO_PATH', `Virtual path «${file.name}» is invalid.`);
+      if (this.files.has(name)) throw new VirtualIOError('INVALID_IO_PATH', `Virtual path «${name}» is duplicated.`);
       const data = this.seed(file.data);
       this.resizeFile({ data: new Uint8Array(), openCount: 0 }, data.length, this.currentLocation);
       this.files.set(name, { data, openCount: 0 });
@@ -287,12 +287,12 @@ export class VirtualIO {
   get stdinOpen(): boolean { return this.stdinIsOpen; }
 
   appendStdin(bytes: Uint8Array, at: VirtualLocation = this.currentLocation): void {
-    if (!this.stdinIsOpen) throw new VirtualIOError('STDIN_CLOSED', 'No se puede añadir entrada después de EOF.');
-    if (!(bytes instanceof Uint8Array)) throw new VirtualIOError('INVALID_IO_OPTIONS', 'La entrada interactiva debe ser Uint8Array.');
+    if (!this.stdinIsOpen) throw new VirtualIOError('STDIN_CLOSED', 'Cannot append input after EOF.');
+    if (!(bytes instanceof Uint8Array)) throw new VirtualIOError('INVALID_IO_OPTIONS', 'Interactive input must be a Uint8Array.');
     if (!bytes.length) return;
     const previous = this.stdinState.data;
     const nextLength = previous.length + bytes.length;
-    if (!Number.isSafeInteger(nextLength)) throw new VirtualIOError('INVALID_IO_SIZE', 'stdin excedió el rango representable.');
+    if (!Number.isSafeInteger(nextLength)) throw new VirtualIOError('INVALID_IO_SIZE', 'stdin exceeds the representable range.');
     this.resizeFile(this.stdinState, nextLength, at);
     const next = new Uint8Array(nextLength);
     next.set(previous);
@@ -411,16 +411,16 @@ export class VirtualIO {
 
   /** Bound a temporary result before materializing it; actual stream/file writes charge separately. */
   preflightBufferBytes(count: number, at: VirtualLocation = this.currentLocation): void {
-    if (!Number.isSafeInteger(count) || count < 0) throw new VirtualIOError('INVALID_IO_SIZE', 'El tamaño temporal de E/S no es representable.');
+    if (!Number.isSafeInteger(count) || count < 0) throw new VirtualIOError('INVALID_IO_SIZE', 'Temporary I/O size is not representable.');
     if (this.maxIOBytes !== null && count > this.maxIOBytes) this.config.checkLimit(count, at);
   }
 
   /** Check a planned allocation before a formatter or library function creates it. */
   preflightAdditionalIOBytes(count: number, at: VirtualLocation = this.currentLocation): void {
-    if (!Number.isSafeInteger(count) || count < 0) throw new VirtualIOError('INVALID_IO_SIZE', 'El tamaño de E/S planeado no es representable.');
+    if (!Number.isSafeInteger(count) || count < 0) throw new VirtualIOError('INVALID_IO_SIZE', 'The planned I/O size is not representable.');
     if (this.config.maxBytes !== null) {
       const next = this.usedBytes + count;
-      if (!Number.isSafeInteger(next)) throw new VirtualIOError('INVALID_IO_SIZE', 'La E/S virtual excedió el rango representable.');
+      if (!Number.isSafeInteger(next)) throw new VirtualIOError('INVALID_IO_SIZE', 'Virtual I/O exceeds the representable range.');
       if (next > this.config.maxBytes) this.config.checkLimit(next, at);
     }
   }
@@ -428,7 +428,7 @@ export class VirtualIO {
   allowedFileEnd(currentLength: number, at: VirtualLocation = this.currentLocation): number {
     if (this.maxIOBytes === null) return Number.MAX_SAFE_INTEGER;
     const end = currentLength + Math.max(0, this.maxIOBytes - this.usedBytes);
-    if (!Number.isSafeInteger(end)) throw new VirtualIOError('INVALID_IO_SIZE', 'El final del archivo virtual excedió el rango representable.');
+    if (!Number.isSafeInteger(end)) throw new VirtualIOError('INVALID_IO_SIZE', 'The end of the virtual file exceeds the representable range.');
     void at;
     return end;
   }
@@ -436,18 +436,18 @@ export class VirtualIO {
   raiseIOByteLimit(additionalBytes: number, at: VirtualLocation = this.currentLocation): never {
     const actual = this.usedBytes + Math.max(1, additionalBytes);
     this.config.checkLimit(actual, at);
-    throw new VirtualIOError('IO_LIMIT', 'Se superó el límite de E/S virtual.');
+    throw new VirtualIOError('IO_LIMIT', 'Virtual I/O limit exceeded.');
   }
 
   resizeFile(state: FileState, nextLength: number, at: VirtualLocation = this.currentLocation): void {
-    if (!Number.isSafeInteger(nextLength) || nextLength < 0) throw new VirtualIOError('INVALID_IO_SIZE', 'El tamaño de un archivo virtual no es representable.');
+    if (!Number.isSafeInteger(nextLength) || nextLength < 0) throw new VirtualIOError('INVALID_IO_SIZE', 'The virtual file size is not representable.');
     this.adjustBytes(nextLength - state.data.length, at);
   }
 
   private adjustBytes(delta: number, at: VirtualLocation): void {
     if (delta > 0) {
       const next = this.usedBytes + delta;
-      if (!Number.isSafeInteger(next)) throw new VirtualIOError('INVALID_IO_SIZE', 'La E/S virtual excedió el rango representable.');
+      if (!Number.isSafeInteger(next)) throw new VirtualIOError('INVALID_IO_SIZE', 'Virtual I/O exceeds the representable range.');
       if (this.config.maxBytes !== null && next > this.config.maxBytes) this.config.checkLimit(next, at);
       this.usedBytes = next;
     } else this.usedBytes = Math.max(0, this.usedBytes + delta);
@@ -455,7 +455,7 @@ export class VirtualIO {
 
   private seed(data: unknown): Uint8Array {
     if (typeof data !== 'string' && !(data instanceof Uint8Array)) {
-      throw new VirtualIOError('INVALID_IO_OPTIONS', 'stdin y los archivos virtuales requieren texto o Uint8Array.');
+      throw new VirtualIOError('INVALID_IO_OPTIONS', 'stdin and virtual files require text or Uint8Array data.');
     }
     const byteLength = typeof data === 'string' ? utf8ByteLength(data) : data.byteLength;
     // Check the budget before TextEncoder or slice allocates a second copy.

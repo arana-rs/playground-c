@@ -62,7 +62,7 @@ export interface MemoryViewerState {
   /** Zero-based VM line-step index; remains monotonic after old history is pruned. */
   readonly stepIndex: number;
   readonly errorMessage: string | null;
-  readonly historyNotice: string | null;
+  readonly historyNotice: number | null;
   /** True after this debug session has accepted its first real heap allocation event. */
   readonly hasUsedHeap: boolean;
   /** True when preparation found a resolved supported heap allocator call anywhere in the program. */
@@ -290,9 +290,7 @@ export class MemoryViewerController {
       canNext: hasHistoryFuture || canAdvanceVm,
       stepIndex,
       errorMessage: entry?.errorMessage ?? null,
-      historyNotice: this.historyOffset === 0
-        ? null
-        : `El historial conserva los últimos ${this.maxHistoryEntries.toLocaleString('es-ES')} pasos; los más antiguos ya no están disponibles.`,
+      historyNotice: this.historyOffset === 0 ? null : this.maxHistoryEntries,
       hasUsedHeap: this.hasUsedHeap,
       hasHeapAllocationCalls: this.hasHeapAllocationCalls,
       lifecycle: selectedLifecycle,
@@ -374,11 +372,11 @@ export class MemoryViewerController {
     worker.onerror = event => {
       event.preventDefault();
       const requestId = this.pendingStart ? null : this.pendingRequestId;
-      this.fail(active, requestId, `El Worker del visor terminó inesperadamente: ${event.message || 'error sin diagnóstico.'}`);
+      this.fail(active, requestId, `The Memory Viewer Worker stopped unexpectedly: ${event.message || 'no diagnostic was returned.'}`);
     };
     worker.onmessageerror = () => {
       const requestId = this.pendingStart ? null : this.pendingRequestId;
-      this.fail(active, requestId, 'No se pudo leer la respuesta del Worker del visor.');
+      this.fail(active, requestId, 'Could not read the Memory Viewer Worker response.');
     };
     this.armWatchdog(active, null);
 
@@ -386,7 +384,7 @@ export class MemoryViewerController {
       const command: MemoryViewerCommand = { type: 'debug-start', jobId, fileName: 'main.c', source };
       worker.postMessage(command);
     } catch (error) {
-      this.fail(active, null, `No se pudo enviar el código al Worker: ${this.errorText(error)}`);
+      this.fail(active, null, `Could not send source to the Worker: ${this.errorText(error)}`);
     }
   }
 
@@ -446,7 +444,7 @@ export class MemoryViewerController {
       };
       active.worker.postMessage(command);
     } catch (error) {
-      this.fail(active, requestId, `No se pudo enviar la entrada: ${this.errorText(error)}`);
+      this.fail(active, requestId, `Could not send input: ${this.errorText(error)}`);
       return false;
     }
     this.appendTranscript({ stream: 'stdin', text: `${line}\n` });
@@ -476,7 +474,7 @@ export class MemoryViewerController {
       };
       active.worker.postMessage(command);
     } catch (error) {
-      this.fail(active, requestId, `No se pudo cerrar la entrada: ${this.errorText(error)}`);
+      this.fail(active, requestId, `Could not send end of input: ${this.errorText(error)}`);
       return false;
     }
     this.appendTranscript({ stream: 'system', text: '[EOF]\n', tone: 'system' });
@@ -505,7 +503,7 @@ export class MemoryViewerController {
     this.inputEnded = true;
     this.vmAlive = false;
     this.flushOutputDecoders();
-    this.appendTranscript({ stream: 'system', text: 'Sesión de depuración detenida.\n', tone: 'warning' });
+    this.appendTranscript({ stream: 'system', text: 'Debug session stopped.\n', tone: 'warning' });
     this.appendEntry({
       location,
       status: 'cancelled',
@@ -563,7 +561,7 @@ export class MemoryViewerController {
       const command: MemoryViewerCommand = { type: 'debug-step', jobId: active.jobId, requestId };
       active.worker.postMessage(command);
     } catch (error) {
-      this.fail(active, requestId, `No se pudo solicitar el paso: ${this.errorText(error)}`);
+      this.fail(active, requestId, `Could not request the next step: ${this.errorText(error)}`);
     }
   }
 
@@ -756,7 +754,7 @@ export class MemoryViewerController {
       {
         location,
         status,
-        errorMessage: message || 'El motor no devolvió un diagnóstico.',
+        errorMessage: message || 'The engine did not return a diagnostic.',
         lifecycle: this.lifecycle,
         omittedArrayObjects: this.omittedArrayObjects,
         omittedAggregateObjects: this.omittedAggregateObjects,
@@ -800,7 +798,7 @@ export class MemoryViewerController {
     this.clearWatchdog();
     this.watchdog = this.timers.setTimeout(() => {
       if (this.active !== active || !this.matchesPending(requestId)) return;
-      this.acceptError(active, requestId, 'error', `El visor superó el tiempo máximo de ${this.configuration.timeoutMs} ms durante la preparación o el paso.`);
+      this.acceptError(active, requestId, 'error', `The Memory Viewer exceeded its ${this.configuration.timeoutMs} ms time limit during preparation or stepping.`);
     }, this.configuration.timeoutMs);
   }
 

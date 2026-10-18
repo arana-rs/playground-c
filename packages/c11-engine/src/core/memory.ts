@@ -156,7 +156,7 @@ export class VirtualMemory {
   describeObject(ref: ObjectReference, at: Location): RuntimeObjectDescription {
     const node = this.nodeFor(ref, at);
     const root = this.roots.get(node.allocationId);
-    if (!root) failure('INACTIVE_OBJECT', 'La referencia no identifica una asignación activa.', at);
+    if (!root) failure('INACTIVE_OBJECT', 'The reference does not identify an active allocation.', at);
     return {
       objectId: root.id,
       allocationId: root.allocationId,
@@ -170,7 +170,7 @@ export class VirtualMemory {
   describeObjectView(ref: ObjectReference, at: Location): RuntimeObjectViewDescription {
     const node = this.nodeFor(ref, at);
     const root = this.roots.get(node.allocationId);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'La referencia no identifica una asignación activa.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The reference does not identify an active allocation.', at);
     let size = node.size;
     const aggregate = aggregateType(node.type);
     if (aggregate) {
@@ -298,7 +298,7 @@ export class VirtualMemory {
   }
 
   allocateRawAligned(bytes: number, alignment: number, at: Location): ObjectPointerValue | null {
-    if (!Number.isSafeInteger(bytes) || bytes < 0) failure('INVALID_ALLOCATION_SIZE', 'malloc requiere un tamaño entero seguro no negativo.', at);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) failure('INVALID_ALLOCATION_SIZE', 'malloc requires a nonnegative safe integer size.', at);
     this.validateAlignment(alignment, at);
     // This profile chooses the permitted C11 behavior that malloc(0) returns null.
     if (bytes === 0) return null;
@@ -316,12 +316,12 @@ export class VirtualMemory {
   }
 
   reallocateRaw(pointer: ObjectPointerValue | null, bytes: number, at: Location): ObjectPointerValue | null {
-    if (!Number.isSafeInteger(bytes) || bytes < 0) failure('INVALID_ALLOCATION_SIZE', 'realloc requiere un tamaño entero seguro no negativo.', at);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) failure('INVALID_ALLOCATION_SIZE', 'realloc requires a nonnegative safe integer size.', at);
     if (pointer === null) return this.allocateRaw(bytes, at);
 
     const oldRoot = this.roots.get(pointer.allocationId);
     if (!this.canFree(pointer) || !oldRoot) {
-      failure('INVALID_REALLOC', 'realloc requiere null o el puntero base de un bloque heap vivo.', at);
+      failure('INVALID_REALLOC', 'realloc requires null or the base pointer of a live heap block.', at);
     }
     if (bytes === 0) {
       this.free(pointer, at);
@@ -354,7 +354,7 @@ export class VirtualMemory {
       nextBytes, reservation, oldFirstHeapSlot,
     );
     const newRoot = this.roots.get(newReference.allocationId);
-    if (!newRoot) failure('ENGINE_INTERNAL_ERROR', 'Falta la raíz de una reasignación heap recién creada.', at);
+    if (!newRoot) failure('ENGINE_INTERNAL_ERROR', 'Missing root for a newly reallocated heap object.', at);
     for (const [offset, byte] of representation) newRoot.representation.set(offset, byte);
     for (const [offset, value] of pointerValues) newRoot.pointerValues.set(offset, value);
     newRoot.effectiveTypes.push(...effectiveTypes);
@@ -373,8 +373,8 @@ export class VirtualMemory {
 
   release(ref: ObjectReference, at: Location): void {
     const node = this.nodeFor(ref, at);
-    if (node.id !== node.allocationId) failure('INVALID_OBJECT_RELEASE', 'Solo se puede terminar la duración de un objeto raíz automático.', at);
-    if (node.duration !== 'automatic' && node.duration !== 'compound-literal') failure('INVALID_OBJECT_RELEASE', 'El objeto no tiene duración automática.', at);
+    if (node.id !== node.allocationId) failure('INVALID_OBJECT_RELEASE', 'Only the lifetime of an automatic root object can be ended.', at);
+    if (node.duration !== 'automatic' && node.duration !== 'compound-literal') failure('INVALID_OBJECT_RELEASE', 'The object does not have automatic storage duration.', at);
     this.invalidateRoot(node.allocationId, at);
   }
 
@@ -382,7 +382,7 @@ export class VirtualMemory {
     if (pointer === null) return;
     const root = this.roots.get(pointer.allocationId);
     if (!root || !root.alive || root.duration !== 'heap' || !root.rawAllocation || pointer.byteOffset !== root.byteOffset || pointer.arrayId !== root.id) {
-      failure('INVALID_FREE', 'free requiere null o el puntero base de un bloque heap vivo.', at);
+      failure('INVALID_FREE', 'free requires null or the base pointer of a live heap block.', at);
     }
     this.invalidateRoot(root.allocationId, at);
   }
@@ -409,7 +409,7 @@ export class VirtualMemory {
     this.staticObjects.set(key, ref);
     for (let index = 0; index <= bytes.length; index++) {
       const byte = index === bytes.length ? 0 : bytes[index];
-      if (!Number.isInteger(byte) || byte < 0 || byte > 255) failure('INVALID_STRING_LITERAL', 'El literal de cadena contiene una unidad que no es un byte.', at);
+      if (!Number.isInteger(byte) || byte < 0 || byte > 255) failure('INVALID_STRING_LITERAL', 'The string literal contains a non-byte code unit.', at);
       const element = this.element(ref, index, at);
       const value = BigInt.asIntN(8, BigInt(byte));
       const node = this.nodeFor(element, at);
@@ -454,10 +454,10 @@ export class VirtualMemory {
   element(ref: ObjectReference, index: number | bigint, at: Location): ObjectReference {
     const parent = this.nodeFor(ref, at);
     const array = arrayType(parent.type);
-    if (!array) failure('INVALID_SUBSCRIPT', 'El subíndice requiere un objeto array.', at);
+    if (!array) failure('INVALID_SUBSCRIPT', 'Subscript requires an array object.', at);
     const numericIndex = typeof index === 'bigint' ? Number(index) : index;
     if (!Number.isSafeInteger(numericIndex) || numericIndex < 0 || array.length === null || numericIndex >= array.length) {
-      failure('ARRAY_BOUNDS', 'El índice está fuera de los límites del array.', at);
+      failure('ARRAY_BOUNDS', 'The index is outside the array bounds.', at);
     }
     return this.child(parent, numericIndex, at);
   }
@@ -465,31 +465,31 @@ export class VirtualMemory {
   member(ref: ObjectReference, index: number, at: Location): ObjectReference {
     const parent = this.nodeFor(ref, at);
     const aggregate = aggregateType(parent.type);
-    if (!aggregate) failure('INVALID_MEMBER_ACCESS', 'El acceso a miembro requiere un struct o union.', at);
+    if (!aggregate) failure('INVALID_MEMBER_ACCESS', 'Member access requires a struct or union.', at);
     const definition = this.aggregate(aggregate, at);
     const member = definition.members[index];
-    if (!member) failure('UNKNOWN_MEMBER', `No existe el miembro con índice ${index}.`, at);
-    if (member.bitField?.width === 0) failure('INVALID_MEMBER_ACCESS', 'Un bit-field sin nombre o de ancho cero no es accesible.', at);
+    if (!member) failure('UNKNOWN_MEMBER', `No member exists at index ${index}.`, at);
+    if (member.bitField?.width === 0) failure('INVALID_MEMBER_ACCESS', 'An unnamed or zero-width bit-field is inaccessible.', at);
     return this.child(parent, index, at, member);
   }
 
   dereference(pointer: CValue, at: Location): ObjectReference {
     const targetType = pointedToType(pointer.type);
-    if (!targetType) failure('INVALID_POINTER_ACCESS', 'La desreferencia requiere un puntero.', at);
+    if (!targetType) failure('INVALID_POINTER_ACCESS', 'Dereference requires a pointer.', at);
     const targetBase = unqualifiedType(targetType);
-    if (targetBase === 'void' || isFunction(targetBase)) failure('INVALID_POINTER_ACCESS', 'El puntero no designa un objeto completo.', at);
-    if (pointer.value === null) failure('NULL_DEREFERENCE', 'No se puede desreferenciar un puntero nulo.', at);
+    if (targetBase === 'void' || isFunction(targetBase)) failure('INVALID_POINTER_ACCESS', 'The pointer does not designate a complete object.', at);
+    if (pointer.value === null) failure('NULL_DEREFERENCE', 'Cannot dereference a null pointer.', at);
     const address = pointer.value as ObjectPointerValue;
-    if (!address || address.kind !== 'object-pointer') failure('INVALID_POINTER_ACCESS', 'El valor no es una dirección de objeto.', at);
+    if (!address || address.kind !== 'object-pointer') failure('INVALID_POINTER_ACCESS', 'The value is not an object address.', at);
     const root = this.roots.get(address.allocationId);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The pointer refers to an object whose lifetime has ended.', at);
     const size = sizeOfType(targetType, this.aggregates, at);
     const end = address.byteOffset + size;
     if (address.byteOffset < address.boundsStart || address.byteOffset >= address.boundsEnd || end > address.boundsEnd) {
-      failure('POINTER_BOUNDS', 'El acceso cae fuera del objeto apuntado o usa un puntero one-past.', at);
+      failure('POINTER_BOUNDS', 'Access is outside the pointed-to object or uses a one-past pointer.', at);
     }
     const alignment = this.alignment(targetType, at);
-    if ((root.virtualBase + BigInt(address.byteOffset)) % BigInt(alignment) !== 0n) failure('MISALIGNED_POINTER', 'El puntero no cumple la alineación del tipo apuntado.', at);
+    if ((root.virtualBase + BigInt(address.byteOffset)) % BigInt(alignment) !== 0n) failure('MISALIGNED_POINTER', 'The pointer does not meet the alignment of the pointed-to type.', at);
     const target = this.locate(root, address.byteOffset, targetType, at);
     return this.reference(target, {
       arrayId: address.arrayId,
@@ -505,7 +505,7 @@ export class VirtualMemory {
     const pointer = pointerType(targetType);
     const pointedType = pointer ? pointedToType(targetType) : undefined;
     if (!pointer || !pointedType || !compatibleType(unqualifiedType(pointedType), unqualifiedType(node.type))) {
-      failure('TYPE_ERROR', 'El tipo del puntero no coincide con el objeto direccionado.', { file: 'main.c', line: 1, column: 1 });
+      failure('TYPE_ERROR', 'The pointer type does not match the addressed object.', { file: 'main.c', line: 1, column: 1 });
     }
     const size = node.size;
     const boundsStart = ref.arrayId !== undefined ? ref.boundsStart ?? node.byteOffset : node.byteOffset;
@@ -521,7 +521,7 @@ export class VirtualMemory {
   decay(ref: ObjectReference): CValue {
     const node = this.nodeFor(ref, { file: 'main.c', line: 1, column: 1 });
     const array = arrayType(node.type);
-    if (!array) failure('INVALID_ARRAY_DECAY', 'La conversión array-a-puntero requiere un array.', { file: 'main.c', line: 1, column: 1 });
+    if (!array) failure('INVALID_ARRAY_DECAY', 'Array-to-pointer conversion requires an array.', { file: 'main.c', line: 1, column: 1 });
     return {
       type: { kind: 'pointer', base: array.element },
       value: {
@@ -534,18 +534,18 @@ export class VirtualMemory {
   pointerAdd(pointer: CValue, count: bigint, at: Location): CValue {
     const targetType = pointedToType(pointer.type);
     if (!targetType || unqualifiedType(targetType) === 'void' || isFunction(targetType) || !pointer.value) {
-      failure('INVALID_POINTER_ARITHMETIC', 'La aritmética requiere un puntero no nulo a tipo de objeto completo.', at);
+      failure('INVALID_POINTER_ARITHMETIC', 'Pointer arithmetic requires a non-null pointer to a complete object type.', at);
     }
-    if (typeof pointer.value !== 'object' || pointer.value.kind !== 'object-pointer') failure('INVALID_POINTER_ARITHMETIC', 'La aritmética requiere un puntero a objeto.', at);
+    if (typeof pointer.value !== 'object' || pointer.value.kind !== 'object-pointer') failure('INVALID_POINTER_ARITHMETIC', 'Pointer arithmetic requires an object pointer.', at);
     this.assertAlive(pointer, at);
     const address = pointer.value;
     const stride = sizeOfType(targetType, this.aggregates, at);
     const offset = BigInt(address.byteOffset) + count * BigInt(stride);
     if (offset < BigInt(address.boundsStart) || offset > BigInt(address.boundsEnd) || (offset - BigInt(address.boundsStart)) % BigInt(stride) !== 0n) {
-      failure('POINTER_BOUNDS', 'La aritmética produjo una dirección fuera del array o más allá de one-past.', at);
+      failure('POINTER_BOUNDS', 'Pointer arithmetic produced an address outside the array or beyond one-past.', at);
     }
     const result = Number(offset);
-    if (!Number.isSafeInteger(result)) failure('POINTER_BOUNDS', 'La dirección virtual excede el perfil representable.', at);
+    if (!Number.isSafeInteger(result)) failure('POINTER_BOUNDS', 'The virtual address exceeds the representable profile.', at);
     return { type: pointer.type, value: { ...address, byteOffset: result } };
   }
 
@@ -554,19 +554,19 @@ export class VirtualMemory {
     const characterRepresentation = !!leftBase && !!rightBase && isCharacterType(leftBase) && isCharacterType(rightBase);
     if (!leftBase || !rightBase || !sameType(leftBase, rightBase) || !left.value || !right.value ||
       typeof left.value !== 'object' || typeof right.value !== 'object' || left.value.kind !== 'object-pointer' || right.value.kind !== 'object-pointer') {
-      failure('INVALID_POINTER_DIFFERENCE', 'La resta requiere punteros compatibles dentro del mismo array.', at);
+      failure('INVALID_POINTER_DIFFERENCE', 'Pointer subtraction requires compatible pointers into the same array.', at);
     }
     this.assertAlive(left, at);
     this.assertAlive(right, at);
     const a = left.value, b = right.value;
     if (a.allocationId !== b.allocationId || (!characterRepresentation && a.arrayId !== b.arrayId)) {
-      failure('INVALID_POINTER_DIFFERENCE', 'La resta de punteros de objetos distintos no está definida.', at);
+      failure('INVALID_POINTER_DIFFERENCE', 'Subtracting pointers to distinct objects is undefined.', at);
     }
     const stride = sizeOfType(leftBase, this.aggregates, at);
     const difference = BigInt(a.byteOffset - b.byteOffset);
-    if (difference % BigInt(stride) !== 0n) failure('INVALID_POINTER_DIFFERENCE', 'La diferencia no es un número entero de elementos.', at);
+    if (difference % BigInt(stride) !== 0n) failure('INVALID_POINTER_DIFFERENCE', 'The difference is not an integer number of elements.', at);
     const result = difference / BigInt(stride);
-    if (result < -(1n << 63n) || result > (1n << 63n) - 1n) failure('POINTER_DIFFERENCE_RANGE', 'La diferencia de punteros excede ptrdiff_t del perfil.', at);
+    if (result < -(1n << 63n) || result > (1n << 63n) - 1n) failure('POINTER_DIFFERENCE_RANGE', 'Pointer difference exceeds ptrdiff_t in this profile.', at);
     return { type: 'long', value: result };
   }
 
@@ -575,13 +575,13 @@ export class VirtualMemory {
     if (!leftBase || !rightBase || !compatibleType(unqualifiedType(leftBase), unqualifiedType(rightBase)) ||
         !left.value || !right.value || typeof left.value !== 'object' || typeof right.value !== 'object' ||
         left.value.kind !== 'object-pointer' || right.value.kind !== 'object-pointer') {
-      failure('INVALID_POINTER_COMPARISON', 'La comparación relacional requiere punteros a objetos compatibles.', at);
+      failure('INVALID_POINTER_COMPARISON', 'Relational comparison requires pointers to compatible objects.', at);
     }
     const a = left.value, b = right.value;
     this.assertAlive(left, at);
     this.assertAlive(right, at);
     if (a.allocationId !== b.allocationId) {
-      failure('INVALID_POINTER_COMPARISON', 'La comparación relacional de punteros de objetos distintos no está definida.', at);
+      failure('INVALID_POINTER_COMPARISON', 'Relational comparison of pointers to distinct objects is undefined.', at);
     }
 
     let comparison: number;
@@ -595,11 +595,11 @@ export class VirtualMemory {
       if (!leftObject || !rightObject || leftObject.byteOffset !== a.byteOffset || rightObject.byteOffset !== b.byteOffset ||
           !sameType(leftObject.type, leftBase) || !sameType(rightObject.type, rightBase) ||
           parentId === undefined || parentId !== rightObject.parentId || !parent || !aggregateType(parent.type)) {
-        failure('INVALID_POINTER_COMPARISON', 'La comparación relacional requiere elementos del mismo array o miembros del mismo agregado.', at);
+        failure('INVALID_POINTER_COMPARISON', 'Relational comparison requires elements of the same array or members of the same aggregate.', at);
       }
       const definition = this.aggregate(parent.type, at);
       if (leftObject.memberIndex === undefined || rightObject.memberIndex === undefined) {
-        failure('INVALID_POINTER_COMPARISON', 'La comparación relacional requiere miembros del mismo agregado.', at);
+        failure('INVALID_POINTER_COMPARISON', 'Relational comparison requires members of the same aggregate.', at);
       }
       if (definition.kind === 'union') comparison = 0;
       else comparison = leftObject.memberIndex < rightObject.memberIndex ? -1
@@ -613,18 +613,18 @@ export class VirtualMemory {
 
   assertAlive(pointer: CValue, at: Location): void {
     if (pointer.value === null) return;
-    if (typeof pointer.value !== 'object') failure('INVALID_POINTER_ACCESS', 'El valor no representa un puntero.', at);
+    if (typeof pointer.value !== 'object') failure('INVALID_POINTER_ACCESS', 'The value does not represent a pointer.', at);
     if (pointer.value.kind === 'function-pointer') return;
-    if (pointer.value.kind !== 'object-pointer') failure('INVALID_POINTER_ACCESS', 'El valor no representa un puntero a objeto.', at);
+    if (pointer.value.kind !== 'object-pointer') failure('INVALID_POINTER_ACCESS', 'The value does not represent an object pointer.', at);
     const root = this.roots.get(pointer.value.allocationId);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The pointer refers to an object whose lifetime has ended.', at);
   }
 
   /** Format the actual LP64 virtual pointer representation for the library's %p conversion. */
   formatPointer(pointer: CValue, at: Location): string {
-    if (!isPointer(pointer.type)) failure('INVALID_POINTER_FORMAT', 'El valor de %p no es un puntero.', at);
+    if (!isPointer(pointer.type)) failure('INVALID_POINTER_FORMAT', 'The %p value is not a pointer.', at);
     if (pointer.value === null) return '0x0';
-    if (typeof pointer.value !== 'object') failure('INVALID_POINTER_FORMAT', 'El valor de %p no es una representación de puntero.', at);
+    if (typeof pointer.value !== 'object') failure('INVALID_POINTER_FORMAT', 'The %p value is not a pointer representation.', at);
     if (pointer.value.kind === 'object-pointer') {
       this.assertAlive(pointer, at);
       const value = pointer.value;
@@ -632,7 +632,7 @@ export class VirtualMemory {
       const array = this.records.get(value.arrayId);
       if (!root || !array || array.allocationId !== value.allocationId || value.boundsStart < 0 ||
           value.boundsEnd > root.size || value.boundsStart > value.byteOffset || value.byteOffset > value.boundsEnd) {
-        failure('INVALID_POINTER_REPRESENTATION', 'El puntero no conserva una procedencia válida para %p.', at);
+        failure('INVALID_POINTER_REPRESENTATION', 'The pointer does not retain valid provenance for %p.', at);
       }
       const address = root.virtualBase + BigInt(value.byteOffset);
       this.formattedObjectPointers.set(address, value);
@@ -641,28 +641,28 @@ export class VirtualMemory {
     if (pointer.value.kind === 'function-pointer') {
       if (pointer.value.functionIndex === null) return '0x0';
       if (!Number.isSafeInteger(pointer.value.functionIndex) || pointer.value.functionIndex < 0) {
-        failure('INVALID_POINTER_FORMAT', 'El puntero a función no tiene una representación válida.', at);
+        failure('INVALID_POINTER_FORMAT', 'The function pointer does not have a valid representation.', at);
       }
       return `0x${((1n << 63n) | BigInt(pointer.value.functionIndex + 1)).toString(16)}`;
     }
-    failure('INVALID_POINTER_FORMAT', 'El valor de %p no es un puntero.', at);
+    failure('INVALID_POINTER_FORMAT', 'The %p value is not a pointer.', at);
   }
 
   /** Return the session's LP64 representation for an object or function pointer cast. */
   pointerInteger(pointer: CValue, at: Location): bigint {
-    if (!isPointer(pointer.type)) failure('INVALID_CONVERSION', 'La conversión requiere un puntero.', at);
+    if (!isPointer(pointer.type)) failure('INVALID_CONVERSION', 'Conversion requires a pointer.', at);
     if (pointer.value === null) return 0n;
-    if (typeof pointer.value !== 'object') failure('INVALID_POINTER_REPRESENTATION', 'El valor no representa un puntero.', at);
+    if (typeof pointer.value !== 'object') failure('INVALID_POINTER_REPRESENTATION', 'The value does not represent a pointer.', at);
     if (pointer.value.kind === 'function-pointer') {
       if (pointer.value.functionIndex === null) return 0n;
       const address = (1n << 63n) | BigInt(pointer.value.functionIndex + 1);
       this.integerPointerValues.set(address, { ...pointer.value });
       return address;
     }
-    if (pointer.value.kind !== 'object-pointer') failure('INVALID_POINTER_REPRESENTATION', 'El valor no representa un puntero.', at);
+    if (pointer.value.kind !== 'object-pointer') failure('INVALID_POINTER_REPRESENTATION', 'The value does not represent a pointer.', at);
     this.assertAlive(pointer, at);
     const root = this.roots.get(pointer.value.allocationId);
-    if (!root) failure('INVALID_POINTER_REPRESENTATION', 'El puntero no identifica un objeto virtual.', at);
+    if (!root) failure('INVALID_POINTER_REPRESENTATION', 'The pointer does not identify a virtual object.', at);
     const address = root.virtualBase + BigInt(pointer.value.byteOffset);
     this.integerPointerValues.set(address, { ...pointer.value });
     return address;
@@ -671,18 +671,18 @@ export class VirtualMemory {
   /** Reconstruct only known or currently mapped virtual addresses; provenance is retained when available. */
   pointerFromInteger(value: bigint, type: CType, at: Location): CValue {
     const pointer = pointerType(type);
-    if (!pointer) failure('INVALID_CONVERSION', 'La conversión de entero requiere un tipo puntero.', at);
+    if (!pointer) failure('INVALID_CONVERSION', 'Integer conversion requires a pointer type.', at);
     const address = BigInt.asUintN(64, value);
     if (address === 0n) return { type, value: null };
     const expectsFunction = isFunction(pointedToType(type) ?? 'void');
     const remembered = this.integerPointerValues.get(address) ?? this.formattedObjectPointers.get(address) ?? this.functionRepresentations.get(address);
     if (remembered) {
       if (expectsFunction !== (remembered.kind === 'function-pointer')) {
-        failure('INVALID_POINTER_CONVERSION', 'La representación entera pertenece a una categoría de puntero distinta.', at);
+        failure('INVALID_POINTER_CONVERSION', 'The integer representation belongs to a different pointer category.', at);
       }
       return { type, value: { ...remembered } };
     }
-    if (expectsFunction) failure('INVALID_POINTER_REPRESENTATION', 'El entero no corresponde a una dirección de función conocida.', at);
+    if (expectsFunction) failure('INVALID_POINTER_REPRESENTATION', 'The integer does not correspond to a known function address.', at);
     for (const root of this.roots.values()) {
       const delta = address - root.virtualBase;
       if (delta < 0n || delta > BigInt(root.size)) continue;
@@ -695,17 +695,17 @@ export class VirtualMemory {
         },
       };
     }
-    failure('INVALID_POINTER_REPRESENTATION', 'El entero no corresponde a una dirección virtual conocida.', at);
+    failure('INVALID_POINTER_REPRESENTATION', 'The integer does not correspond to a known virtual address.', at);
   }
 
   /** Parse only null or an object-pointer representation previously emitted by formatPointer. */
   parsePointer(text: string, at: Location): CValue {
     const match = /^0[xX]([0-9a-fA-F]+)$/.exec(text);
-    if (!match) failure('INVALID_POINTER_REPRESENTATION', 'La entrada de %p no coincide con una representación emitida por %p.', at);
+    if (!match) failure('INVALID_POINTER_REPRESENTATION', 'The %p input does not match a representation emitted by %p.', at);
     const address = BigInt(`0x${match[1]}`);
     if (address === 0n) return { type: pointerTo('void'), value: null };
     const value = this.formattedObjectPointers.get(address);
-    if (!value) failure('INVALID_POINTER_REPRESENTATION', 'La entrada de %p no corresponde a un puntero de objeto conocido.', at);
+    if (!value) failure('INVALID_POINTER_REPRESENTATION', 'The %p input does not correspond to a known object pointer.', at);
     const pointer: CValue = { type: pointerTo('void'), value };
     this.assertAlive(pointer, at);
     return pointer;
@@ -725,7 +725,7 @@ export class VirtualMemory {
 
   read(ref: ObjectReference, at: Location): CValue {
     const node = this.nodeFor(ref, at);
-    if (isArray(node.type)) failure('ARRAY_VALUE', 'Un array debe convertirse a puntero antes de evaluarse como expresión.', at);
+    if (isArray(node.type)) failure('ARRAY_VALUE', 'An array must decay to a pointer before it can be evaluated as an expression.', at);
     if (isAggregate(node.type)) {
       this.ensureEffectiveType(node, at);
       const aggregate: AggregateValue = { kind: 'aggregate-value', snapshot: this.snapshot(node, at) };
@@ -745,7 +745,7 @@ export class VirtualMemory {
   inspectScalar(ref: ObjectReference, at: Location): { readonly initialized: boolean; readonly value?: ObjectScalarValue } {
     const node = this.nodeFor(ref, at);
     if (!isScalar(node.type) || isPointer(node.type)) {
-      failure('TYPE_ERROR', 'La inspección escalar requiere un objeto aritmético.', at);
+      failure('TYPE_ERROR', 'Scalar inspection requires an arithmetic object.', at);
     }
     const root = this.rootFor(node, at);
     const zeroInitialized = this.hasZeroInitializedAncestor(node);
@@ -770,7 +770,7 @@ export class VirtualMemory {
     readonly target?: { readonly allocationId: number; readonly byteOffset: number };
   } {
     const node = this.nodeFor(ref, at);
-    if (!isPointer(node.type)) failure('TYPE_ERROR', 'La inspección de puntero requiere un objeto puntero.', at);
+    if (!isPointer(node.type)) failure('TYPE_ERROR', 'Pointer inspection requires a pointer object.', at);
     const root = this.rootFor(node, at);
     const zeroInitialized = this.hasZeroInitializedAncestor(node);
     let fullyRepresented = true;
@@ -860,7 +860,7 @@ export class VirtualMemory {
   /** Inspect a direct arithmetic struct member without creating its lazy child node. */
   inspectAggregateScalar(ref: ObjectReference, memberIndex: number, at: Location): { readonly initialized: boolean; readonly value?: ObjectScalarValue } {
     const member = this.directStructMember(ref, memberIndex, at);
-    if (!isArithmetic(member.type)) failure('TYPE_ERROR', 'La inspección requiere un miembro aritmético de struct.', at);
+    if (!isArithmetic(member.type)) failure('TYPE_ERROR', 'Inspection requires an arithmetic struct member.', at);
     const child = member.parent.children.get(memberIndex);
     const definition = this.aggregate(member.parent.type, at);
     const bitField = definition.members[memberIndex]?.bitField;
@@ -889,7 +889,7 @@ export class VirtualMemory {
     readonly target?: { readonly allocationId: number; readonly byteOffset: number };
   } {
     const member = this.directStructMember(ref, memberIndex, at);
-    if (!isPointer(member.type)) failure('TYPE_ERROR', 'La inspección requiere un miembro puntero de struct.', at);
+    if (!isPointer(member.type)) failure('TYPE_ERROR', 'Inspection requires a pointer struct member.', at);
     const child = member.parent.children.get(memberIndex);
     const size = sizeOfType(member.type, this.aggregates, at);
     let fullyRepresented = true;
@@ -996,8 +996,8 @@ export class VirtualMemory {
     const node = this.nodeFor(ref, at);
     this.ensureWritable(node, at, initializing);
     if (node.byteView) {
-      if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type))) failure('TYPE_ERROR', 'El valor no coincide con el tipo char de la vista de byte.', at);
-      if (!isCharacterType(node.type) || typeof value.value !== 'bigint') failure('TYPE_ERROR', 'La vista de byte requiere un valor entero char.', at);
+      if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type))) failure('TYPE_ERROR', 'The value does not match the byte view’s char type.', at);
+      if (!isCharacterType(node.type) || typeof value.value !== 'bigint') failure('TYPE_ERROR', 'The byte view requires an integer char value.', at);
       const root = this.rootFor(node, at);
       const byte = Number(BigInt.asUintN(8, value.value));
       this.clearPointerProvenance(root, node.byteOffset, node.byteOffset + 1);
@@ -1011,23 +1011,23 @@ export class VirtualMemory {
     const bitField = this.bitFieldFor(node, at);
     if (bitField) {
       if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type)) || typeof value.value !== 'bigint') {
-        failure('TYPE_ERROR', 'La asignación al bit-field necesita un valor entero compatible.', at);
+        failure('TYPE_ERROR', 'Bit-field assignment requires a compatible integer value.', at);
       }
       const assigned = this.writeBitField(node, bitField.member.bitField!, value.value, at);
       return { type: unqualifiedType(node.type), value: assigned };
     }
-    if (isArray(node.type)) failure('INVALID_LVALUE', 'Un array no se puede asignar como objeto completo.', at);
+    if (isArray(node.type)) failure('INVALID_LVALUE', 'An array cannot be assigned as a complete object.', at);
     if (isAggregate(node.type)) {
       if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type)) || typeof value.value !== 'object' || value.value === null || value.value.kind !== 'aggregate-value') {
-        failure('TYPE_ERROR', 'La asignación de agregado necesita un valor del mismo tipo.', at);
+        failure('TYPE_ERROR', 'Aggregate assignment requires a value of the same type.', at);
       }
       this.restore(node, value.value.snapshot, at);
       this.recordEffectiveType(node, node.type, at);
       return { type: unqualifiedType(node.type), value: value.value };
     }
-    if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type))) failure('TYPE_ERROR', 'El valor no es compatible con el tipo del objeto.', at);
+    if (!compatibleType(unqualifiedType(node.type), unqualifiedType(value.type))) failure('TYPE_ERROR', 'The value is incompatible with the object type.', at);
     if (typeof value.value === 'object' && value.value !== null && value.value.kind === 'aggregate-value') {
-      failure('TYPE_ERROR', 'Un valor agregado no puede almacenarse en un objeto escalar.', at);
+      failure('TYPE_ERROR', 'An aggregate value cannot be stored in a scalar object.', at);
     }
     node.value = value.value as ObjectScalarValue;
     node.initialized = true;
@@ -1069,32 +1069,32 @@ export class VirtualMemory {
     const alignment = options.alignment ?? Number(ALLOCATION_ALIGNMENT);
     this.validateAlignment(alignment, at);
     const reservation = duration === 'heap'
-      ? heapReservation ?? failure('ENGINE_INTERNAL_ERROR', 'Falta la dirección seleccionada para una asignación heap.', at)
+      ? heapReservation ?? failure('ENGINE_INTERNAL_ERROR', 'Missing selected address for a heap allocation.', at)
       : this.chooseSessionAddress(size, duration, alignment) ?? this.failRegionExhaustion(size, duration, at);
     const virtualBase = reservation.virtualBase;
     const region = this.regionForDuration(duration);
     if (virtualBase < region.start || reservation.endExclusive > region.endExclusive ||
         virtualBase + BigInt(size) + BigInt(VIRTUAL_MEMORY_LAYOUT.guardBytes) > reservation.endExclusive ||
         virtualBase % BigInt(alignment) !== 0n) {
-      failure('ENGINE_INTERNAL_ERROR', 'La reserva virtual queda fuera de su región o no respeta alineación y guard.', at);
+      failure('ENGINE_INTERNAL_ERROR', 'The virtual reservation is outside its region or violates alignment or guard requirements.', at);
     }
     if (duration === 'heap') {
       if (reservation.heapSlotCount === undefined) {
-        failure('ENGINE_INTERNAL_ERROR', 'Falta el tamaño reservado para una asignación heap.', at);
+        failure('ENGINE_INTERNAL_ERROR', 'Missing reserved size for a heap allocation.', at);
       }
       const firstHeapSlot = (virtualBase - VIRTUAL_HEAP_LAYOUT.start) / ALLOCATION_ALIGNMENT;
       const endHeapSlot = firstHeapSlot + reservation.heapSlotCount;
       for (const [occupiedStart, occupiedEnd] of this.heapExtents) {
         if (occupiedStart === ignoredHeapFirstSlot) continue;
         if (firstHeapSlot < occupiedEnd && occupiedStart < endHeapSlot) {
-          failure('ENGINE_INTERNAL_ERROR', 'El allocator seleccionó un intervalo heap ocupado.', at);
+          failure('ENGINE_INTERNAL_ERROR', 'The allocator selected an occupied heap range.', at);
         }
       }
     } else {
       const extents = this.extentsForDuration(duration);
       for (const [occupiedStart, occupiedEnd] of extents) {
         if (virtualBase < occupiedEnd && occupiedStart < reservation.endExclusive) {
-          failure('ENGINE_INTERNAL_ERROR', 'El allocator seleccionó un intervalo de objetos ocupado.', at);
+          failure('ENGINE_INTERNAL_ERROR', 'The allocator selected an occupied object range.', at);
         }
       }
     }
@@ -1131,7 +1131,7 @@ export class VirtualMemory {
 
   private validateAlignment(alignment: number, at: Location): void {
     if (!Number.isSafeInteger(alignment) || alignment < 1 || alignment > 65536 || (alignment & (alignment - 1)) !== 0) {
-      failure('INVALID_ALIGNMENT', 'La alineación debe ser una potencia de dos entre 1 y 65536.', at);
+      failure('INVALID_ALIGNMENT', 'Alignment must be a power of two between 1 and 65536.', at);
     }
   }
 
@@ -1220,7 +1220,7 @@ export class VirtualMemory {
   private failRegionExhaustion(size: number, duration: Exclude<StorageDuration, 'heap'>, at: Location): never {
     const regionName = duration === 'automatic' || duration === 'compound-literal' ? 'Stack' : 'Static';
     const code = regionName === 'Stack' ? 'STACK_ADDRESS_SPACE_EXHAUSTED' : 'STATIC_ADDRESS_SPACE_EXHAUSTED';
-    failure(code, `La región virtual ${regionName} no tiene espacio para reservar ${size} bytes C y su guard.`, at);
+    failure(code, `Virtual region ${regionName} has no space to reserve ${size} C bytes and its guard.`, at);
   }
 
   /** Choose a random aligned start with bounded probes, then scan live extents once as fallback. */
@@ -1265,7 +1265,7 @@ export class VirtualMemory {
     const randomStart = (): bigint => {
       const random = this.heapAddressRandom();
       if (!Number.isFinite(random) || random < 0 || random >= 1) {
-        failure('ENGINE_INTERNAL_ERROR', 'El generador de direcciones heap produjo un valor inválido.', at);
+        failure('ENGINE_INTERNAL_ERROR', 'The heap address generator produced an invalid value.', at);
       }
       // Slot counts in the configured heap region stay exactly representable as Number.
       return alignSlot(BigInt(Math.floor(random * Number(latestStart + 1n))));
@@ -1308,7 +1308,7 @@ export class VirtualMemory {
 
   private invalidateRoot(id: number, at: Location): void {
     const root = this.roots.get(id);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'La duración del objeto ya terminó.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The object lifetime has already ended.', at);
     root.alive = false;
     this.liveBytes -= root.size;
     const pending: RuntimeObject[] = [root];
@@ -1340,9 +1340,9 @@ export class VirtualMemory {
 
   private nodeFor(ref: ObjectReference, at: Location): RuntimeObject {
     const node = this.records.get(ref.objectId);
-    if (!node || node.allocationId !== ref.allocationId) failure('INACTIVE_OBJECT', 'La referencia no identifica un objeto activo.', at);
+    if (!node || node.allocationId !== ref.allocationId) failure('INACTIVE_OBJECT', 'The reference does not identify a live object.', at);
     const root = this.roots.get(node.allocationId);
-    if (!node.alive || !root?.alive) failure('INACTIVE_OBJECT', 'La duración del objeto terminó.', at);
+    if (!node.alive || !root?.alive) failure('INACTIVE_OBJECT', 'The object lifetime has ended.', at);
     return node;
   }
 
@@ -1355,11 +1355,11 @@ export class VirtualMemory {
   } {
     const parent = this.nodeFor(ref, at);
     const parentAggregate = aggregateType(parent.type);
-    if (!parentAggregate) failure('INVALID_MEMBER_ACCESS', 'La inspección de miembro requiere un struct.', at);
+    if (!parentAggregate) failure('INVALID_MEMBER_ACCESS', 'Member inspection requires a struct.', at);
     const definition = this.aggregate(parentAggregate, at);
-    if (definition.kind !== 'struct') failure('TYPE_ERROR', 'La inspección de miembros visibles solo admite structs.', at);
+    if (definition.kind !== 'struct') failure('TYPE_ERROR', 'Visible-member inspection only supports structs.', at);
     const member = definition.members[memberIndex];
-    if (!member) failure('UNKNOWN_MEMBER', `No existe el miembro con índice ${memberIndex}.`, at);
+    if (!member) failure('UNKNOWN_MEMBER', `No member exists at index ${memberIndex}.`, at);
     const child = parent.children.get(memberIndex);
     return {
       parent,
@@ -1377,28 +1377,28 @@ export class VirtualMemory {
     const parentArray = arrayType(parent.type);
     const parentAggregate = aggregateType(parent.type);
     if (parentArray) {
-      if (parentArray.length === null || index < 0 || index >= parentArray.length) failure('ARRAY_BOUNDS', 'El índice está fuera de los límites del array.', at);
+      if (parentArray.length === null || index < 0 || index >= parentArray.length) failure('ARRAY_BOUNDS', 'The index is outside the array bounds.', at);
       type = parentArray.element;
       byteOffset = parent.byteOffset + index * sizeOfType(type, this.aggregates, at);
     } else if (parentAggregate) {
       const definition = this.aggregate(parentAggregate, at);
       const selected = member ?? definition.members[index];
-      if (!selected) failure('UNKNOWN_MEMBER', `No existe el miembro con índice ${index}.`, at);
+      if (!selected) failure('UNKNOWN_MEMBER', `No member exists at index ${index}.`, at);
       type = selected.type;
       byteOffset = parent.byteOffset + selected.offset;
       memberIndex = selected.index;
       index = selected.index;
       if (selected.flexibleArray) {
         const flexible = arrayType(selected.type);
-        if (!flexible || flexible.length !== null) failure('ENGINE_INTERNAL_ERROR', 'El miembro flexible perdió su tipo de array incompleto.', at);
+        if (!flexible || flexible.length !== null) failure('ENGINE_INTERNAL_ERROR', 'The flexible member lost its incomplete array type.', at);
         const elementSize = sizeOfType(flexible.element, this.aggregates, at);
         const capacity = Math.max(0, this.rootFor(parent, at).size - byteOffset);
         type = arrayOf(flexible.element, Math.floor(capacity / elementSize));
       }
-    } else failure('INVALID_SUBOBJECT', 'El objeto no contiene subobjetos indexables.', at);
+    } else failure('INVALID_SUBOBJECT', 'The object contains no indexable subobjects.', at);
 
     let node = parent.children.get(index);
-    if (node && node.type !== type && !sameType(node.type, type)) failure('ENGINE_INTERNAL_ERROR', 'El índice reutilizó un subobjeto con tipo incompatible.', at);
+    if (node && node.type !== type && !sameType(node.type, type)) failure('ENGINE_INTERNAL_ERROR', 'The index reused a subobject with an incompatible type.', at);
     if (!node) {
       const id = this.nextObjectId++;
       const inheritedZero = parent.zeroInitialized;
@@ -1464,7 +1464,7 @@ export class VirtualMemory {
     }
     if (root.rawAllocation) {
       const size = sizeOfType(type, this.aggregates, at);
-      if (byteOffset < root.byteOffset || byteOffset + size > root.byteOffset + root.size) failure('POINTER_BOUNDS', 'El acceso excede el bloque reservado.', at);
+      if (byteOffset < root.byteOffset || byteOffset + size > root.byteOffset + root.size) failure('POINTER_BOUNDS', 'Access exceeds the reserved block.', at);
       const key = `${byteOffset}:${this.typeKey(type)}`;
       const cached = this.rawViews.get(root.id)?.get(key);
       if (cached) return cached;
@@ -1519,7 +1519,7 @@ export class VirtualMemory {
         }
       }
     }
-    failure('INVALID_POINTER_ACCESS', 'La dirección no corresponde a un objeto del tipo apuntado.', at);
+    failure('INVALID_POINTER_ACCESS', 'The address does not correspond to an object of the pointed-to type.', at);
   }
 
   private readSnapshot(node: RuntimeObject, at: Location): ObjectSnapshot {
@@ -1652,7 +1652,7 @@ export class VirtualMemory {
   }
 
   private ensureWritable(node: RuntimeObject, at: Location, initializing = false): void {
-    if (node.duration === 'string-literal') failure('STRING_LITERAL_MODIFICATION', 'Modificar un literal de cadena tiene comportamiento indefinido en C11.', at);
+    if (node.duration === 'string-literal') failure('STRING_LITERAL_MODIFICATION', 'Modifying a string literal is undefined behavior in C11.', at);
     if (initializing) return;
     const root = this.rootFor(node, at);
     const field = this.bitFieldFor(node, at)?.member.bitField;
@@ -1663,7 +1663,7 @@ export class VirtualMemory {
       : undefined;
     if (root.constRanges.some((range) => range.start < end && start < range.end &&
       (range.bitMask === undefined || writeMask === undefined || (range.bitMask & writeMask) !== 0n))) {
-      failure('CONST_OBJECT_MODIFICATION', 'Modificar un objeto definido const tiene comportamiento indefinido en C11.', at);
+      failure('CONST_OBJECT_MODIFICATION', 'Modifying an object defined with const is undefined behavior in C11.', at);
     }
   }
 
@@ -1682,7 +1682,7 @@ export class VirtualMemory {
       });
     if (candidates.some(({ range }) => this.effectiveTypeCovers(range.type, range.start, range.end, start, end, node.type, at))) return;
     if (root.effectiveTypes.some((range) => range.start < end && start < range.end)) {
-      failure('EFFECTIVE_TYPE_VIOLATION', 'El acceso no es compatible con el tipo efectivo establecido en el almacenamiento heap.', at);
+      failure('EFFECTIVE_TYPE_VIOLATION', 'Access is incompatible with the effective type established in heap storage.', at);
     }
   }
 
@@ -1796,11 +1796,11 @@ export class VirtualMemory {
     const root = this.rootFor(node, at);
     const size = bitField.storageUnitSize;
     if (!node.initialized && !this.hasZeroInitializedAncestor(node)) {
-      failure('UNINITIALIZED_READ', 'Lectura de un bit-field sin inicializar: comportamiento indefinido en C11.', at);
+      failure('UNINITIALIZED_READ', 'Reading an uninitialized bit-field is undefined behavior in C11.', at);
     }
     const bytes = Array.from({ length: size }, (_, index) =>
       root.representation.get(node.byteOffset + index) ?? (this.hasZeroInitializedAncestor(node) ? 0 : undefined));
-    if (bytes.some((byte) => byte === undefined)) failure('UNINITIALIZED_READ', 'La unidad del bit-field contiene bits indeterminados.', at);
+    if (bytes.some((byte) => byte === undefined)) failure('UNINITIALIZED_READ', 'The bit-field unit contains indeterminate bits.', at);
     const raw = this.fromBytes(bytes as number[]);
     const value = (raw >> BigInt(bitField.bitOffset)) & ((1n << BigInt(bitField.width)) - 1n);
     return bitField.signed ? BigInt.asIntN(bitField.width, value) : value;
@@ -1812,7 +1812,7 @@ export class VirtualMemory {
     value: ObjectScalarValue,
     at: Location,
   ): bigint {
-    if (typeof value !== 'bigint') failure('TYPE_ERROR', 'El valor del bit-field debe ser entero.', at);
+    if (typeof value !== 'bigint') failure('TYPE_ERROR', 'The bit-field value must be an integer.', at);
     const root = this.rootFor(node, at);
     const widthMask = (1n << BigInt(bitField.width)) - 1n;
     const shiftedMask = widthMask << BigInt(bitField.bitOffset);
@@ -1836,7 +1836,7 @@ export class VirtualMemory {
   private aggregate(type: CType, at: Location): AggregateDefinition {
     const aggregate = aggregateType(type);
     const definition = aggregate && this.aggregates.find((item) => item.id === aggregate.id);
-    if (!definition?.complete) failure('INCOMPLETE_TYPE', `El tipo agregado ${aggregate?.id ?? '?'} está incompleto.`, at);
+    if (!definition?.complete) failure('INCOMPLETE_TYPE', `Aggregate type ${aggregate?.id ?? '?'} is incomplete.`, at);
     return definition;
   }
 
@@ -1850,12 +1850,12 @@ export class VirtualMemory {
     if (type === 'long double') return binary80Zero();
     if (isScalar(type)) return type === 'float' || type === 'double' ? 0 : 0n;
     if (isFunction(type)) return { kind: 'function-pointer', functionIndex: null } satisfies FunctionPointerValue;
-    failure('INVALID_ZERO_INITIALIZER', 'El tipo no admite inicialización cero escalar.', at);
+    failure('INVALID_ZERO_INITIALIZER', 'The type does not allow scalar zero initialization.', at);
   }
 
   private rootFor(node: RuntimeObject, at: Location): AllocationRoot {
     const root = this.roots.get(node.allocationId);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'La duración del objeto terminó.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The object lifetime has ended.', at);
     return root;
   }
 
@@ -1890,14 +1890,14 @@ export class VirtualMemory {
     const fullyRepresented = Array.from({ length: size }, (_, index) => root.representation.has(node.byteOffset + index)).every(Boolean);
     const zeroInitialized = this.hasZeroInitializedAncestor(node);
     if (node.rawView && !node.initialized && !zeroInitialized && !fullyRepresented) {
-      failure('UNINITIALIZED_READ', 'El almacenamiento de malloc aún no contiene un objeto de este tipo.', at);
+      failure('UNINITIALIZED_READ', 'malloc storage does not yet contain an object of this type.', at);
     }
     if (!node.initialized && !zeroInitialized && !fullyRepresented) {
-      failure('UNINITIALIZED_READ', 'Lectura de un objeto sin inicializar: comportamiento indefinido en C11.', at);
+      failure('UNINITIALIZED_READ', 'Reading an uninitialized object is undefined behavior in C11.', at);
     }
     const bytes = Array.from({ length: size }, (_, index) =>
       root.representation.get(node.byteOffset + index) ?? (zeroInitialized ? 0 : undefined));
-    if (bytes.some((byte) => byte === undefined)) failure('UNINITIALIZED_READ', 'La representación del objeto contiene bytes indeterminados.', at);
+    if (bytes.some((byte) => byte === undefined)) failure('UNINITIALIZED_READ', 'The object representation contains indeterminate bytes.', at);
     if (isPointer(node.type)) {
       const pointerValue = root.pointerValues.get(node.byteOffset);
       if (pointerValue) return pointerValue;
@@ -1915,10 +1915,10 @@ export class VirtualMemory {
     readonly value: ObjectPointerValue;
   }[] {
     const root = this.roots.get(pointer.allocationId);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The pointer refers to an object whose lifetime has ended.', at);
     const end = pointer.byteOffset + count;
     if (!Number.isSafeInteger(count) || count < 0 || pointer.byteOffset < pointer.boundsStart || end > pointer.boundsEnd) {
-      failure('POINTER_BOUNDS', 'La copia excede el objeto apuntado.', at);
+      failure('POINTER_BOUNDS', 'Copy exceeds the pointed-to object.', at);
     }
     const pointerSize = 8;
     return Object.freeze([...root.pointerValues.entries()]
@@ -1934,10 +1934,10 @@ export class VirtualMemory {
     at: Location,
   ): void {
     const root = this.roots.get(pointer.allocationId);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The pointer refers to an object whose lifetime has ended.', at);
     const end = pointer.byteOffset + count;
     if (!Number.isSafeInteger(count) || count < 0 || pointer.byteOffset < pointer.boundsStart || end > pointer.boundsEnd) {
-      failure('POINTER_BOUNDS', 'La copia excede el objeto apuntado.', at);
+      failure('POINTER_BOUNDS', 'Copy exceeds the pointed-to object.', at);
     }
     this.clearPointerProvenance(root, pointer.byteOffset, end);
     for (const { relativeOffset, value } of values) {
@@ -1950,10 +1950,10 @@ export class VirtualMemory {
   /** Capture effective-type shadow for the exact bytes copied by memcpy/memmove. */
   copyableEffectiveTypes(pointer: ObjectPointerValue, count: number, at: Location): readonly EffectiveTypeCopy[] {
     const root = this.roots.get(pointer.allocationId);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The pointer refers to an object whose lifetime has ended.', at);
     const end = pointer.byteOffset + count;
     if (!Number.isSafeInteger(count) || count < 0 || pointer.byteOffset < pointer.boundsStart || end > pointer.boundsEnd) {
-      failure('POINTER_BOUNDS', 'La copia excede el objeto apuntado.', at);
+      failure('POINTER_BOUNDS', 'Copy exceeds the pointed-to object.', at);
     }
     if (root.rawAllocation) {
       return Object.freeze(root.effectiveTypes
@@ -1984,10 +1984,10 @@ export class VirtualMemory {
     at: Location,
   ): void {
     const root = this.roots.get(pointer.allocationId);
-    if (!root?.alive) failure('INACTIVE_OBJECT', 'El puntero refiere a un objeto cuya duración terminó.', at);
+    if (!root?.alive) failure('INACTIVE_OBJECT', 'The pointer refers to an object whose lifetime has ended.', at);
     const end = pointer.byteOffset + count;
     if (!Number.isSafeInteger(count) || count < 0 || pointer.byteOffset < pointer.boundsStart || end > pointer.boundsEnd) {
-      failure('POINTER_BOUNDS', 'La copia excede el objeto apuntado.', at);
+      failure('POINTER_BOUNDS', 'Copy exceeds the pointed-to object.', at);
     }
     if (count === 0) return;
     if (root.rawAllocation) {
@@ -2053,9 +2053,9 @@ export class VirtualMemory {
       }
       return 0;
     }
-    if (leaf) failure('UNINITIALIZED_READ', 'Lectura de un byte de un objeto sin inicializar: comportamiento indefinido en C11.', at);
+    if (leaf) failure('UNINITIALIZED_READ', 'Reading a byte from an uninitialized object is undefined behavior in C11.', at);
     if (this.hasInitializedDescendant(root)) return 0; // LP64 profile choice for padding bytes.
-    failure('UNINITIALIZED_READ', 'Lectura de un byte de un objeto sin inicializar: comportamiento indefinido en C11.', at);
+    failure('UNINITIALIZED_READ', 'Reading a byte from an uninitialized object is undefined behavior in C11.', at);
   }
 
   private leafAt(parent: RuntimeObject, offset: number, at: Location): RuntimeObject | undefined {
@@ -2115,7 +2115,7 @@ export class VirtualMemory {
     const size = sizeOfType(type, this.aggregates, at);
     if (type === 'long double') {
       if (typeof value !== 'object' || value === null || value.kind !== 'binary80') {
-        failure('TYPE_ERROR', 'long double requiere un valor binary80.', at);
+        failure('TYPE_ERROR', 'long double requires a binary80 value.', at);
       }
       const payload = binary80Encode80(value);
       return Array.from({ length: size }, (_, index) => payload[index] ?? 0);
@@ -2123,17 +2123,17 @@ export class VirtualMemory {
     if (isPointer(type)) {
       let address = 0n;
       if (value !== null) {
-        if (typeof value !== 'object') failure('INVALID_POINTER_REPRESENTATION', 'El valor no es una representación de puntero.', at);
+        if (typeof value !== 'object') failure('INVALID_POINTER_REPRESENTATION', 'The value is not a pointer representation.', at);
         if (value.kind === 'object-pointer') {
           const target = this.roots.get(value.allocationId);
-          if (!target) failure('INVALID_POINTER_REPRESENTATION', 'El puntero no identifica un objeto virtual.', at);
+          if (!target) failure('INVALID_POINTER_REPRESENTATION', 'The pointer does not identify a virtual object.', at);
           address = target.virtualBase + BigInt(value.byteOffset);
         } else if (value.kind === 'function-pointer') {
           if (value.functionIndex !== null) {
             address = (1n << 63n) | BigInt(value.functionIndex + 1);
             this.functionRepresentations.set(address, value);
           }
-        } else failure('INVALID_POINTER_REPRESENTATION', 'El valor no es un puntero.', at);
+        } else failure('INVALID_POINTER_REPRESENTATION', 'The value is not a pointer.', at);
       }
       return this.toBytes(address, size);
     }
@@ -2142,10 +2142,10 @@ export class VirtualMemory {
       const view = new DataView(buffer);
       if (type === 'float') view.setFloat32(0, value, true);
       else if (type === 'double') view.setFloat64(0, value, true);
-      else failure('TYPE_ERROR', `El tipo ${String(type)} requiere una representación entera.`, at);
+      else failure('TYPE_ERROR', `Type ${String(type)} requires an integer representation.`, at);
       return Array.from(new Uint8Array(buffer));
     }
-    if (typeof value !== 'bigint' || !isInteger(type)) failure('TYPE_ERROR', `No existe una representación escalar para ${String(type)}.`, at);
+    if (typeof value !== 'bigint' || !isInteger(type)) failure('TYPE_ERROR', `No scalar representation exists for ${String(type)}.`, at);
     return this.toBytes(BigInt.asUintN(size * 8, value), size);
   }
 
@@ -2159,7 +2159,7 @@ export class VirtualMemory {
         const known = this.functionRepresentations.get(address);
         if (known) return known;
         if ((address & (1n << 63n)) !== 0n) return { kind: 'function-pointer', functionIndex: Number(address & ((1n << 63n) - 1n)) - 1 };
-        failure('INVALID_POINTER_REPRESENTATION', 'Los bytes no representan un puntero a función válido en el perfil LP64.', at);
+        failure('INVALID_POINTER_REPRESENTATION', 'The bytes do not represent a valid function pointer in the LP64 profile.', at);
       }
       for (const root of this.roots.values()) {
         const delta = address - root.virtualBase;
@@ -2168,14 +2168,14 @@ export class VirtualMemory {
             byteOffset: Number(delta), boundsStart: 0, boundsEnd: root.size };
         }
       }
-      failure('INVALID_POINTER_REPRESENTATION', 'Los bytes no representan un puntero a objeto válido en el perfil LP64.', at);
+      failure('INVALID_POINTER_REPRESENTATION', 'The bytes do not represent a valid object pointer in the LP64 profile.', at);
     }
     if (type === 'float' || type === 'double') {
       const view = new DataView(Uint8Array.from(bytes).buffer);
       return type === 'float' ? view.getFloat32(0, true) : view.getFloat64(0, true);
     }
     const info = integerInfo(type);
-    if (!info || !isInteger(type)) failure('TYPE_ERROR', `No existe una representación entera para ${String(type)}.`, at);
+    if (!info || !isInteger(type)) failure('TYPE_ERROR', `No integer representation exists for ${String(type)}.`, at);
     const raw = this.fromBytes(bytes), bits = bytes.length * 8;
     if (type === '_Bool') return raw === 0n ? 0n : 1n;
     return info.unsigned ? BigInt.asUintN(bits, raw) : BigInt.asIntN(bits, raw);

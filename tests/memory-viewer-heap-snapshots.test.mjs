@@ -28,7 +28,7 @@ const aggregate = (rootId, address, size) => ({
   padding: [],
 });
 
-test('heap transition usa el ID nuevo cuando se reutiliza una dirección histórica', () => {
+test('heap transitions use the new ID when a historical address is reused', () => {
   const oldBlock = block(7, '0x4000', 16);
   const newBlock = block(8, '0x4000', 16);
   const transition = compareMemoryViewerHeapObjects([oldBlock], [newBlock]);
@@ -38,7 +38,7 @@ test('heap transition usa el ID nuevo cuando se reutiliza una dirección histór
   assert.equal(chooseMemoryViewerHeapFocusId(transition), 8);
 });
 
-test('heap free enfoca el ID y dirección del bloque liberado, aunque no queden bloques vivos', () => {
+test('heap free focuses the released block ID and address even when no live blocks remain', () => {
   const before = [block(1, '0x1000'), block(2, '0x3000'), block(3, '0x8000')];
   const after = [before[0], before[2]];
   const transition = compareMemoryViewerHeapObjects(before, after);
@@ -63,14 +63,14 @@ test('heap ghosts stay at their prior address when a new block is inserted befor
   assert.deepEqual(displayed.map(({ address }) => address), ['0x1000', '0x3000', '0x5000', '0x8000']);
 });
 
-test('una vista aggregate completa sustituye al raw block de la misma asignación', () => {
+test('a complete aggregate view replaces the raw block from the same allocation', () => {
   const raw = block(4, '0x3000', 32);
   const views = mergeMemoryViewerHeapViews([raw], [aggregate(4, '0x3000', 32)]);
 
   assert.deepEqual(views.map(({ kind, id }) => [kind, id]), [['aggregate', 4]]);
 });
 
-test('una vista parcial o desplazada conserva el bloque raw completo', () => {
+test('a partial or offset view preserves the complete raw block', () => {
   const raw = block(5, '0x4000', 32);
   const views = mergeMemoryViewerHeapViews([
     raw,
@@ -84,7 +84,7 @@ test('una vista parcial o desplazada conserva el bloque raw completo', () => {
   ]);
 });
 
-test('una vista anterior no sustituye un allocation actual tras realloc o reutilización de dirección', () => {
+test('an earlier view does not replace a current allocation after realloc or address reuse', () => {
   const old = block(6, '0x5000', 16);
   const current = block(7, '0x5000', 24);
   const displayed = [old, current];
@@ -93,7 +93,7 @@ test('una vista anterior no sustituye un allocation actual tras realloc o reutil
   assert.deepEqual(views.map(({ kind, id }) => [kind, id]), [['block', 6], ['block', 7]]);
 });
 
-test('las sub-vistas heap conservan offset, tamaño e identidad y dejan visible el bloque raw completo', () => {
+test('heap subviews preserve offset, size, and identity while keeping the complete raw block visible', () => {
   const name = 'heap-subobject-views.c';
   const source = fixtureSourceFor('p5', name);
   const prepared = prepare({ entry: name, files: [{ name, source }] });

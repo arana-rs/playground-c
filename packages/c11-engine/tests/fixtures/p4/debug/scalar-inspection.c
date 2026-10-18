@@ -1,30 +1,30 @@
-enum Estado { INACTIVO, LISTO = 4, COMPLETO };
+enum Status { INACTIVE, READY = 4, COMPLETE };
 
-int ajustar(int parametro) {
-    int local = parametro;
+int adjust(int parameter) {
+    int local = parameter;
     local += 1;
     return local;
 }
 
 int main(void) {
-    long largo = 9007199254740993L;
-    long long muy_largo = -9223372036854775807LL - 1LL;
-    unsigned long long sin_signo = 18446744073709551615ULL;
-    _Bool activo = 9;
-    char letra = 'C';
-    char nueva_linea = '\n';
-    char comilla = '\'';
-    short corto = -1234;
-    float decimal = 3.5f;
-    double precision = 2.718281828459045;
-    double cero_negativo = -0.0;
-    enum Estado estado = LISTO;
-    int pendiente;
+    long long_value = 9007199254740993L;
+    long long very_long = -9223372036854775807LL - 1LL;
+    unsigned long long unsigned_value = 18446744073709551615ULL;
+    _Bool active = 9;
+    char letter = 'C';
+    char newline = '\n';
+    char quote = '\'';
+    short short_value = -1234;
+    float decimal_value = 3.5f;
+    double precision_value = 2.718281828459045;
+    double negative_zero = -0.0;
+    enum Status status = READY;
+    int uninitialized;
     int mutable = 1;
     {
-        short temporal = 27;
+        short temporary = 27;
         mutable = 2;
     }
-    int resultado = ajustar(mutable);
-    return resultado == 3 ? 0 : 1;
+    int result = adjust(mutable);
+    return result == 3 ? 0 : 1;
 }

@@ -77,7 +77,7 @@ test('runner streams UTF-8 once, echoes lines once, ignores duplicate events, an
 
   worker.emit({ type: 'output', jobId, sequence: 1, stream: 'stdout', chunk: Uint8Array.of(0x63, 0x61, 0x66, 0xc3) });
   worker.emit({ type: 'output', jobId, sequence: 2, stream: 'stdout', chunk: Uint8Array.of(0xa9, 0x3a, 0x20) });
-  worker.emit({ type: 'output', jobId, sequence: 2, stream: 'stdout', chunk: bytes('duplicado') });
+  worker.emit({ type: 'output', jobId, sequence: 2, stream: 'stdout', chunk: bytes('duplicate') });
   worker.emit({ type: 'input-needed', jobId, requestId: 1, progress: workerProgress('stdin-wait') });
   worker.emit({ type: 'input-needed', jobId, requestId: 1, progress: workerProgress('stdin-wait') });
 
@@ -85,17 +85,17 @@ test('runner streams UTF-8 once, echoes lines once, ignores duplicate events, an
   assert.equal(controller.state.inputRequestId, 1);
   assert.equal(controller.sendStdinLine('7'), true);
   assert.equal(new TextDecoder().decode(worker.messages.at(-1).bytes), '7\n');
-  assert.equal(controller.sendStdinLine('duplicado'), false);
+  assert.equal(controller.sendStdinLine('duplicate'), false);
 
-  worker.emit({ type: 'output', jobId, sequence: 3, stream: 'stdout', chunk: bytes('Numero leido: 7\n') });
+  worker.emit({ type: 'output', jobId, sequence: 3, stream: 'stdout', chunk: bytes('Number read: 7\n') });
   worker.emit({ type: 'input-needed', jobId, requestId: 2, progress: workerProgress('stdin-wait') });
   assert.equal(controller.state.inputRequestId, 2);
-  assert.equal(controller.sendStdinLine('otra linea'), true);
-  worker.emit({ type: 'result', jobId, result: terminated(bytes('café: 7\nNumero leido: 7\n')) });
+  assert.equal(controller.sendStdinLine('another line'), true);
+  worker.emit({ type: 'result', jobId, result: terminated(bytes('café: 7\nNumber read: 7\n')) });
 
   assert.equal(controller.state.status, 'finished');
-  assert.equal(formatConsole(controller.state), 'café: 7\nNumero leido: 7\notra linea\nexit code: 0');
-  assert.equal(formatConsole(controller.state).includes('duplicado'), false);
+  assert.equal(formatConsole(controller.state), 'café: 7\nNumber read: 7\nanother line\nexit code: 0');
+  assert.equal(formatConsole(controller.state).includes('duplicate'), false);
 });
 
 test('EOF is explicit, blocks later line sends, and remains visible with partial output', () => {
@@ -103,7 +103,7 @@ test('EOF is explicit, blocks later line sends, and remains visible with partial
   controller.run(file);
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
-  worker.emit({ type: 'output', jobId, sequence: 1, stream: 'stdout', chunk: bytes('Introduce un valor: ') });
+  worker.emit({ type: 'output', jobId, sequence: 1, stream: 'stdout', chunk: bytes('Enter a value: ') });
   worker.emit({ type: 'input-needed', jobId, requestId: 1, progress: workerProgress('stdin-wait') });
 
   assert.equal(controller.sendStdinEOF(), true);
@@ -112,7 +112,7 @@ test('EOF is explicit, blocks later line sends, and remains visible with partial
   assert.match(formatConsole(controller.state), /\[EOF\]/u);
   controller.stop();
   assert.equal(controller.state.status, 'cancelled');
-  assert.match(formatConsole(controller.state), /Introduce un valor: \[EOF\]/u);
+  assert.match(formatConsole(controller.state), /Enter a value: \[EOF\]/u);
   assert.equal(worker.terminated, true);
 });
 
@@ -121,20 +121,20 @@ test('stale worker messages cannot change a newer run and Stop preserves its tra
   controller.run(file);
   const first = workers[0];
   const firstId = first.messages[0].jobId;
-  first.emit({ type: 'output', jobId: firstId, sequence: 1, stream: 'stdout', chunk: bytes('primera') });
-  first.emit({ type: 'result', jobId: firstId, result: terminated(bytes('primera')) });
+  first.emit({ type: 'output', jobId: firstId, sequence: 1, stream: 'stdout', chunk: bytes('first') });
+  first.emit({ type: 'result', jobId: firstId, result: terminated(bytes('first')) });
 
   controller.run(file);
   const second = workers[1];
   const secondId = second.messages[0].jobId;
-  first.emit({ type: 'output', jobId: firstId, sequence: 2, stream: 'stdout', chunk: bytes('obsoleta') });
-  first.emit({ type: 'result', jobId: firstId, result: terminated(bytes('obsoleto')) });
-  second.emit({ type: 'output', jobId: secondId, sequence: 1, stream: 'stderr', chunk: bytes('parcial') });
+  first.emit({ type: 'output', jobId: firstId, sequence: 2, stream: 'stdout', chunk: bytes('stale') });
+  first.emit({ type: 'result', jobId: firstId, result: terminated(bytes('stale')) });
+  second.emit({ type: 'output', jobId: secondId, sequence: 1, stream: 'stderr', chunk: bytes('partial') });
   controller.stop();
 
   assert.equal(controller.state.status, 'cancelled');
-  assert.match(formatConsole(controller.state), /stderr:\nparcial/u);
-  assert.doesNotMatch(formatConsole(controller.state), /obsolet/u);
+  assert.match(formatConsole(controller.state), /stderr:\npartial/u);
+  assert.doesNotMatch(formatConsole(controller.state), /stale/u);
 });
 
 test('worker startup errors finish the active run immediately with a diagnostic', () => {
@@ -143,11 +143,11 @@ test('worker startup errors finish the active run immediately with a diagnostic'
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
 
-  worker.emit({ type: 'error', phase: 'startup', jobId, message: 'falló la preparación' });
+  worker.emit({ type: 'error', phase: 'startup', jobId, message: 'preparation failed' });
 
   assert.equal(controller.state.status, 'error');
   assert.equal(controller.state.reason, 'start');
-  assert.match(formatConsole(controller.state), /falló la preparación/u);
+  assert.match(formatConsole(controller.state), /preparation failed/u);
   assert.equal(worker.terminated, true);
 });
 

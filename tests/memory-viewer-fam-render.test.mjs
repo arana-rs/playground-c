@@ -17,9 +17,9 @@ function reachInputNeeded(session) {
   for (let index = 0; index < 1_000; index += 1) {
     const progress = session.resume();
     if (progress.kind === 'input-needed') return progress;
-    if (progress.kind !== 'paused') assert.fail(`La sesión terminó antes de esperar entrada: ${progress.kind}`);
+    if (progress.kind !== 'paused') assert.fail(`The session ended before waiting for input: ${progress.kind}`);
   }
-  assert.fail('La sesión no llegó a la pausa de scanf.');
+  assert.fail('The session did not reach the scanf pause.');
 }
 
 function pauseBeforeLine(session, targetLine) {
@@ -27,7 +27,7 @@ function pauseBeforeLine(session, targetLine) {
     const progress = session.resume();
     if (progress.kind !== 'paused' || progress.location.line === targetLine) return progress;
   }
-  assert.fail(`La sesión no alcanzó la línea ${targetLine}.`);
+  assert.fail(`The session did not reach line ${targetLine}.`);
 }
 
 function patchFlexibleArray(aggregate, patch) {
@@ -47,7 +47,7 @@ function createAggregateHistory() {
   });
 }
 
-test('el historial del Memory Viewer conserva los valores inicializados de la cola FAM', async () => {
+test('Memory Viewer history retains initialized values in the FAM tail', async () => {
   const prepared = prepare({ entry: 'packet.c', files: [{ name: 'packet.c', source }] });
   assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));
   const session = createDebugSession(prepared.program);
@@ -100,20 +100,20 @@ test('el historial del Memory Viewer conserva los valores inicializados de la co
       : member),
   };
   assert.equal(sameMemoryViewerAggregateSnapshot(directAggregate, equalCopy), true,
-    'dos snapshots con el mismo contenido FAM deben compararse iguales');
+    'two snapshots with the same FAM contents must compare equal');
   assert.equal(sameMemoryViewerAggregateSnapshot(directAggregate,
     patchFlexibleArray(directAggregate, { status: 'too-many-elements' })), false,
-  'un cambio de status FAM invalida el snapshot');
+  'a change to FAM status invalidates the snapshot');
   assert.equal(sameMemoryViewerAggregateSnapshot(directAggregate,
     patchFlexibleArray(directAggregate, { omittedElements: directTail.flexibleArray.omittedElements + 1 })), false,
-  'un cambio de truncación FAM invalida el snapshot');
+  'a change to FAM truncation invalidates the snapshot');
 
   const lastBatchBeforeIdentical = history.latestBatch;
   const lastSnapshotBeforeIdentical = findPacket(history.materialize(lastBatchBeforeIdentical));
   history.accept([equalCopy]);
-  assert.equal(history.latestBatch, lastBatchBeforeIdentical, 'contenido idéntico reutiliza el batch persistente');
+  assert.equal(history.latestBatch, lastBatchBeforeIdentical, 'identical content reuses the persistent batch');
   assert.equal(findPacket(history.materialize(history.latestBatch)), lastSnapshotBeforeIdentical,
-    'contenido idéntico conserva la identidad del DTO retenido');
+    'identical content retains the identity of the held DTO');
 
   for (const [field, patch] of [
     ['status', { status: 'too-many-elements' }],
@@ -124,9 +124,9 @@ test('el historial del Memory Viewer conserva los valores inicializados de la co
     const fieldInitialBatch = fieldHistory.latestBatch;
     const fieldInitialSnapshot = findPacket(fieldHistory.materialize(fieldInitialBatch));
     fieldHistory.accept([patchFlexibleArray(directAggregate, patch)]);
-    assert.notEqual(fieldHistory.latestBatch, fieldInitialBatch, `cambiar solo ${field} crea un batch nuevo`);
+    assert.notEqual(fieldHistory.latestBatch, fieldInitialBatch, `changing only ${field} creates a new batch`);
     assert.notEqual(findPacket(fieldHistory.materialize(fieldHistory.latestBatch)), fieldInitialSnapshot,
-      `cambiar solo ${field} no reutiliza el snapshot anterior`);
+      `changing only ${field} does not reuse the previous snapshot`);
   }
 
   const detachedInput = {
@@ -151,15 +151,19 @@ test('el historial del Memory Viewer conserva los valores inicializados de la co
   });
   try {
     const { MemoryViewerAggregateBlock } = await vite.ssrLoadModule('/src/memory/MemoryViewer.tsx');
-    const markup = renderToStaticMarkup(createElement(MemoryViewerAggregateBlock, {
-      aggregate,
+    const { LanguageProvider } = await vite.ssrLoadModule('/src/i18n.tsx');
+    const renderAggregate = value => renderToStaticMarkup(createElement(LanguageProvider, {
+      initialLanguage: 'en',
+    }, createElement(MemoryViewerAggregateBlock, {
+      aggregate: value,
       changedMemberKeys: new Set(),
-    }));
+    })));
+    const markup = renderAggregate(aggregate);
     assert.match(markup, /data-memory-viewer-fam-offset="4"/);
     assert.match(markup, /data-memory-viewer-fam-length="3"/);
     assert.match(markup, /data-memory-viewer-fam-capacity="3"/);
     assert.match(markup, /data-memory-viewer-aggregate-field-name="n"/);
-    assert.match(markup, /aria-label="n \(int\), dirección [^,]+, 3"/);
+    assert.match(markup, /aria-label="n, \(int\), address [^,]+, 3"/);
     const visibleChars = [...markup.matchAll(/class="memory-viewer-scalar-value"[^>]*>([ABC])<span class="memory-viewer-array-index"/g)]
       .map(match => match[1]);
     assert.deepEqual(visibleChars, ['A', 'B', 'C']);
@@ -172,22 +176,19 @@ test('el historial del Memory Viewer conserva los valores inicializados de la co
       const cardEnd = markup.indexOf('</div>', elementOffset) + '</div>'.length;
       const card = markup.slice(cardStart, cardEnd);
       assert.match(card, /data-initialized="true"/);
-      assert.doesNotMatch(card, /memory-viewer-scalar--uninitialized|Sin inicializar|—/);
-        assert.ok(markup.includes(`title="0x${address}"`), `la interfaz muestra la dirección 0x${address}`);
+      assert.doesNotMatch(card, /memory-viewer-scalar--uninitialized|Uninitialized|—/);
+      assert.ok(markup.includes(`title="0x${address}"`), `the interface shows address 0x${address}`);
     }
 
     const limitedSession = createDebugSession(prepared.program, undefined, { maxElementsPerArray: 2 });
     assert.equal(reachInputNeeded(limitedSession).kind, 'input-needed');
     const limitedAggregate = limitedSession.inspectAggregates().aggregates.find(item => item.type.includes('Packet') && item.duration === 'heap');
     assert.ok(limitedAggregate);
-    const limitedMarkup = renderToStaticMarkup(createElement(MemoryViewerAggregateBlock, {
-      aggregate: limitedAggregate,
-      changedMemberKeys: new Set(),
-    }));
+    const limitedMarkup = renderAggregate(limitedAggregate);
     const limitedChars = [...limitedMarkup.matchAll(/class="memory-viewer-scalar-value"[^>]*>([ABC])<span class="memory-viewer-array-index"/g)]
       .map(match => match[1]);
     assert.deepEqual(limitedChars, ['A', 'B']);
-    assert.match(limitedMarkup, /\+1 elementos omitidos/);
+    assert.match(limitedMarkup, /\+1 elements omitted/);
   } finally {
     await vite.close();
   }

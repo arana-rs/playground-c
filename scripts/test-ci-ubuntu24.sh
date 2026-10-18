@@ -7,14 +7,14 @@ run_ubuntu24_payload() {
   cd "$REPO_ROOT"
   . /etc/os-release
   if [[ "${ID:-}" != ubuntu || "${VERSION_ID:-}" != 24.04 ]]; then
-    echo "La prueba necesita Ubuntu 24.04; detectado ${PRETTY_NAME:-desconocido}." >&2
+    echo "This test requires Ubuntu 24.04; detected ${PRETTY_NAME:-unknown}." >&2
     exit 1
   fi
 
   local node_major
   node_major="$(sed -nE 's/^[[:space:]]*node-version:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' .github/workflows/tests.yml | head -n 1)"
   if [[ ! "$node_major" =~ ^[0-9]+$ ]]; then
-    echo "No pude leer node-version desde .github/workflows/tests.yml." >&2
+    echo "Could not read node-version from .github/workflows/tests.yml." >&2
     exit 1
   fi
 
@@ -34,12 +34,12 @@ run_ubuntu24_payload() {
   node_archive="$(awk '$2 ~ /^node-v[0-9]+\.[0-9]+\.[0-9]+-linux-x64\.tar\.xz$/ { print $2; exit }' "$node_tmp_dir/SHASUMS256.txt")"
   case "$node_archive" in
     "node-v${node_major}."*-linux-x64.tar.xz) ;;
-    *) echo "No encontré el tarball x64 de Node ${node_major} en el manifiesto oficial." >&2; exit 1 ;;
+    *) echo "Could not find the Node ${node_major} x64 tarball in the official manifest." >&2; exit 1 ;;
   esac
 
   node_sha256="$(awk -v archive="$node_archive" '$2 == archive { print $1; exit }' "$node_tmp_dir/SHASUMS256.txt")"
   if [[ ! "$node_sha256" =~ ^[[:xdigit:]]{64}$ ]]; then
-    echo "No encontré un SHA-256 válido para $node_archive." >&2
+    echo "Could not find a valid SHA-256 for $node_archive." >&2
     exit 1
   fi
   curl -fsSL --retry 3 --retry-all-errors "$node_release_url/$node_archive" -o "$node_tmp_dir/$node_archive"
@@ -64,7 +64,7 @@ run_ubuntu24_payload() {
   clang_major="$(clang -dumpversion)"
   clang_major="${clang_major%%.*}"
   if [[ "$gcc_major" != 13 || "$clang_major" != 18 ]]; then
-    echo "Se esperaban GCC 13 y Clang 18; detectados GCC $gcc_major y Clang $clang_major." >&2
+    echo "Expected GCC 13 and Clang 18; detected GCC $gcc_major and Clang $clang_major." >&2
     exit 1
   fi
 
@@ -76,7 +76,7 @@ run_ubuntu24_payload() {
 
 if [[ "${1:-}" == --in-container ]]; then
   if [[ $# -ne 1 || ! -f /.dockerenv || "$(id -u)" -ne 0 ]]; then
-    echo "El modo --in-container requiere ejecutarse como root dentro de Docker." >&2
+    echo "The --in-container mode must run as root inside Docker." >&2
     exit 1
   fi
   run_ubuntu24_payload
@@ -84,12 +84,12 @@ if [[ "${1:-}" == --in-container ]]; then
 fi
 
 if [[ $# -ne 0 ]]; then
-  echo "Uso: pnpm test:ci" >&2
+  echo "Usage: pnpm test:ci" >&2
   exit 2
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "pnpm test:ci requiere Docker para usar Ubuntu 24.04." >&2
+  echo "pnpm test:ci requires Docker to use Ubuntu 24.04." >&2
   exit 1
 fi
 

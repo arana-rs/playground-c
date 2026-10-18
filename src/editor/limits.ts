@@ -1,8 +1,11 @@
 /** The editor accepts at most this many logical lines in one file. */
 export const MAX_EDITOR_LINES = 999;
 
-export const EDITOR_LINE_LIMIT_MESSAGE =
-  `No se puede superar el límite de ${MAX_EDITOR_LINES} líneas por archivo.`;
+export type EditorLimitMessage =
+  | { readonly kind: 'line-limit' }
+  | { readonly kind: 'file-too-long'; readonly lineCount: number };
+
+export const EDITOR_LINE_LIMIT_MESSAGE: EditorLimitMessage = { kind: 'line-limit' };
 
 /** Match textarea line endings before counting, highlighting, or applying edits. */
 export function normalizeEditorText(text: string): string {
@@ -19,9 +22,9 @@ export function isEditorTextWithinLineLimit(text: string): boolean {
 }
 
 /** Use at document-load boundaries to report an oversized source without truncating it. */
-export function getEditorLineLimitDiagnostic(text: string): string | null {
+export function getEditorLineLimitDiagnostic(text: string): EditorLimitMessage | null {
   const lineCount = getEditorLineCount(text);
   return lineCount <= MAX_EDITOR_LINES
     ? null
-    : `El archivo no se cargó: tiene ${lineCount} líneas y el límite es ${MAX_EDITOR_LINES}.`;
+    : { kind: 'file-too-long', lineCount };
 }

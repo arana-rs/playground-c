@@ -100,7 +100,7 @@ export function decomposeBinary80(input: Binary80Value): Binary80Parts {
 function assertBinary80(input: Binary80Value): Binary80Value {
   if (!input || input.kind !== 'binary80' || !['finite', 'infinity', 'nan'].includes(input.classification) ||
       typeof input.negative !== 'boolean' || typeof input.significand !== 'bigint' || !Number.isSafeInteger(input.exponent)) {
-    throw new TypeError('Se esperaba un valor binary80 válido.');
+    throw new TypeError('Expected a valid binary80 value.');
   }
   if (input.classification === 'finite') {
     const significand = input.significand;
@@ -109,11 +109,11 @@ function assertBinary80(input: Binary80Value): Binary80Value {
     const validNormal = significand >= INTEGER_BIT && significand < SIGNIFICAND_LIMIT &&
       input.exponent >= MIN_SUBNORMAL_EXPONENT && input.exponent <= MAX_NORMAL_EXPONENT - 63;
     if (!validZero && !validSubnormal && !validNormal) {
-      throw new TypeError('La representación finita binary80 no está normalizada.');
+      throw new TypeError('The finite binary80 representation is not normalized.');
     }
   } else if (input.exponent !== 0 || input.significand !==
       (input.classification === 'infinity' ? INTEGER_BIT : QUIET_NAN)) {
-    throw new TypeError('La representación especial binary80 no está normalizada.');
+    throw new TypeError('The special binary80 representation is not normalized.');
   }
   return input;
 }
@@ -153,8 +153,8 @@ export function binary80FromRational(
   denominator = 1n,
   options: Binary80RoundingOptions = {},
 ): Binary80Value {
-  if (denominator <= 0n) throw new RangeError('El denominador binary80 debe ser positivo.');
-  if (!Number.isSafeInteger(options.binaryExponent ?? 0)) throw new RangeError('El exponente binary80 debe ser entero seguro.');
+  if (denominator <= 0n) throw new RangeError('The binary80 denominator must be positive.');
+  if (!Number.isSafeInteger(options.binaryExponent ?? 0)) throw new RangeError('The binary80 exponent must be a safe integer.');
   const negative = options.negative ?? numerator < 0n;
   let magnitude = numerator < 0n ? -numerator : numerator;
   if (magnitude === 0n) return binary80Zero(negative);
@@ -201,7 +201,7 @@ export function binary80FromNumber(input: number): Binary80Value {
 /** Return the exact rational represented by a finite binary80 value. */
 export function binary80ToRational(input: Binary80Value): Binary80Rational {
   const checked = assertBinary80(input);
-  if (checked.classification !== 'finite') throw new RangeError('NaN e infinito no tienen una fracción racional finita.');
+  if (checked.classification !== 'finite') throw new RangeError('NaN and infinity do not have a finite rational fraction.');
   if (checked.exponent >= 0) {
     return Object.freeze({
       numerator: checked.significand << BigInt(checked.exponent),
@@ -218,7 +218,7 @@ export function binary80ToRational(input: Binary80Value): Binary80Rational {
 
 export function binary80ToBigIntTrunc(input: Binary80Value): bigint {
   const checked = assertBinary80(input);
-  if (checked.classification !== 'finite') throw new RangeError('NaN e infinito no pueden convertirse a entero.');
+  if (checked.classification !== 'finite') throw new RangeError('NaN and infinity cannot be converted to an integer.');
   const magnitude = checked.exponent >= 0
     ? checked.significand << BigInt(checked.exponent)
     : checked.significand >> BigInt(-checked.exponent);
@@ -272,7 +272,7 @@ export function binary80ToNumber(input: Binary80Value, format: Binary80Format): 
   if (checked.classification === 'nan') return NaN;
   if (checked.classification === 'infinity') return checked.negative ? -Infinity : Infinity;
   const target = targetFormats[format];
-  if (!target) throw new RangeError(`Formato flotante no reconocido: ${String(format)}.`);
+  if (!target) throw new RangeError(`Unrecognized floating-point format: ${String(format)}.`);
   const rounded = roundToTarget(
     checked.significand,
     1n,
@@ -485,7 +485,7 @@ export function parseBinary80(input: string): Binary80Value {
   const special = signedSpecial(text, negative);
   if (special) return special;
   const parsed = /^0[xX]/.test(text) ? parseHexadecimal(text, negative) : parseDecimal(text, negative);
-  if (!parsed) throw new SyntaxError(`Literal flotante binary80 inválido: «${input}».`);
+  if (!parsed) throw new SyntaxError(`Invalid binary80 floating-point literal: «${input}».`);
   return parsed;
 }
 
@@ -510,7 +510,7 @@ export function binary80Encode80(input: Binary80Value): Uint8Array {
       exponentField = 0;
     } else {
       exponentField = unbiasedExponent + BINARY80_PROFILE.bias;
-      if (exponentField <= 0 || exponentField >= 0x7fff) throw new RangeError('Exponente binary80 fuera de rango.');
+      if (exponentField <= 0 || exponentField >= 0x7fff) throw new RangeError('binary80 exponent out of range.');
       significand = checked.significand;
     }
   }
@@ -525,7 +525,7 @@ export function binary80Encode80(input: Binary80Value): Uint8Array {
 
 /** Decode a raw x87 80-bit payload (or the first ten bytes of 16-byte storage). */
 export function binary80Decode80(input: ArrayLike<number>): Binary80Value {
-  if (input.length < 10) throw new RangeError('El payload binary80 requiere al menos 10 bytes.');
+  if (input.length < 10) throw new RangeError('The binary80 payload requires at least 10 bytes.');
   let significand = 0n;
   for (let index = 0; index < 8; index++) significand |= BigInt(input[index] & 0xff) << BigInt(index * 8);
   const signExponent = (input[8] & 0xff) | ((input[9] & 0xff) << 8);
@@ -562,7 +562,7 @@ function roundedHexFraction(fraction: bigint, discardedBits: number): bigint {
 export function formatBinary80Hex(input: Binary80Value, precision?: number, uppercase = false): string {
   const checked = assertBinary80(input);
   if (precision !== undefined && (!Number.isSafeInteger(precision) || precision < 0 || precision > 100_000)) {
-    throw new RangeError('La precisión hexadecimal binary80 debe estar entre 0 y 100000.');
+    throw new RangeError('The binary80 hexadecimal precision must be between 0 and 100000.');
   }
   const sign = checked.negative ? '-' : '';
   const prefix = uppercase ? '0X' : '0x';

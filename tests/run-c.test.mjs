@@ -39,25 +39,25 @@ function runCli(args, input) {
 }
 
 test('CLI preserves UTF-8 output bytes and returns the C exit status for a spaced path', async () => {
-  const path = await sourceFile('archivo ñ con espacios.c', String.raw`#include <stdio.h>
-int main(void) { printf("salida:\303\261\n"); fprintf(stderr, "aviso\n"); return 7; }
+  const path = await sourceFile('file ñ with spaces.c', String.raw`#include <stdio.h>
+int main(void) { printf("output:\303\261\n"); fprintf(stderr, "warning\n"); return 7; }
 `);
   const result = await runCli([path]);
   assert.equal(result.code, 7, result.stderr.toString('utf8'));
-  assert.equal(result.stdout.toString('utf8'), 'salida:ñ\n');
-  assert.equal(result.stderr.toString('utf8'), 'aviso\n');
+  assert.equal(result.stdout.toString('utf8'), 'output:ñ\n');
+  assert.equal(result.stderr.toString('utf8'), 'warning\n');
 });
 
 test('CLI accepts piped scanf input that arrives before the engine asks for it', async () => {
-  const path = await sourceFile('piped.c', '#include <stdio.h>\nint main(void) { int value = 0; if (scanf("%d", &value) != 1) return 1; printf("valor:%d\\n", value); return 0; }\n');
+  const path = await sourceFile('piped.c', '#include <stdio.h>\nint main(void) { int value = 0; if (scanf("%d", &value) != 1) return 1; printf("value:%d\\n", value); return 0; }\n');
   const result = await runCli([path], '42\n');
   assert.equal(result.code, 0, result.stderr.toString('utf8'));
-  assert.equal(result.stdout.toString('utf8'), 'valor:42\n');
+  assert.equal(result.stdout.toString('utf8'), 'value:42\n');
   assert.equal(result.stderr.byteLength, 0);
 });
 
 test('CLI flushes a scanf prompt and pauses its active watchdog while stdin waits', async () => {
-  const path = await sourceFile('interactive.c', '#include <stdio.h>\nint main(void) { int value = 0; printf("valor? "); if (scanf("%d", &value) != 1) return 1; printf("%d\\n", value); return 0; }\n');
+  const path = await sourceFile('interactive.c', '#include <stdio.h>\nint main(void) { int value = 0; printf("value? "); if (scanf("%d", &value) != 1) return 1; printf("%d\\n", value); return 0; }\n');
   const child = spawn(process.execPath, ['--experimental-strip-types', cli, path], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
   const stdout = [];
   const stderr = [];
@@ -83,14 +83,14 @@ test('CLI flushes a scanf prompt and pauses its active watchdog while stdin wait
     throw error;
   }
   clearTimeout(promptTimeout);
-  assert.equal(firstOutput.toString('utf8'), 'valor? ');
+  assert.equal(firstOutput.toString('utf8'), 'value? ');
   await new Promise(resolve => setTimeout(resolve, RUN_CONFIGURATION.timeoutMs + 250));
   child.stdin.end('9\n');
   const [code, signal] = await closed;
   clearTimeout(timeout);
   assert.equal(signal, null);
   assert.equal(code, 0, Buffer.concat(stderr).toString('utf8'));
-  assert.equal(Buffer.concat(stdout).toString('utf8'), 'valor? 9\n');
+  assert.equal(Buffer.concat(stdout).toString('utf8'), 'value? 9\n');
   assert.equal(Buffer.concat(stderr).byteLength, 0);
 });
 
@@ -111,15 +111,15 @@ test('CLI maps C diagnostics to stderr with the virtual main.c name', async () =
 test('CLI reports missing files and invalid usage with conventional exit codes', async () => {
   const missing = await runCli([join(root, 'does not exist.c')]);
   assert.equal(missing.code, 1);
-  assert.match(missing.stderr.toString('utf8'), /no se pudo leer/);
+  assert.match(missing.stderr.toString('utf8'), /could not read/);
 
   const usage = await runCli([]);
   assert.equal(usage.code, 2);
-  assert.match(usage.stderr.toString('utf8'), /Uso: pnpm run-c/);
+  assert.match(usage.stderr.toString('utf8'), /Usage: pnpm run-c/);
 
   const help = await runCli(['--help']);
   assert.equal(help.code, 0);
-  assert.match(help.stdout.toString('utf8'), /entrada virtual se llama main\.c/);
+  assert.match(help.stdout.toString('utf8'), /virtual input file is named main\.c/);
 });
 
 test('CLI prints the engine instruction-limit diagnostic instead of hanging', async () => {

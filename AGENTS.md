@@ -1,70 +1,70 @@
 # AGENTS.md
 
-## Forma de trabajar
+## Working practices
 
-- Reutiliza componentes, hooks y funciones existentes antes de crear otros.
-- Mantén una sola fuente de verdad para lógica, constantes y configuración.
-- Conserva los cambios existentes del usuario.
-- Comunica avances y resultados en español.
+- Reuse existing components, hooks, and functions before creating new ones.
+- Keep a single source of truth for logic, constants, and configuration.
+- Preserve existing user changes.
+- Communicate progress and results to the user in Spanish.
+- Write project code and project-authored documentation, including Markdown, in English. This includes identifiers, comments, and internal messages. When creating or changing UI text, use the existing ENG/SPA catalog; keep C technical terms and diagnostics in English, and show program output exactly as emitted. Never automatically translate user code or data. Keep user-facing progress and results and commit titles and bodies in Spanish, as specified below.
 
-## Subagentes
+## Subagents
 
-- El agente principal actúa principalmente como orquestador y delega todas las tareas operativas a subagentes: investigación e inspección del código, implementación, documentación, pruebas y compilaciones, navegación y depuración en navegador, revisión de código y operaciones Git solicitadas.
-- Para cada subagente, selecciona explícitamente el modelo `gpt-6-luna` y el esfuerzo de razonamiento `max`; no heredes el modelo ni el esfuerzo del agente principal.
-- El agente principal aclara objetivos, divide el trabajo, asigna y coordina tareas, sigue el progreso y consolida los resultados para el usuario.
-- Da a cada subagente contexto breve y específico para su tarea; evita pasarle todo el historial si no es necesario.
+- The main agent primarily acts as an orchestrator and delegates all operational tasks to subagents: research and code inspection, implementation, documentation, tests and builds, browser navigation and debugging, code review, and requested Git operations.
+- For each subagent, explicitly select model `gpt-6-luna` and reasoning effort `max`; do not inherit the main agent's model or effort.
+- The main agent clarifies objectives, divides the work, assigns and coordinates tasks, tracks progress, and consolidates results for the user.
+- Give each subagent brief, task-specific context; avoid passing the full history when it is not needed.
 
-## Arquitectura
+## Architecture
 
-- El motor C vive en packages/c11-engine y es independiente de React.
-- El core no debe importar DOM, File, Worker ni filesystem.
-- Comparte el escáner de C entre motor, coloreo y contexto del editor.
-- Conserva BigInt para enteros LP64 y las conversiones del perfil.
-- Ejecuta el código del editor dentro del Worker.
-- Reutiliza RUN_CONFIGURATION para los presupuestos de ejecución.
+- The C engine lives in `packages/c11-engine` and is independent of React.
+- The core must not import DOM, File, Worker, or filesystem APIs.
+- Share the C scanner across the engine, syntax highlighting, and editor context.
+- Preserve BigInt for LP64 integers and profile conversions.
+- Run editor code inside the Worker.
+- Reuse `RUN_CONFIGURATION` for execution budgets.
 
-## Editor y diseño
+## Editor and design
 
-- Sigue docs/STYLE.md para cambios visuales y conserva la UI condensada propia.
-- Admite temas GitHub Dark y GitHub Light, con la sintaxis correspondiente y la preferencia persistida.
-- Reutiliza el Button de Arc para Run/Stop.
-- Stop debe permanecer habilitado durante la ejecución.
-- Conserva selección, historial, sangría, pares y composición IME.
-- El ejemplo inicial vive en src/examples/main.c; evita duplicarlo.
-- Los rerenders y Run deben conservar las ediciones del usuario.
-- En Memory Viewer, Stack crece hacia la derecha y los scopes aparecen al entrar. Oculta solo el marcador del scope raíz de main; conserva sus variables, scopes anidados y los de las demás funciones. Usa amarillo para el scope actual y un tono más pálido para los anteriores.
+- Follow `docs/STYLE.md` for visual changes and preserve the project's compact UI.
+- Support GitHub Dark and GitHub Light themes, with matching syntax colors and a persisted preference.
+- Reuse Arc's Button for Run/Stop.
+- Stop must remain enabled during execution.
+- Preserve selection, history, indentation, delimiter pairs, and IME composition.
+- The initial example lives in `src/examples/main.c`; do not duplicate it.
+- Rerenders and Run must preserve the user's edits.
+- In Memory Viewer, Stack grows to the right and scopes appear when entered. Hide only the root scope marker for `main`; preserve its variables, nested scopes, and scopes from other functions. Use yellow for the current scope and a paler shade for earlier scopes.
 
-## Motor y fases
+## Engine and phases
 
-- Consulta docs/c11-engine-roadmap.md al ampliar capacidades.
-- Consulta packages/c11-engine/README.md para la API y semántica.
-- Una función pendiente debe producir un diagnóstico explícito.
-- Al añadir capacidades, actualiza pruebas, CAPABILITIES y documentación.
+- Consult `docs/c11-engine-roadmap.md` when expanding capabilities.
+- Consult `packages/c11-engine/README.md` for the API and semantics.
+- An unimplemented function must produce an explicit diagnostic.
+- When adding capabilities, update tests, CAPABILITIES, and documentation.
 
-## Comandos y validación
+## Commands and validation
 
-- Desarrollo: pnpm dev --host 0.0.0.0 --port 5173 --strictPort
-- Pruebas: pnpm test
-- Compilación y TypeScript: pnpm build
-- Elige las comprobaciones según el cambio.
-- Antes de crear un commit que añada o modifique fixtures u oráculos nativos P1–P5, ejecuta `pnpm test:ci`; exige GCC y Clang y prueba la suite en Ubuntu 24. Compara sus versiones impresas con CI, porque `ubuntu-24.04` no fija todas las versiones de las herramientas.
-- Para cambios del editor, comprueba edición, deshacer y rehacer.
-- Para cambios de ejecución, comprueba Run, Stop y diagnósticos.
-- Completa las compilaciones antes de probar en navegador:
-  reconstruir el motor puede provocar recargas de Vite.
-- Al crear un commit solicitado, incluye solo los cambios de esa tarea.
+- Development: `pnpm dev --host 0.0.0.0 --port 5173 --strictPort`
+- Tests: `pnpm test`
+- Build and TypeScript: `pnpm build`
+- Choose checks appropriate to the change.
+- Before creating a commit that adds or modifies fixtures or native P1–P5 oracles, run `pnpm test:ci`; it requires GCC and Clang and runs the suite on Ubuntu 24. Compare its printed versions with CI because `ubuntu-24.04` does not pin every tool version.
+- For editor changes, check editing, undo, and redo.
+- For execution changes, check Run, Stop, and diagnostics.
+- Complete builds before browser testing because rebuilding the engine can cause Vite reloads.
+- When creating a requested commit, include only changes from that task.
 
-## Mensajes de commit
+## Commit messages
 
-- Usa Conventional Commits con el formato `tipo(ámbito): descripción breve en español`. Los tipos son `feat`, `fix`, `docs`, `refactor`, `test`, `build`, `ci`, `perf` y `chore`, en minúsculas y en inglés.
-- El ámbito es opcional y debe corresponder al cambio; ejemplos habituales son `engine`, `editor`, `memory-viewer`, `license`, `release` y `deps`, sin limitarse a ellos si el contexto requiere otro.
-- Escribe un título breve con un verbo directo en imperativo, sin emoji ni punto final.
-- Añade siempre, separado del título por una línea en blanco, un cuerpo en español con una descripción algo más detallada del cambio; puedes explicar su motivo o impacto.
-- Marca los cambios incompatibles con `!` después del tipo o ámbito, o usa el pie `BREAKING CHANGE:` para describirlos.
-- Ejemplo:
+- Use Conventional Commits in the format `type(scope): brief description in Spanish`. The types are `feat`, `fix`, `docs`, `refactor`, `test`, `build`, `ci`, `perf`, and `chore`, in lowercase and in English.
+- The scope is optional and should match the change; common examples include `engine`, `editor`, `memory-viewer`, `license`, `release`, and `deps`, but other scopes may be used when appropriate.
+- Write a short title with a direct imperative verb, without emoji or a final period.
+- Always add a Spanish body on a new paragraph after the title, with a somewhat more detailed description of the change; it may explain its reason or impact.
+- Mark breaking changes with `!` after the type or scope, or use the `BREAKING CHANGE:` footer to describe them.
+- Example:
   ```text
   fix(memory-viewer): alinea las celdas de los structs
 
   Ajusta la disposición de las celdas para que cada campo del struct se lea correctamente.
   ```
-- Esta convención no autoriza a crear commits sin solicitud del usuario.
+- This convention does not authorize creating commits without a user request.

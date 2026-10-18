@@ -19,7 +19,7 @@ function rejects(source, code = 'TYPE_ERROR') {
   assert.ok(prepared.diagnostics.some((diagnostic) => diagnostic.code === code), JSON.stringify(prepared.diagnostics));
 }
 
-test('enum conserva identidad distinta de otros enum, promueve a int y usa layout int LP64', () => {
+test('enum keeps an identity distinct from other enums, promotes to int and uses the LP64 int layout', () => {
   const result = run(`#include <stdio.h>
     enum Mode { MODE = 7 };
     enum Other { OTHER = 8 };
@@ -40,7 +40,7 @@ test('enum conserva identidad distinta de otros enum, promueve a int y usa layou
   assert.equal(new TextDecoder().decode(result.stdout), '8 10\n');
 });
 
-test('enum con la misma etiqueta en otro scope y enum anónimo distinto mantienen identidad propia', () => {
+test('same-tag enums in another scope and distinct anonymous enums keep their own identities', () => {
   rejects(`enum Shade { OUTER_SHADE };
     int main(void) {
       enum Shade *outer = 0;
@@ -61,7 +61,7 @@ test('enum con la misma etiqueta en otro scope y enum anónimo distinto mantiene
     int main(void) { enum Choice { Token = 2 }; return Token - 2; }`);
 });
 
-test('punteros y declaraciones de funciones con enum distintos son incompatibles', () => {
+test('pointers and function declarations with distinct enums are incompatible', () => {
   rejects(`enum A { A_VALUE };
     enum B { B_VALUE };
     int main(void) { enum A *left = 0; enum B *right = left; return right != 0; }`);
@@ -77,7 +77,7 @@ test('punteros y declaraciones de funciones con enum distintos son incompatibles
     }`);
 });
 
-test('el linker canoniza enum etiquetados compatibles entre unidades de traducción', () => {
+test('the linker canonicalizes compatible tagged enums across translation units', () => {
   const entry = 'enum-project/main.c';
   const definition = 'enum-project/definition.c';
   const valid = prepare({
@@ -105,7 +105,7 @@ test('el linker canoniza enum etiquetados compatibles entre unidades de traducci
   assert.ok(invalid.diagnostics.some(({ code }) => code === 'CONFLICTING_TYPES'));
 });
 
-test('enums anónimos con miembros correspondientes son compatibles solo entre unidades distintas', () => {
+test('anonymous enums with matching members are compatible only across distinct translation units', () => {
   const entry = 'anonymous-enums/main.c';
   const definition = 'anonymous-enums/definition.c';
   const prepared = prepare({

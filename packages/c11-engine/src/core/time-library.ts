@@ -25,16 +25,16 @@ interface BrokenDownTime {
 }
 
 function buffers(context: StdlibTimeRuntimeContext): NonNullable<StdlibTimeRuntimeContext['stdlibState']> {
-  if (!context.stdlibState) return context.fail('ENGINE_INTERNAL_ERROR', 'Falta el estado por ejecución de stdlib/time.', context.at);
+  if (!context.stdlibState) return context.fail('ENGINE_INTERNAL_ERROR', 'Per-execution stdlib/time state is missing.', context.at);
   return context.stdlibState;
 }
 
 function count(args: readonly CValue[], expected: number, name: string, context: StdlibTimeRuntimeContext, at: Location): void {
-  if (args.length !== expected) context.fail('LIBRARY_ARGUMENT', `${name} recibió una cantidad de argumentos no válida.`, at);
+  if (args.length !== expected) context.fail('LIBRARY_ARGUMENT', `${name} received an invalid number of arguments.`, at);
 }
 
 function integer(value: CValue, context: StdlibTimeRuntimeContext, at: Location): bigint {
-  if (typeof value.value !== 'bigint') return context.fail('LIBRARY_ARGUMENT', 'Se esperaba un argumento entero.', at);
+  if (typeof value.value !== 'bigint') return context.fail('LIBRARY_ARGUMENT', 'Expected an integer argument.', at);
   return value.value;
 }
 
@@ -49,7 +49,7 @@ function timeValue(value: bigint | number, resultType: CType | undefined, contex
 function pointer(value: CValue, name: string, context: StdlibTimeRuntimeContext, at: Location, allowNull = false): ObjectPointerValue | null {
   if (value.value === null && allowNull) return null;
   if (typeof value.value !== 'object' || value.value === null || value.value.kind !== 'object-pointer') {
-    return context.fail('LIBRARY_ARGUMENT', `${name} requiere un puntero a objeto.`, at);
+    return context.fail('LIBRARY_ARGUMENT', `${name} requires an object pointer.`, at);
   }
   return value.value;
 }
@@ -156,7 +156,7 @@ function canStoreTm(parts: BrokenDownTime): boolean {
 function tmStorage(context: StdlibTimeRuntimeContext, at: Location, type: CType | undefined): CValue {
   const state = buffers(context);
   if (!state.tmBuffer) {
-    if (!type || !context.allocateStaticObject) return context.fail('ENGINE_INTERNAL_ERROR', 'No se puede crear el buffer static struct tm.', at);
+    if (!type || !context.allocateStaticObject) return context.fail('ENGINE_INTERNAL_ERROR', 'Cannot create the static struct tm buffer.', at);
     state.tmBuffer = context.allocateStaticObject(type, at);
   }
   return state.tmBuffer;
@@ -278,10 +278,10 @@ function formatTm(format: Uint8Array, tm: BrokenDownTime, context: StdlibTimeRun
     }
     const conversion = String.fromCharCode(conversionByte);
     if (modifier === 'E' && !E_MODIFIERS.has(conversion) || modifier === 'O' && !O_MODIFIERS.has(conversion)) {
-      context.fail('LIBRARY_ARGUMENT', `Modificador strftime %${modifier}${conversion} no válido para el locale C.`, at);
+      context.fail('LIBRARY_ARGUMENT', `Invalid strftime modifier %${modifier}${conversion} for the C locale.`, at);
     }
     const piece = formatDirective(conversion, tm);
-    if (piece === undefined) context.fail('LIBRARY_ARGUMENT', `Conversión strftime «%${modifier}${conversion}» no válida o con campos tm fuera de rango.`, at);
+    if (piece === undefined) context.fail('LIBRARY_ARGUMENT', `Invalid strftime conversion «%${modifier}${conversion}» or out-of-range tm fields.`, at);
     output.push(...new TextEncoder().encode(piece));
     context.chargeWork(1, at);
   }
@@ -289,7 +289,7 @@ function formatTm(format: Uint8Array, tm: BrokenDownTime, context: StdlibTimeRun
 }
 
 function parseTimeString(value: CValue, context: StdlibTimeRuntimeContext, at: Location): Uint8Array {
-  if (value.value === null) return context.fail('LIBRARY_ARGUMENT', 'La cadena de formato time.h no puede ser nula.', at);
+  if (value.value === null) return context.fail('LIBRARY_ARGUMENT', 'The time.h format string cannot be null.', at);
   return context.readCString(value, at);
 }
 
@@ -371,7 +371,7 @@ export function dispatchTimeBuiltin(name: string, args: readonly CValue[], resul
   if (name === 'strftime') {
     count(args, 4, name, context, at);
     const maximum = integer(args[1], context, at);
-    if (maximum < 0n || maximum > BigInt(Number.MAX_SAFE_INTEGER)) return context.fail('LIBRARY_ARGUMENT', 'strftime recibió un tamaño fuera del rango seguro.', at);
+    if (maximum < 0n || maximum > BigInt(Number.MAX_SAFE_INTEGER)) return context.fail('LIBRARY_ARGUMENT', 'strftime received a size outside the safe range.', at);
     const destination = pointer(args[0], name, context, at, maximum === 0n);
     const format = parseTimeString(args[2], context, at);
     const tm = readTm(args[3], context, at);

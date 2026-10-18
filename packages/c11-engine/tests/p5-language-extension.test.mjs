@@ -32,30 +32,30 @@ function restrictFailure(source) {
   assert.equal(result.diagnostics[0].code, 'RESTRICT_ALIAS');
 }
 
-test('declaradores aceptan storage, function specifiers y qualifiers intercalados', () => {
+test('declarators accept interleaved storage classes, function specifiers and qualifiers', () => {
   run('language-extension-specifiers.c');
   rejects('int static static duplicate; int main(void) { return 0; }');
   rejects('static extern int incompatible; int main(void) { return 0; }');
 });
 
-test('?: combina qualifiers inmediatos del puntero y conserva el caso object/void', () => {
+test('?: combines immediate pointer qualifiers and preserves the object/void case', () => {
   run('language-extension-conditional-pointers.c');
   rejects('int main(void) { int *integer_pointer = 0; float *float_pointer = 0; return (1 ? integer_pointer : float_pointer) != 0; }');
   rejects('int main(void) { int **integer_pointer = 0; const int **qualified_pointer = 0; return (1 ? integer_pointer : qualified_pointer) != 0; }');
 });
 
-test('una declaración sin prototipo compone con la declaración de función sin parámetros', () => {
+test('a no-prototype declaration composes with a function declaration without parameters', () => {
   run('language-extension-legacy-prototype.c');
   rejects('int legacy(); int legacy(float); int main(void) { return 0; }');
 });
 
-test('composición L07/L11 cubre orden de especificadores, shadowing, arrays y default promotions', () => {
+test('L07/L11 composition covers specifier order, shadowing, arrays and default promotions', () => {
   run('language-extension-declarations.c');
   rejects('extern int incompatible_array[]; extern int incompatible_array[3]; int incompatible_array[4]; int main(void) { return 0; }');
   rejects('typedef int Value; int main(void) { int Value; typedef long Value; return 0; }');
 });
 
-test('el linker comparte compatibilidad y tipos compuestos entre unidades', () => {
+test('the linker shares compatibility and composite types across translation units', () => {
   const entry = 'language-extension-composite/main.c';
   const names = [entry, 'language-extension-composite/definition.c'];
   const valid = prepare({
@@ -88,11 +88,11 @@ test('el linker comparte compatibilidad y tipos compuestos entre unidades', () =
   assert.ok(invalid.diagnostics.some(({ code }) => code === 'CONFLICTING_TYPES'));
 });
 
-test('_Generic en ICE usa el tipo compuesto de ?: para punteros cualificados', () => {
+test('_Generic in an ICE uses the composite type of ?: for qualified pointers', () => {
   run('language-extension-conditional-inference.c');
 });
 
-test('restrict perfila alias reales y permite cadenas, lecturas y subobjetos disjuntos', () => {
+test('restrict tracks real aliases and permits disjoint chains, reads and subobjects', () => {
   run('language-extension-restrict.c');
   restrictFailure(`static void update(int * restrict left, int * restrict right) {
     *left = 1;

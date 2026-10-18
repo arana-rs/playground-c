@@ -41,7 +41,7 @@ test('value changes compare adjacent snapshots by ID, initialization, and exact 
   const earlierStatic = [{ id: 20, initialized: true, displayValue: '41' }];
   const laterStatic = [{ id: 20, initialized: true, displayValue: '42' }];
   assert.deepEqual(findMemoryViewerChangedScalarIds(earlierStatic, laterStatic), [20]);
-  assert.deepEqual(findMemoryViewerChangedScalarIds(laterStatic, earlierStatic), [20], 'recorrer Back marca la diferencia hacia el estado seleccionado');
+  assert.deepEqual(findMemoryViewerChangedScalarIds(laterStatic, earlierStatic), [20], 'moving Back marks the difference toward the selected state');
 });
 
 function scope(id, scopeName = `scope${id}`) {

@@ -1,44 +1,44 @@
-struct Nodo {
-    int valor;
-    struct Nodo *siguiente;
+struct Node {
+    int value;
+    struct Node *next;
 };
 
-void appendNode(struct Nodo **head, struct Nodo *node) {
-    struct Nodo **cursor = head;
+void appendNode(struct Node **head, struct Node *node) {
+    struct Node **cursor = head;
     while (*cursor != 0) {
-        cursor = &(*cursor)->siguiente;
+        cursor = &(*cursor)->next;
     }
     *cursor = node;
 }
 
 int main(void) {
-    struct Nodo primero = {10, 0};
-    struct Nodo segundo = {20, 0};
-    struct Nodo tercero = {30, 0};
-    struct Nodo *lista = 0;
+    struct Node first = {10, 0};
+    struct Node second = {20, 0};
+    struct Node third = {30, 0};
+    struct Node *list = 0;
 
-    appendNode(&lista, &primero);
-    appendNode(&lista, &segundo);
-    appendNode(&lista, &tercero);
+    appendNode(&list, &first);
+    appendNode(&list, &second);
+    appendNode(&list, &third);
 
-    if (lista != &primero || primero.siguiente != &segundo ||
-        segundo.siguiente != &tercero || tercero.siguiente != 0 ||
-        primero.valor != 10 || segundo.valor != 20 || tercero.valor != 30) {
+    if (list != &first || first.next != &second ||
+        second.next != &third || third.next != 0 ||
+        first.value != 10 || second.value != 20 || third.value != 30) {
         return 1;
     }
 
-    int temporal_correcto = 0;
+    int temporary_is_correct = 0;
     {
-        struct Nodo temporal = {40, 0};
-        appendNode(&lista, &temporal);
-        temporal_correcto = tercero.siguiente == &temporal &&
-            temporal.valor == 40 && temporal.siguiente == 0;
-        tercero.siguiente = 0;
+        struct Node temporary = {40, 0};
+        appendNode(&list, &temporary);
+        temporary_is_correct = third.next == &temporary &&
+            temporary.value == 40 && temporary.next == 0;
+        third.next = 0;
     }
 
-    if (temporal_correcto == 0 || lista != &primero ||
-        primero.siguiente != &segundo || segundo.siguiente != &tercero ||
-        tercero.siguiente != 0) {
+    if (temporary_is_correct == 0 || list != &first ||
+        first.next != &second || second.next != &third ||
+        third.next != 0) {
         return 2;
     }
 

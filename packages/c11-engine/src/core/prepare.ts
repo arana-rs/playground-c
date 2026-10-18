@@ -39,43 +39,43 @@ export function prepare(project: SourceProject, options?: PrepareOptions): Prepa
   const location = { file: rawEntry, line: 1, column: 1 };
   try {
     if (!project || typeof project !== 'object' || typeof project.entry !== 'string' || !project.entry || !Array.isArray(project.files)) {
-      failure('INVALID_PROJECT', 'Se requiere un proyecto virtual con entry y una lista de fuentes.', location);
+      failure('INVALID_PROJECT', 'A virtual project with entry and a list of sources is required.', location);
     }
     if (options !== undefined && (!options || typeof options !== 'object' || Array.isArray(options))) {
-      failure('INVALID_OPTIONS', 'Las opciones de preparación deben ser un objeto.', location);
+      failure('INVALID_OPTIONS', 'Preparation options must be an object.', location);
     }
     const limits = normalizedLimits(DEFAULT_PREPARE_LIMITS, options?.limits, location);
     const entry = normalizeVirtualPath(project.entry);
-    if (!entry) failure('INVALID_PROJECT', `La ruta de entrada «${project.entry}» no es válida.`, location);
+    if (!entry) failure('INVALID_PROJECT', `Input path «${project.entry}» is invalid.`, location);
 
     const files = new Map<string, string>();
     for (const file of project.files) {
       if (!file || typeof file.name !== 'string' || typeof file.source !== 'string') {
-        failure('INVALID_PROJECT', 'Cada archivo virtual debe tener name y source de tipo string.', location);
+        failure('INVALID_PROJECT', 'Each virtual file must have a string name and source.', location);
       }
       const name = normalizeVirtualPath(file.name);
-      if (!name) failure('INVALID_PROJECT', `La ruta virtual «${file.name}» no es válida.`, location);
-      if (files.has(name)) failure('INVALID_PROJECT', `La ruta virtual «${name}» está duplicada.`, { file: name, line: 1, column: 1 });
+      if (!name) failure('INVALID_PROJECT', `Virtual path «${file.name}» is invalid.`, location);
+      if (files.has(name)) failure('INVALID_PROJECT', `Virtual path «${name}» is duplicated.`, { file: name, line: 1, column: 1 });
       files.set(name, file.source);
     }
-    if (!files.has(entry)) failure('INVALID_PROJECT', `El archivo de entrada «${entry}» no existe en el proyecto virtual.`, { file: entry, line: 1, column: 1 });
+    if (!files.has(entry)) failure('INVALID_PROJECT', `Entry file «${entry}» does not exist in the virtual project.`, { file: entry, line: 1, column: 1 });
 
     const requestedUnits = project.translationUnits ?? [entry];
     if (!Array.isArray(requestedUnits) || requestedUnits.length === 0) {
-      failure('INVALID_PROJECT', 'translationUnits debe ser una lista no vacía de rutas virtuales.', { file: entry, line: 1, column: 1 });
+      failure('INVALID_PROJECT', 'translationUnits must be a nonempty list of virtual paths.', { file: entry, line: 1, column: 1 });
     }
     const translationUnits: string[] = [];
     const seenUnits = new Set<string>();
     for (const candidate of requestedUnits) {
-      if (typeof candidate !== 'string' || !candidate) failure('INVALID_PROJECT', 'Cada unidad de traducción debe ser una ruta virtual.', { file: entry, line: 1, column: 1 });
+      if (typeof candidate !== 'string' || !candidate) failure('INVALID_PROJECT', 'Each translation unit must be a virtual path.', { file: entry, line: 1, column: 1 });
       const name = normalizeVirtualPath(candidate);
-      if (!name) failure('INVALID_PROJECT', `La unidad de traducción «${candidate}» no tiene una ruta válida.`, { file: entry, line: 1, column: 1 });
-      if (seenUnits.has(name)) failure('INVALID_PROJECT', `La unidad de traducción «${name}» está repetida.`, { file: name, line: 1, column: 1 });
-      if (!files.has(name)) failure('INVALID_PROJECT', `La unidad de traducción «${name}» no existe en el proyecto virtual.`, { file: name, line: 1, column: 1 });
+      if (!name) failure('INVALID_PROJECT', `Translation unit «${candidate}» has an invalid path.`, { file: entry, line: 1, column: 1 });
+      if (seenUnits.has(name)) failure('INVALID_PROJECT', `Translation unit «${name}» is duplicated.`, { file: name, line: 1, column: 1 });
+      if (!files.has(name)) failure('INVALID_PROJECT', `Translation unit «${name}» does not exist in the virtual project.`, { file: name, line: 1, column: 1 });
       seenUnits.add(name);
       translationUnits.push(name);
     }
-    if (!seenUnits.has(entry)) failure('INVALID_PROJECT', 'La unidad de entrada debe aparecer en translationUnits.', { file: entry, line: 1, column: 1 });
+    if (!seenUnits.has(entry)) failure('INVALID_PROJECT', 'The entry unit must appear in translationUnits.', { file: entry, line: 1, column: 1 });
 
     const normalizedProject: SourceProject = {
       entry,
@@ -104,6 +104,6 @@ export function prepare(project: SourceProject, options?: PrepareOptions): Prepa
       }
       return { kind: 'prepare-error', diagnostics: [error.diagnostic], metrics };
     }
-    return { kind: 'prepare-error', diagnostics: [{ code: 'ENGINE_INTERNAL_ERROR', message: 'La preparación encontró un error interno del motor.', ...location }], metrics };
+    return { kind: 'prepare-error', diagnostics: [{ code: 'ENGINE_INTERNAL_ERROR', message: 'Preparation encountered an internal engine error.', ...location }], metrics };
   } finally { metrics.prepareMs = now() - started; }
 }

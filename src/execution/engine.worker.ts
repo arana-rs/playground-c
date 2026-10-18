@@ -105,7 +105,7 @@ function fail(run: WorkerRun, phase: 'startup' | 'run', message: string) {
 }
 
 function reportStartupFailure(jobId: number, error: unknown) {
-  const message = error instanceof Error ? error.message : 'No se pudo preparar ni iniciar el motor de ejecución.';
+  const message = error instanceof Error ? error.message : 'Could not prepare or start the execution engine.';
   const run = activeRun;
   if (run?.jobId === jobId) fail(run, 'startup', message);
   else post({ type: 'error', jobId, phase: 'startup', message });
@@ -149,7 +149,7 @@ function resume(run: WorkerRun) {
     activeRun = null;
     post({ type: 'result', jobId: run.jobId, result });
   } catch (error) {
-    fail(run, 'run', error instanceof Error ? error.message : 'No se pudo ejecutar el archivo.');
+    fail(run, 'run', error instanceof Error ? error.message : 'Could not run the file.');
   }
 }
 
@@ -191,7 +191,7 @@ async function start(request: RunRequest) {
       kind: 'read-error',
       diagnostics: [{
         code: 'READ_FAILED',
-        message: `No se pudo leer «${request.file.name}»: ${message}`,
+        message: `Could not read "${request.file.name}": ${message}`,
         file: request.file.name,
         line: 1,
         column: 1,
@@ -240,7 +240,7 @@ async function start(request: RunRequest) {
     fail(
       run,
       'startup',
-      error instanceof Error ? error.message : 'No se pudo preparar ni iniciar el motor de ejecución.',
+      error instanceof Error ? error.message : 'Could not prepare or start the execution engine.',
     );
   }
 }

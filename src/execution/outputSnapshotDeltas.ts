@@ -11,7 +11,7 @@ export class OutputSnapshotDeltas {
 
   fromSnapshot(stream: OutputSnapshotDelta['stream'], snapshot: Uint8Array): OutputSnapshotDelta | null {
     const offset = this.offsets[stream];
-    if (snapshot.length < offset) throw new Error(`El snapshot de ${stream} se redujo durante la ejecución.`);
+    if (snapshot.length < offset) throw new Error(`The ${stream} snapshot shrank during execution.`);
     if (snapshot.length === offset) return null;
 
     const chunk = snapshot.slice(offset);

@@ -178,7 +178,7 @@ class DebugEventCollector {
 
 class DebugEventLimit extends Error {
   constructor(readonly location: Location, readonly limit: number) {
-    super(`Se superó maxDebugEvents: límite ${limit}.`);
+    super(`maxDebugEvents limit exceeded: ${limit}.`);
   }
 }
 
@@ -251,7 +251,7 @@ export function execute(program: PreparedProgram, options?: ExecuteOptions, runt
   if (result.kind === 'input-needed') {
     return {
       kind: 'runtime-error',
-      diagnostics: [{ code: 'ENGINE_INTERNAL_ERROR', message: 'La ejecución por lotes solicitó entrada interactiva.', file: program.entry, line: 1, column: 1 }],
+      diagnostics: [{ code: 'ENGINE_INTERNAL_ERROR', message: 'Batch execution requested interactive input.', file: program.entry, line: 1, column: 1 }],
       metrics: result.metrics,
       stdout: result.stdout,
       stderr: result.stderr,
@@ -343,7 +343,7 @@ function createRuntimeSession(
     }
     return {
       kind: 'runtime-error',
-      diagnostics: [{ code: 'ENGINE_INTERNAL_ERROR', message: 'La ejecución encontró un error interno del motor.', ...runtimeLocation }],
+      diagnostics: [{ code: 'ENGINE_INTERNAL_ERROR', message: 'Execution encountered an internal engine error.', ...runtimeLocation }],
       metrics,
       ...output(),
     };
@@ -376,7 +376,7 @@ function createRuntimeSession(
           pendingInputError = undefined;
           terminalResult = resultForError(error);
         } else if (!runRuntime) {
-          terminalResult = resultForError(new Error('La sesión no se inicializó.'));
+          terminalResult = resultForError(new Error('The session was not initialized.'));
         } else {
           const progress = runRuntime();
           if (progress.kind === 'paused') {
@@ -416,10 +416,10 @@ function createRuntimeSession(
   };
   if (interactiveStdin) {
     session.appendStdin = (bytes: Uint8Array): void => {
-      if (!interactiveStdin) throw new TypeError('La sesión por lotes no acepta stdin interactivo.');
-      if (terminalResult || stdinEnded) throw new TypeError('No se puede añadir stdin después de EOF o del final de ejecución.');
-      if (!awaitingInput) throw new TypeError('Solo se puede añadir stdin después de que la sesión lo solicite.');
-      if (!(bytes instanceof Uint8Array)) throw new TypeError('stdin interactivo debe ser Uint8Array.');
+      if (!interactiveStdin) throw new TypeError('Batch sessions do not accept interactive stdin.');
+      if (terminalResult || stdinEnded) throw new TypeError('Cannot append stdin after EOF or execution has finished.');
+      if (!awaitingInput) throw new TypeError('stdin can only be appended after the session requests it.');
+      if (!(bytes instanceof Uint8Array)) throw new TypeError('Interactive stdin must be a Uint8Array.');
       try {
         io!.appendStdin(bytes, runtimeLocation);
         awaitingInput = false;
@@ -429,8 +429,8 @@ function createRuntimeSession(
       }
     };
     session.endStdin = (): void => {
-      if (!interactiveStdin) throw new TypeError('La sesión por lotes no acepta stdin interactivo.');
-      if (terminalResult) throw new TypeError('No se puede cerrar stdin después del final de ejecución.');
+      if (!interactiveStdin) throw new TypeError('Batch sessions do not accept interactive stdin.');
+      if (terminalResult) throw new TypeError('Cannot close stdin after execution has finished.');
       if (stdinEnded) return;
       stdinEnded = true;
       awaitingInput = false;
@@ -449,30 +449,30 @@ function createRuntimeSession(
   }
   try {
     const candidate = programs.get(program);
-    if (!candidate) failure('INVALID_PROGRAM', 'El programa debe proceder de prepare en esta misma instancia del motor; no admite copias ni programas externos.', location);
+    if (!candidate) failure('INVALID_PROGRAM', 'The program must come from prepare in this engine instance; copies and external programs are not accepted.', location);
     const ir = candidate;
     metrics.sourceChars = ir.sourceChars;
     metrics.tokenCount = ir.tokenCount;
     if (options !== undefined && (!options || typeof options !== 'object' || Array.isArray(options))) {
-      failure('INVALID_OPTIONS', 'Las opciones de ejecución deben ser un objeto.', location);
+      failure('INVALID_OPTIONS', 'Execution options must be an object.', location);
     }
     if (debugOptions !== undefined) {
       if (!debugOptions || typeof debugOptions !== 'object' || Array.isArray(debugOptions)) {
-        failure('INVALID_OPTIONS', 'Las opciones de depuración deben ser un objeto.', location);
+        failure('INVALID_OPTIONS', 'Debug options must be an object.', location);
       }
       for (const key of Object.keys(debugOptions)) {
         if (key !== 'maxEvents' && key !== 'heapAddressSeed' && key !== 'maxObjects' &&
             key !== 'maxElementsPerArray' && key !== 'maxValueChars') {
-          failure('INVALID_OPTIONS', `Opción de depuración desconocida: ${key}.`, location);
+          failure('INVALID_OPTIONS', `Unknown debug option: ${key}.`, location);
         }
       }
       const maxEvents = debugOptions.maxEvents === undefined ? DEFAULT_DEBUG_EVENT_BUDGET : debugOptions.maxEvents;
       if (!Number.isSafeInteger(maxEvents) || maxEvents < 0) {
-        failure('INVALID_OPTIONS', 'maxEvents debe ser un entero seguro no negativo.', location);
+        failure('INVALID_OPTIONS', 'maxEvents must be a nonnegative safe integer.', location);
       }
       if (debugOptions.heapAddressSeed !== undefined &&
           (!Number.isInteger(debugOptions.heapAddressSeed) || debugOptions.heapAddressSeed < 0 || debugOptions.heapAddressSeed > MAX_HEAP_ADDRESS_SEED)) {
-        failure('INVALID_OPTIONS', 'heapAddressSeed debe ser un entero entre 0 y 2^32-1.', location);
+        failure('INVALID_OPTIONS', 'heapAddressSeed must be an integer from 0 to 2^32-1.', location);
       }
       for (const [key, value] of [
         ['maxObjects', debugOptions.maxObjects],
@@ -480,7 +480,7 @@ function createRuntimeSession(
         ['maxValueChars', debugOptions.maxValueChars],
       ] as const) {
         if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
-          failure('INVALID_OPTIONS', `${key} debe ser un entero seguro no negativo.`, location);
+          failure('INVALID_OPTIONS', `${key} must be a nonnegative safe integer.`, location);
         }
       }
       debugEvents = new DebugEventCollector(maxEvents);
@@ -489,7 +489,7 @@ function createRuntimeSession(
     const suppliedIO = options?.io;
     if (debugOptions !== undefined && suppliedIO !== undefined &&
         (!suppliedIO || typeof suppliedIO !== 'object' || Array.isArray(suppliedIO))) {
-      failure('INVALID_OPTIONS', 'io debe ser un objeto.', location);
+      failure('INVALID_OPTIONS', 'io must be an object.', location);
     }
     const ioOptions = suppliedIO;
     io = new VirtualIO({
@@ -602,14 +602,14 @@ function createRuntimeSession(
       inspectDebugStaticObjects = (inspectionOptions): readonly DebugStaticObjectSnapshot[] => {
         if (inspectionOptions !== undefined &&
             (!inspectionOptions || typeof inspectionOptions !== 'object' || Array.isArray(inspectionOptions))) {
-          throw new TypeError('inspectStaticObjects requiere un objeto de opciones.');
+          throw new TypeError('inspectStaticObjects requires an options object.');
         }
         for (const key of Object.keys(inspectionOptions ?? {})) {
-          if (key !== 'includeStringLiterals') throw new TypeError(`Opción de inspectStaticObjects desconocida: ${key}.`);
+          if (key !== 'includeStringLiterals') throw new TypeError(`Unknown inspectStaticObjects option: ${key}.`);
         }
         if (inspectionOptions?.includeStringLiterals !== undefined &&
             typeof inspectionOptions.includeStringLiterals !== 'boolean') {
-          throw new TypeError('includeStringLiterals debe ser booleano.');
+          throw new TypeError('includeStringLiterals must be a boolean.');
         }
         const includeStringLiterals = inspectionOptions?.includeStringLiterals ?? true;
         return Object.freeze([...debugObjects.values()].flatMap<DebugStaticObjectSnapshot>((record) => {
@@ -667,7 +667,7 @@ function createRuntimeSession(
         const arrays = visible.map(({ record, reference }): DebugArraySnapshot => {
           const array = arrayType(reference.type);
           if (!array || array.length === null) {
-            failure('ENGINE_INTERNAL_ERROR', 'El descriptor de array perdió su tipo completo.', debugObjectLocations!.get(record.allocationId) ?? location);
+            failure('ENGINE_INTERNAL_ERROR', 'The array descriptor lost its complete type.', debugObjectLocations!.get(record.allocationId) ?? location);
           }
           const length = array.length;
           const elementType = array.element;
@@ -737,12 +737,12 @@ function createRuntimeSession(
         const visible = allCandidates.slice(0, maxArrayObjects);
         const aggregates = visible.map(({ record, reference }): DebugAggregateSnapshot => {
           if (!isAggregate(reference.type)) {
-            failure('ENGINE_INTERNAL_ERROR', 'El descriptor de agregado perdió su tipo.', debugObjectLocations!.get(record.allocationId) ?? location);
+            failure('ENGINE_INTERNAL_ERROR', 'The aggregate descriptor lost its type.', debugObjectLocations!.get(record.allocationId) ?? location);
           }
           const aggregateDescriptor = aggregateType(reference.type);
           const definition = aggregateDescriptor && ir.aggregates.find((candidate) => candidate.id === aggregateDescriptor.id);
           if (!definition?.complete || definition.size === undefined) {
-            failure('ENGINE_INTERNAL_ERROR', 'El descriptor de agregado no tiene layout completo.', debugObjectLocations!.get(record.allocationId) ?? location);
+            failure('ENGINE_INTERNAL_ERROR', 'The aggregate descriptor has no complete layout.', debugObjectLocations!.get(record.allocationId) ?? location);
           }
           const at = debugObjectLocations!.get(record.allocationId) ?? location;
           const view = memory.describeObjectView(reference, at);
@@ -1011,7 +1011,7 @@ function createRuntimeSession(
           return null;
         }
         const reference = memory.rootReference(pointer.allocationId);
-        if (!reference) failure('ENGINE_INTERNAL_ERROR', 'Falta la raíz de una asignación heap recién creada.', at);
+        if (!reference) failure('ENGINE_INTERNAL_ERROR', 'Missing root for a newly created heap allocation.', at);
         createDebugObjectRecord(reference, {
           duration: 'heap', origin: 'heap', typeSummary: 'untyped heap block', location: at,
           frameId: null, scopeId: null,
@@ -1057,7 +1057,7 @@ function createRuntimeSession(
       const newReference = memory.rootReference(resized.allocationId);
       if (!newReference) {
         debugEvents.cancelMany(reservedEvents);
-        failure('ENGINE_INTERNAL_ERROR', 'Falta la raíz de una reasignación heap recién creada.', at);
+        failure('ENGINE_INTERNAL_ERROR', 'Missing root for a newly reallocated heap object.', at);
       }
       if (hasOldRecord && oldReference) commitDebugObjectDelete(oldReference, at, null, null);
       createDebugObjectRecord(newReference, {
@@ -1130,32 +1130,32 @@ function createRuntimeSession(
     };
     const asBytePointer = (pointer: CValue, at: Location): CValue => {
       if (!isPointer(pointer.type) || pointer.value === null || typeof pointer.value !== 'object' || pointer.value.kind !== 'object-pointer') {
-        failure('INVALID_POINTER_ACCESS', 'La operación de memoria requiere un puntero a objeto no nulo.', at);
+        failure('INVALID_POINTER_ACCESS', 'The memory operation requires a non-null object pointer.', at);
       }
       return { type: pointerTo('unsigned char'), value: pointer.value };
     };
     const readBytes = (pointer: CValue, count: number, at: Location): Uint8Array => {
-      if (!Number.isSafeInteger(count) || count < 0) failure('INVALID_MEMORY_SIZE', 'La lectura solicita una cantidad de bytes no representable.', at);
+      if (!Number.isSafeInteger(count) || count < 0) failure('INVALID_MEMORY_SIZE', 'The read requests an unrepresentable number of bytes.', at);
       if (count === 0) return new Uint8Array();
       const bytePointer = asBytePointer(pointer, at);
       const address = bytePointer.value as ObjectPointerValue;
-      if (count > address.boundsEnd - address.byteOffset) failure('POINTER_BOUNDS', 'La lectura excede el objeto apuntado.', at);
+      if (count > address.boundsEnd - address.byteOffset) failure('POINTER_BOUNDS', 'Read exceeds the pointed-to object.', at);
       const bytes = new Uint8Array(count);
       for (let index = 0; index < count; index++) {
         const current = { ...address, byteOffset: address.byteOffset + index };
         const ref = memory.dereference({ type: bytePointer.type, value: current }, at);
         const value = memory.read(ref, at).value;
-        if (typeof value !== 'bigint') failure('INVALID_OBJECT_REPRESENTATION', 'El byte leído no tiene una representación entera.', at);
+        if (typeof value !== 'bigint') failure('INVALID_OBJECT_REPRESENTATION', 'The read byte has no integer representation.', at);
         bytes[index] = Number(BigInt.asUintN(8, value));
       }
       return bytes;
     };
     const preflightMemoryWrite = (pointer: CValue, count: number, at: Location): void => {
-      if (!Number.isSafeInteger(count) || count < 0) failure('INVALID_MEMORY_SIZE', 'La escritura solicita una cantidad de bytes no representable.', at);
+      if (!Number.isSafeInteger(count) || count < 0) failure('INVALID_MEMORY_SIZE', 'The write requests an unrepresentable number of bytes.', at);
       if (count === 0) return;
       const bytePointer = asBytePointer(pointer, at);
       const address = bytePointer.value as ObjectPointerValue;
-      if (count > address.boundsEnd - address.byteOffset) failure('POINTER_BOUNDS', 'La escritura excede el objeto apuntado.', at);
+      if (count > address.boundsEnd - address.byteOffset) failure('POINTER_BOUNDS', 'Write exceeds the pointed-to object.', at);
       for (let index = 0; index < count; index++) {
         const current = { ...address, byteOffset: address.byteOffset + index };
         memory.dereference({ type: bytePointer.type, value: current }, at);
@@ -1176,19 +1176,19 @@ function createRuntimeSession(
       const bytePointer = asBytePointer(pointer, at);
       const address = bytePointer.value as ObjectPointerValue;
       if (address.byteOffset < address.boundsStart || address.byteOffset >= address.boundsEnd) {
-        failure('POINTER_BOUNDS', 'La cadena empieza fuera del objeto apuntado.', at);
+        failure('POINTER_BOUNDS', 'The string starts outside the pointed-to object.', at);
       }
       const bytes: number[] = [];
       for (let offset = address.byteOffset; offset < address.boundsEnd; offset++) {
         const current = { ...address, byteOffset: offset };
         const ref = memory.dereference({ type: bytePointer.type, value: current }, at);
         const value = memory.read(ref, at).value;
-        if (typeof value !== 'bigint') failure('INVALID_OBJECT_REPRESENTATION', 'El byte de una cadena no es entero.', at);
+        if (typeof value !== 'bigint') failure('INVALID_OBJECT_REPRESENTATION', 'A string byte is not an integer.', at);
         const byte = Number(BigInt.asUintN(8, value));
         if (byte === 0) return Uint8Array.from(bytes);
         bytes.push(byte);
       }
-      failure('UNTERMINATED_STRING', 'La cadena no contiene un NUL dentro del objeto apuntado.', at);
+      failure('UNTERMINATED_STRING', 'The string contains no NUL within the pointed-to object.', at);
     };
     const copyBytes = (destination: CValue, source: CValue, count: number, at: Location): void => {
       if (count === 0) {
@@ -1209,7 +1209,7 @@ function createRuntimeSession(
       memory.write(reference, valueForType(value, reference.type, at), at);
     };
     const chargeWork = (count: number, at: Location): void => {
-      if (!Number.isSafeInteger(count) || count < 0) failure('INVALID_WORK_SIZE', 'El trabajo solicitado no es representable.', at);
+      if (!Number.isSafeInteger(count) || count < 0) failure('INVALID_WORK_SIZE', 'The requested work amount is not representable.', at);
       metrics.instructionCount += count;
       enforceLimit('maxInstructions', metrics.instructionCount, limits.maxInstructions, at);
     };
@@ -1264,12 +1264,12 @@ function createRuntimeSession(
       zeroHeap: (pointer, size, at) => {
         const reference = memory.rootReference(pointer.allocationId);
         if (!reference || memory.describeObjectView(reference, at).size !== size) {
-          failure('INVALID_MEMORY_SIZE', 'calloc debe inicializar el tamaño completo de su asignación.', at);
+          failure('INVALID_MEMORY_SIZE', 'calloc must initialize the full allocation size.', at);
         }
         memory.zeroInitialize(reference, at);
       },
       swapObjectBytes: (left, right, size, at) => {
-        if (!Number.isSafeInteger(size) || size < 0) failure('INVALID_MEMORY_SIZE', 'El intercambio solicita un tamaño no representable.', at);
+        if (!Number.isSafeInteger(size) || size < 0) failure('INVALID_MEMORY_SIZE', 'The swap requests an unrepresentable size.', at);
         if (size === 0 || left.allocationId === right.allocationId && left.byteOffset === right.byteOffset) return;
         const leftValue: CValue = { type: pointerTo('unsigned char'), value: left };
         const rightValue: CValue = { type: pointerTo('unsigned char'), value: right };
@@ -1318,7 +1318,7 @@ function createRuntimeSession(
       },
       consumeVaList: (list, at) => {
         const { cursor } = cursorFromHandle(list, at);
-        if (cursor.indeterminate) failure('INVALID_VA_LIST', 'La va_list quedó indeterminada después de una rutina v*.', at);
+        if (cursor.indeterminate) failure('INVALID_VA_LIST', 'The va_list became indeterminate after a v* function.', at);
         const remaining = cursor.args.slice(cursor.index);
         cursor.index = cursor.args.length;
         cursor.indeterminate = true;
@@ -1364,7 +1364,7 @@ function createRuntimeSession(
       preflightOutputBytes: (count, at) => io!.preflightBufferBytes(count, at),
       preflightMemoryWrite,
       offsetPointer: (pointer, byteOffset, at) => {
-        if (!Number.isSafeInteger(byteOffset)) failure('INVALID_POINTER_ARITHMETIC', 'El desplazamiento en bytes no es representable.', at);
+        if (!Number.isSafeInteger(byteOffset)) failure('INVALID_POINTER_ARITHMETIC', 'The byte offset is not representable.', at);
         const bytes = asBytePointer(pointer, at);
         const original = bytes.value as ObjectPointerValue;
         const result: CValue = {
@@ -1391,12 +1391,12 @@ function createRuntimeSession(
     };
     const localCell = (frame: Frame, binding: number, at: Location): Cell => {
       const result = frame.cells.get(binding);
-      if (!result) failure('INACTIVE_OBJECT', 'La variable no pertenece a un ámbito activo.', at);
+      if (!result) failure('INACTIVE_OBJECT', 'The variable does not belong to an active scope.', at);
       return result;
     };
     const globalReference = (binding: number, at: Location): ObjectReference => {
       const result = globalReferences.get(binding);
-      if (!result) failure('UNKNOWN_OBJECT', 'No existe el objeto global solicitado.', at);
+      if (!result) failure('UNKNOWN_OBJECT', 'Requested global object does not exist.', at);
       return result;
     };
     const valueForType = (value: CValue, type: CValue['type'], at: Location): CValue => {
@@ -1416,15 +1416,15 @@ function createRuntimeSession(
         if (typeof value.value === 'object' && value.value !== null) {
           const kind = (value.value as { kind?: string }).kind;
           if (kind === 'object-pointer') {
-            if (isFunction(pointedToType(targetType) ?? 'void')) failure('INVALID_POINTER_CONVERSION', 'Un puntero a objeto no se puede convertir a puntero a función.', at);
+            if (isFunction(pointedToType(targetType) ?? 'void')) failure('INVALID_POINTER_CONVERSION', 'An object pointer cannot be converted to a function pointer.', at);
             return { type: targetType, value: value.value as ObjectPointerValue };
           }
           if (kind === 'function-pointer') {
-            if (!isFunction(pointedToType(targetType) ?? 'void')) failure('INVALID_POINTER_CONVERSION', 'Un puntero a función no se puede convertir a puntero a objeto.', at);
+            if (!isFunction(pointedToType(targetType) ?? 'void')) failure('INVALID_POINTER_CONVERSION', 'A function pointer cannot be converted to an object pointer.', at);
             return { type: targetType, value: value.value };
           }
         }
-        failure('INVALID_POINTER_CONVERSION', 'La conversión a puntero requiere un puntero compatible o una constante nula.', at);
+        failure('INVALID_POINTER_CONVERSION', 'Pointer conversion requires a compatible pointer or a null pointer constant.', at);
       }
       const targetAggregate = aggregateType(targetType);
       const valueAggregate = aggregateType(value.type);
@@ -1434,7 +1434,7 @@ function createRuntimeSession(
             (value.value as { kind?: string }).kind === 'aggregate-value') {
           return { type: targetType, value: value.value };
         }
-        failure('INVALID_AGGREGATE_CONVERSION', 'La conversión por valor requiere el mismo tipo de struct o union.', at);
+        failure('INVALID_AGGREGATE_CONVERSION', 'By-value conversion requires the same struct or union type.', at);
       }
       return convert(value, targetType, at, ir.aggregates);
     };
@@ -1520,7 +1520,7 @@ function createRuntimeSession(
         else observation.independentAccess = true;
         if (write) observation.modified = true;
         if (observation.accessedViaBase && observation.independentAccess && observation.modified) {
-          failure('RESTRICT_ALIAS', `El objeto «${reference.objectId}» se accedió mediante punteros no basados en el mismo restrict y se modificó dentro de su ámbito.`, at);
+          failure('RESTRICT_ALIAS', `Object «${reference.objectId}» was accessed through pointers not based on the same restrict pointer and modified within its scope.`, at);
         }
       }
     };
@@ -1538,7 +1538,7 @@ function createRuntimeSession(
         const previous = accesses.get(objectId);
         if (!sequenced && previous && ((previous.write && (access.write || access.read)) ||
             (access.write && previous.read))) {
-          failure('UNSEQUENCED_ACCESS', 'Accesos no secuenciados a «' + (previous.name || access.name) + '»: comportamiento indefinido en C11.', at);
+          failure('UNSEQUENCED_ACCESS', 'Unsequenced accesses to «' + (previous.name || access.name) + '»: undefined behavior in C11.', at);
         }
         accesses.set(objectId, {
           read: access.read || !!previous?.read,
@@ -1575,15 +1575,15 @@ function createRuntimeSession(
         return evaluation.value;
       }
       const reference = evaluation.reference;
-      if (!reference) failure('INVALID_LVALUE', 'La expresión no designa un valor ni un objeto.', at);
+      if (!reference) failure('INVALID_LVALUE', 'The expression designates neither a value nor an object.', at);
       if (isArray(reference.type)) {
         evaluation.value = memory.decay(reference);
         evaluation.pointerBases = activePointerBases(evaluation.addressBases);
       } else if (isFunction(reference.type)) {
-        failure('INVALID_OBJECT', 'Una función no se puede leer como un objeto.', at);
+        failure('INVALID_OBJECT', 'A function cannot be read as an object.', at);
       } else {
         evaluation.value = memory.read(reference, at);
-        markRead(evaluation, reference, evaluation.label ?? 'objeto');
+        markRead(evaluation, reference, evaluation.label ?? 'object');
         if (isPointer(reference.type)) {
           evaluation.pointerBases = pointerBasesForObject(reference);
           rememberPointerBases(evaluation.value, evaluation.pointerBases);
@@ -1594,29 +1594,29 @@ function createRuntimeSession(
       return evaluation.value;
     };
     const aggregateDefinition = (type: CValue['type'], at: Location): AggregateDefinition => {
-      if (!isAggregate(type)) failure('INVALID_MEMBER', 'El acceso a miembros requiere un struct o union.', at);
+      if (!isAggregate(type)) failure('INVALID_MEMBER', 'Member access requires a struct or union.', at);
       const descriptor = aggregateType(type);
       const definition = descriptor && ir.aggregates.find((candidate) => candidate.id === descriptor.id);
-      if (!definition || !definition.complete) failure('INCOMPLETE_TYPE', 'El objeto agregado está incompleto.', at);
+      if (!definition || !definition.complete) failure('INCOMPLETE_TYPE', 'The aggregate object is incomplete.', at);
       return definition;
     };
     const positionalAggregateMembers = (type: CValue['type'], at: Location): AggregateDefinition['members'][number][] =>
       aggregateDefinition(type, at).members.filter((member) => !(member.bitField && !member.name));
     const immediateSubobject = (reference: ObjectReference, type: CValue['type'], index: number, at: Location): { reference: ObjectReference; type: CValue['type'] } => {
-      if (!Number.isSafeInteger(index) || index < 0) failure('INVALID_INITIALIZER', 'El inicializador selecciona un subobjeto no válido.', at);
+      if (!Number.isSafeInteger(index) || index < 0) failure('INVALID_INITIALIZER', 'The initializer selects an invalid subobject.', at);
       const array = arrayType(type);
       if (array) {
-        if (array.length === null || index >= array.length) failure('INITIALIZER_BOUNDS', 'El inicializador excede la longitud del array.', at);
+        if (array.length === null || index >= array.length) failure('INITIALIZER_BOUNDS', 'Initializer exceeds the array length.', at);
         const child = memory.element(reference, index, at);
         return { reference: child, type: array.element };
       }
       if (isAggregate(type)) {
         const definition = aggregateDefinition(type, at);
         const member = definition.members[index];
-        if (!member) failure('INITIALIZER_BOUNDS', 'El inicializador excede los miembros del agregado.', at);
+        if (!member) failure('INITIALIZER_BOUNDS', 'Initializer exceeds the aggregate members.', at);
         return { reference: memory.member(reference, index, at), type: member.type };
       }
-      if (index !== 0) failure('EXCESS_INITIALIZERS', 'Un objeto escalar sólo admite un inicializador.', at);
+      if (index !== 0) failure('EXCESS_INITIALIZERS', 'A scalar object can only have one initializer.', at);
       return { reference, type };
     };
     const designatedSubobject = (
@@ -1631,10 +1631,10 @@ function createRuntimeSession(
         if (designator.kind === 'member') {
           const definition = aggregateDefinition(type, designator.location);
           index = designator.memberIndex ?? definition.members.findIndex((member) => member.name === designator.name);
-          if (index < 0) failure('UNKNOWN_MEMBER', 'El agregado no tiene un miembro llamado «' + designator.name + '».', designator.location);
+          if (index < 0) failure('UNKNOWN_MEMBER', 'The aggregate has no member named «' + designator.name + '».', designator.location);
         } else {
-          if (!isArray(type)) failure('INVALID_DESIGNATOR', 'Un designador de índice requiere un array.', designator.location);
-          if (designator.index > BigInt(Number.MAX_SAFE_INTEGER)) failure('INITIALIZER_BOUNDS', 'El índice del inicializador excede el rango representable.', designator.location);
+          if (!isArray(type)) failure('INVALID_DESIGNATOR', 'An index designator requires an array.', designator.location);
+          if (designator.index > BigInt(Number.MAX_SAFE_INTEGER)) failure('INITIALIZER_BOUNDS', 'The initializer index exceeds the representable range.', designator.location);
           index = Number(designator.index);
         }
         if (position === 0) firstIndex = index;
@@ -1651,7 +1651,7 @@ function createRuntimeSession(
         const current = pending.at(-1)!;
         const array = arrayType(current.type);
         if (array) {
-          if (array.length === null) failure('INCOMPLETE_TYPE', 'El array del inicializador está incompleto.', at);
+          if (array.length === null) failure('INCOMPLETE_TYPE', 'The initializer array is incomplete.', at);
           if (current.next >= array.length) { pending.pop(); continue; }
           const index = current.next++;
           pending.push({ reference: memory.element(current.reference, index, at), type: array.element, next: 0 });
@@ -1675,8 +1675,8 @@ function createRuntimeSession(
         const expression = initializer.value;
         const array = arrayType(type);
         if (array && unqualifiedType(array.element) === 'char' && expression.kind === 'string') {
-          if (array.length === null) failure('INCOMPLETE_TYPE', 'El array de caracteres no tiene una longitud completa.', initializer.location);
-          if (expression.bytes.length > array.length + 1) failure('INITIALIZER_BOUNDS', 'El literal de cadena es más largo que el array de destino.', initializer.location);
+          if (array.length === null) failure('INCOMPLETE_TYPE', 'The character array does not have a complete length.', initializer.location);
+          if (expression.bytes.length > array.length + 1) failure('INITIALIZER_BOUNDS', 'The string literal is longer than the destination array.', initializer.location);
           memory.zeroInitialize(reference, initializer.location);
           const count = Math.min(array.length, expression.bytes.length);
           for (let index = 0; index < count; index++) {
@@ -1687,7 +1687,7 @@ function createRuntimeSession(
         }
         evaluateFullExpression(expression, frame, () => {
           const result = operands.pop();
-          if (!result) failure('ENGINE_STACK_ERROR', 'Falta el valor del inicializador.', initializer.location);
+          if (!result) failure('ENGINE_STACK_ERROR', 'Missing initializer value.', initializer.location);
           const value = materialize(result, initializer.location);
           memory.write(reference, valueForType(value, type, initializer.location), initializer.location, true);
           if (isPointer(type)) setPointerBasesForObject(reference, result.pointerBases);
@@ -1710,7 +1710,7 @@ function createRuntimeSession(
         const jobs: { reference: ObjectReference; type: CValue['type']; initializer: Initializer }[] = [];
         for (const item of initializer.items) {
           const slot = slots.next();
-          if (slot.done) failure('EXCESS_INITIALIZERS', 'El inicializador contiene más valores que subobjetos.', item.location);
+          if (slot.done) failure('EXCESS_INITIALIZERS', 'The initializer contains more values than subobjects.', item.location);
           jobs.push({ ...slot.value, initializer: item.initializer });
         }
         for (let index = jobs.length - 1; index >= 0; index--) {
@@ -1732,11 +1732,11 @@ function createRuntimeSession(
         } else if (isAggregate(type)) {
           const members = positionalAggregateMembers(type, item.location);
           const member = members.find((candidate) => candidate.index >= nextIndex);
-          if (!member) failure('EXCESS_INITIALIZERS', 'El inicializador contiene más valores que subobjetos.', item.location);
+          if (!member) failure('EXCESS_INITIALIZERS', 'The initializer contains more values than subobjects.', item.location);
           selected = immediateSubobject(reference, type, member.index, item.location);
           nextIndex = member.index + 1;
         } else {
-          if (nextIndex++) failure('EXCESS_INITIALIZERS', 'Un objeto escalar sólo admite un inicializador.', item.location);
+          if (nextIndex++) failure('EXCESS_INITIALIZERS', 'A scalar object can only have one initializer.', item.location);
           selected = { reference, type };
         }
         jobs.push({ ...selected, initializer: item.initializer });
@@ -1791,11 +1791,11 @@ function createRuntimeSession(
       const rightPointer = isPointer(right.type);
       if ((operator === '+' || operator === '-') && leftPointer && isInteger(right.type)) {
         const count = right.value;
-        if (typeof count !== 'bigint') failure('INVALID_OPERAND_TYPE', 'El desplazamiento de un puntero debe ser entero.', at);
+        if (typeof count !== 'bigint') failure('INVALID_OPERAND_TYPE', 'A pointer offset must be an integer.', at);
         return memory.pointerAdd(left, operator === '-' ? -count : count, at);
       }
       if (operator === '+' && rightPointer && isInteger(left.type)) {
-        if (typeof left.value !== 'bigint') failure('INVALID_OPERAND_TYPE', 'El desplazamiento de un puntero debe ser entero.', at);
+        if (typeof left.value !== 'bigint') failure('INVALID_OPERAND_TYPE', 'A pointer offset must be an integer.', at);
         return memory.pointerAdd(right, left.value, at);
       }
       if (operator === '-' && leftPointer && rightPointer) return memory.pointerDifference(left, right, at);
@@ -1810,7 +1810,7 @@ function createRuntimeSession(
         let equal: boolean;
         if (convertedLeft.value === null || convertedRight.value === null) equal = convertedLeft.value === convertedRight.value;
         else if (leftFunction || rightFunction) {
-          if (!leftFunction || !rightFunction) failure('INVALID_POINTER_COMPARISON', 'No se pueden comparar punteros a objetos y funciones.', at);
+          if (!leftFunction || !rightFunction) failure('INVALID_POINTER_COMPARISON', 'Pointers to objects and functions cannot be compared.', at);
           equal = (convertedLeft.value as { functionIndex: number }).functionIndex === (convertedRight.value as { functionIndex: number }).functionIndex;
         } else equal = memory.pointerEqual(convertedLeft, convertedRight, at);
         return integer(operator === '==' ? equal : !equal);
@@ -1828,17 +1828,17 @@ function createRuntimeSession(
         instruction(at);
         enforceLimit('maxDepth', scopeDepth + depth, limits.maxDepth, at);
         if (node.kind === 'literal') operands.push(plain(node.value));
-        else if (node.kind === 'string') operands.push(referenceEvaluation(stringReference(node), 'cadena'));
+        else if (node.kind === 'string') operands.push(referenceEvaluation(stringReference(node), 'string'));
         else if (node.kind === 'variable') {
           const target = node.binding !== undefined
             ? localCell(frame, node.binding, at)
             : node.globalBinding !== undefined ? { binding: { id: node.globalBinding, name: node.name, type: node.type ?? 'int', location: at }, reference: globalReference(node.globalBinding, at) }
               : undefined;
-          if (!target) failure('UNKNOWN_OBJECT', 'No se encontró la variable «' + node.name + '».', at);
+          if (!target) failure('UNKNOWN_OBJECT', 'Unknown variable «' + node.name + '».', at);
           operands.push(referenceEvaluation(target.reference, node.name));
         } else if (node.kind === 'function') {
           const index = node.functionIndex ?? (node.symbolKey ? functionSymbolIndices.get(node.symbolKey) : undefined) ?? functionIndices.get(node.name);
-          if (index === undefined || !functions[index]) failure('UNKNOWN_FUNCTION', 'No existe la función «' + node.name + '».', at);
+          if (index === undefined || !functions[index]) failure('UNKNOWN_FUNCTION', 'Function «' + node.name + '».', at);
           const functionTypeValue = (node.type ? functionType(node.type) : undefined) ?? {
             kind: 'function' as const,
             returnType: functions[index].fn.returnType,
@@ -1847,7 +1847,7 @@ function createRuntimeSession(
           operands.push(plain({ type: node.type && isPointer(node.type) ? node.type : pointerTo(functionTypeValue), value: { kind: 'function-pointer', functionIndex: index } }));
         } else if (node.kind === 'sizeof') {
           const type = node.valueType ?? node.operand?.type;
-          if (!type) failure('INVALID_SIZEOF', 'No se pudo determinar el tipo del operando de sizeof.', at);
+          if (!type) failure('INVALID_SIZEOF', 'Could not determine the type of the sizeof operand.', at);
           operands.push(plain({ type: 'unsigned long', value: BigInt(sizeOfType(type, ir.aggregates, at)) }));
         } else if (node.kind === 'generic') {
           evaluate(node.selected, frame, depth + 1, used);
@@ -1857,11 +1857,11 @@ function createRuntimeSession(
             work.push(() => {
               const indexResult = operands.pop();
               const baseResult = operands.pop();
-              if (!indexResult || !baseResult) failure('ENGINE_STACK_ERROR', 'Falta un operando de &(array[index]).', at);
+              if (!indexResult || !baseResult) failure('ENGINE_STACK_ERROR', 'Missing operand for &(array[index]).', at);
               const indexValue = materialize(indexResult, at);
-              if (!isInteger(indexValue.type) || typeof indexValue.value !== 'bigint') failure('INVALID_INDEX', 'El índice de array debe ser entero.', at);
+              if (!isInteger(indexValue.type) || typeof indexValue.value !== 'bigint') failure('INVALID_INDEX', 'The array index must be an integer.', at);
               const baseValue = materialize(baseResult, at);
-              if (!isPointer(baseValue.type)) failure('INVALID_INDEX', 'La dirección del subíndice requiere un puntero.', at);
+              if (!isPointer(baseValue.type)) failure('INVALID_INDEX', 'The subscript address requires a pointer.', at);
               const result = memory.pointerAdd(baseValue, indexValue.value, at);
               const effects = mergeEffects(baseResult, indexResult, at);
               result.type = node.type && isPointer(node.type) ? node.type : result.type;
@@ -1877,9 +1877,9 @@ function createRuntimeSession(
             const dereference = node.operand;
             work.push(() => {
               const operand = operands.pop();
-              if (!operand) failure('ENGINE_STACK_ERROR', 'Falta el operando de &*.', at);
+              if (!operand) failure('ENGINE_STACK_ERROR', 'Missing operand for &*.', at);
               const pointer = materialize(operand, at);
-              if (!isPointer(pointer.type)) failure('INVALID_OPERAND_TYPE', 'El operador * requiere un puntero.', at);
+              if (!isPointer(pointer.type)) failure('INVALID_OPERAND_TYPE', 'The * operator requires a pointer.', at);
               if (node.type && isPointer(node.type)) pointer.type = node.type;
               const result = plain(pointer);
               result.pointerBases = activePointerBases(operand.pointerBases);
@@ -1890,7 +1890,7 @@ function createRuntimeSession(
           }
           work.push(() => {
             const operand = operands.pop();
-            if (!operand) failure('ENGINE_STACK_ERROR', 'Falta el operando de &.', at);
+            if (!operand) failure('ENGINE_STACK_ERROR', 'Missing operand for &.', at);
             if (operand.reference) {
               const requestedPointer = node.type ? pointerType(node.type) : undefined;
               const result = plain(memory.addressOf(operand.reference, requestedPointer ?? pointerTo(operand.reference.type)));
@@ -1904,24 +1904,24 @@ function createRuntimeSession(
                 result.pointerBases = activePointerBases(operand.pointerBases);
                 operands.push(result);
               }
-              else failure('INVALID_LVALUE', 'El operador & requiere un objeto o función.', at);
+              else failure('INVALID_LVALUE', 'The & operator requires an object or function.', at);
             }
           });
           evaluate(node.operand, frame, depth + 1, true, true);
         } else if (node.kind === 'unary' && node.operator === '*') {
           work.push(() => {
             const operand = operands.pop();
-            if (!operand) failure('ENGINE_STACK_ERROR', 'Falta el operando de *.', at);
+            if (!operand) failure('ENGINE_STACK_ERROR', 'Missing operand for *.', at);
             const pointer = materialize(operand, at);
-            if (!isPointer(pointer.type)) failure('INVALID_OPERAND_TYPE', 'El operador * requiere un puntero.', at);
+            if (!isPointer(pointer.type)) failure('INVALID_OPERAND_TYPE', 'The * operator requires a pointer.', at);
             if (isFunction(pointedToType(pointer.type) ?? 'void')) operands.push(plain(pointer));
-            else operands.push(referenceEvaluation(memory.dereference(pointer, at), 'objeto apuntado', operand, operand.pointerBases));
+            else operands.push(referenceEvaluation(memory.dereference(pointer, at), 'pointed object', operand, operand.pointerBases));
           });
           evaluate(node.operand, frame, depth + 1);
         } else if (node.kind === 'unary') {
           work.push(() => {
             const result = operands.pop();
-            if (!result) failure('ENGINE_STACK_ERROR', 'Falta el operando unario.', at);
+            if (!result) failure('ENGINE_STACK_ERROR', 'Missing unary operand.', at);
             const value = materialize(result, at);
             result.value = node.operator === '!' ? integer(!truthValue(value)) : unary(node.operator, value, at);
             operands.push(result);
@@ -1930,7 +1930,7 @@ function createRuntimeSession(
         } else if (node.kind === 'cast') {
           work.push(() => {
             const result = operands.pop();
-            if (!result) failure('ENGINE_STACK_ERROR', 'Falta el operando del cast.', at);
+            if (!result) failure('ENGINE_STACK_ERROR', 'Missing cast operand.', at);
             const sourceValue = materialize(result, at);
             result.value = valueForType(sourceValue, node.targetType, at);
             if (isPointer(node.targetType) && isPointer(sourceValue.type)) result.pointerBases = activePointerBases(result.pointerBases);
@@ -1944,7 +1944,7 @@ function createRuntimeSession(
         } else if (node.kind === 'decay') {
           work.push(() => {
             const result = operands.pop();
-            if (!result) failure('ENGINE_STACK_ERROR', 'Falta el operando de la conversión de array.', at);
+            if (!result) failure('ENGINE_STACK_ERROR', 'Missing operand for array conversion.', at);
             if (result.reference && isArray(result.reference.type)) {
               result.value = memory.decay(result.reference);
               result.pointerBases = activePointerBases(result.addressBases);
@@ -1956,15 +1956,15 @@ function createRuntimeSession(
         } else if (node.kind === 'update') {
           work.push(() => {
             const target = operands.pop();
-            if (!target?.reference) failure('INVALID_LVALUE', 'El incremento requiere un objeto modificable.', at);
+            if (!target?.reference) failure('INVALID_LVALUE', 'Increment requires a modifiable object.', at);
             const reference = target.reference;
             if (isArray(reference.type) || isAggregate(reference.type) || isFunction(reference.type)) {
-              failure('INVALID_LVALUE', 'El incremento requiere un escalar modificable.', at);
+              failure('INVALID_LVALUE', 'Increment requires a modifiable scalar.', at);
             }
             const old = memory.read(reference, at);
             const readEvaluation = plain(old);
             readEvaluation.addressBases = activePointerBases(target.addressBases);
-            markRead(readEvaluation, reference, target.label ?? 'objeto');
+            markRead(readEvaluation, reference, target.label ?? 'object');
             const combined = mergeEffects(target, readEvaluation, at);
             combined.addressBases = activePointerBases(target.addressBases);
             const oldPointerBases = isPointer(old.type) ? pointerBasesForObject(reference) : undefined;
@@ -1974,7 +1974,7 @@ function createRuntimeSession(
             next = valueForType(next, reference.type, at);
             next = memory.write(reference, next, at);
             if (isPointer(reference.type)) setPointerBasesForObject(reference, oldPointerBases);
-            markWrite(combined, reference, target.label ?? 'objeto');
+            markWrite(combined, reference, target.label ?? 'object');
             combined.value = node.prefix ? next : old;
             if (isPointer(next.type)) combined.pointerBases = oldPointerBases;
             operands.push(combined);
@@ -1983,12 +1983,12 @@ function createRuntimeSession(
         } else if (node.kind === 'assignment') {
           work.push(() => {
             const target = operands.pop();
-            if (!target?.reference) failure('INVALID_LVALUE', 'La asignación requiere un objeto modificable.', at);
+            if (!target?.reference) failure('INVALID_LVALUE', 'Assignment requires a modifiable object.', at);
             const reference = target.reference;
             if (isArray(reference.type) || isAggregate(reference.type) && node.operator !== '=' || isFunction(reference.type)) {
-              failure('INVALID_LVALUE', 'El destino de asignación no es un escalar modificable.', at);
+              failure('INVALID_LVALUE', 'The assignment target is not a modifiable scalar.', at);
             }
-            const name = target.label ?? 'objeto';
+            const name = target.label ?? 'object';
             let old: CValue | undefined;
             let oldPointerBases: Set<number> | undefined;
             if (node.operator !== '=') {
@@ -2000,7 +2000,7 @@ function createRuntimeSession(
             }
             work.push(() => {
               const right = operands.pop();
-              if (!right) failure('ENGINE_STACK_ERROR', 'Falta el valor derecho de la asignación.', at);
+              if (!right) failure('ENGINE_STACK_ERROR', 'Missing right-hand assignment value.', at);
               let effects = mergeEffects(target, right, at);
               // The write belongs to the lvalue's storage path. mergeEffects
               // deliberately does not merge address provenance from unrelated
@@ -2009,7 +2009,7 @@ function createRuntimeSession(
               let value = materialize(right, at);
               if (old) value = operateBinary(node.operator.slice(0, -1), old, value, at);
               if (right.pendingWrites.has(reference.objectId)) {
-                failure('UNSEQUENCED_ACCESS', 'Escrituras no secuenciadas a «' + name + '».', at);
+                failure('UNSEQUENCED_ACCESS', 'Unsequenced writes to «' + name + '».', at);
               }
               value = valueForType(value, reference.type, at);
               value = memory.write(reference, value, at);
@@ -2029,30 +2029,30 @@ function createRuntimeSession(
           work.push(() => {
             const indexResult = operands.pop();
             const baseResult = operands.pop();
-            if (!indexResult || !baseResult) failure('ENGINE_STACK_ERROR', 'Falta un operando de indexación.', at);
+            if (!indexResult || !baseResult) failure('ENGINE_STACK_ERROR', 'Missing indexing operand.', at);
             const indexValue = materialize(indexResult, at);
             if (!isInteger(indexValue.type) || typeof indexValue.value !== 'bigint') {
-              failure('INVALID_INDEX', 'El índice de array debe ser entero.', at);
+              failure('INVALID_INDEX', 'The array index must be an integer.', at);
             }
             let reference: ObjectReference;
             if (baseResult.reference && isArray(baseResult.reference.type)) {
               reference = memory.element(baseResult.reference, indexValue.value, at);
             } else {
               const base = materialize(baseResult, at);
-              if (!isPointer(base.type)) failure('INVALID_INDEX', 'La indexación requiere un array o puntero.', at);
+              if (!isPointer(base.type)) failure('INVALID_INDEX', 'Indexing requires an array or pointer.', at);
               reference = memory.dereference(memory.pointerAdd(base, indexValue.value, at), at);
             }
             const effects = mergeEffects(baseResult, indexResult, at);
             const addressBases = baseResult.reference && isArray(baseResult.reference.type)
               ? baseResult.addressBases : baseResult.pointerBases;
-            operands.push(referenceEvaluation(reference, 'elemento', effects, addressBases));
+            operands.push(referenceEvaluation(reference, 'element', effects, addressBases));
           });
           evaluate(node.index, frame, depth + 1);
           evaluate(node.base, frame, depth + 1, true, true);
         } else if (node.kind === 'member') {
           work.push(() => {
             const baseResult = operands.pop();
-            if (!baseResult) failure('ENGINE_STACK_ERROR', 'Falta el objeto del miembro.', at);
+            if (!baseResult) failure('ENGINE_STACK_ERROR', 'Missing member object.', at);
             let baseReference: ObjectReference;
             let effects = baseResult;
             let addressBases: Iterable<number> | undefined;
@@ -2065,7 +2065,7 @@ function createRuntimeSession(
               addressBases = baseResult.addressBases;
             } else {
               const value = materialize(baseResult, at);
-              if (!isAggregate(value.type)) failure('INVALID_MEMBER', 'El operador . requiere un valor agregado.', at);
+              if (!isAggregate(value.type)) failure('INVALID_MEMBER', 'The . operator requires an aggregate value.', at);
               const temporary = memory.automaticObject(
                 node, value.type, frame.fullExpressionToken ?? frame.scopes.at(-1)?.token ?? frame, at,
                 { isConst: qualifiersOf(value.type).const },
@@ -2077,7 +2077,7 @@ function createRuntimeSession(
             }
             const definition = aggregateDefinition(baseReference.type, at);
             const memberIndex = node.memberIndex ?? definition.members.findIndex((member) => member.name === node.name);
-            if (memberIndex < 0 || !definition.members[memberIndex]) failure('UNKNOWN_MEMBER', 'El agregado no tiene un miembro llamado «' + node.name + '».', at);
+            if (memberIndex < 0 || !definition.members[memberIndex]) failure('UNKNOWN_MEMBER', 'The aggregate has no member named «' + node.name + '».', at);
             const memberReference = memory.member(baseReference, memberIndex, at);
             operands.push(referenceEvaluation(memberReference, node.name, effects, addressBases));
           });
@@ -2085,11 +2085,11 @@ function createRuntimeSession(
         } else if (node.kind === 'conditional') {
           work.push(() => {
             const condition = operands.pop();
-            if (!condition) failure('ENGINE_STACK_ERROR', 'Falta la condición de ?: .', at);
+            if (!condition) failure('ENGINE_STACK_ERROR', 'Missing condition in ?: expression.', at);
             const conditionValue = truthValue(materialize(condition, at));
             work.push(() => {
               const result = operands.pop();
-              if (!result) failure('ENGINE_STACK_ERROR', 'Falta el resultado de ?: .', at);
+              if (!result) failure('ENGINE_STACK_ERROR', 'Missing result for ?: expression.', at);
               const value = valueForType(materialize(result, at), node.type ?? result.value!.type, at);
               const combined = mergeEffects(condition, result, at, true);
               combined.value = value;
@@ -2102,7 +2102,7 @@ function createRuntimeSession(
         } else if (node.kind === 'binary') {
           work.push(() => {
             const left = operands.pop();
-            if (!left) failure('ENGINE_STACK_ERROR', 'Falta el operando izquierdo.', at);
+            if (!left) failure('ENGINE_STACK_ERROR', 'Missing left operand.', at);
             const leftValue = materialize(left, at);
             if ((node.operator === '&&' && !truthValue(leftValue)) || (node.operator === '||' && truthValue(leftValue))) {
               left.value = integer(node.operator === '||' ? 1 : 0);
@@ -2112,7 +2112,7 @@ function createRuntimeSession(
             }
             work.push(() => {
               const right = operands.pop();
-              if (!right) failure('ENGINE_STACK_ERROR', 'Falta el operando derecho.', at);
+              if (!right) failure('ENGINE_STACK_ERROR', 'Missing right operand.', at);
               const rightValue = materialize(right, at);
               const sequenced = [',', '&&', '||'].includes(node.operator);
               const result = node.operator === ','
@@ -2160,26 +2160,26 @@ function createRuntimeSession(
               })()
               : memory.automaticObject(node, node.objectType, activeScope?.token ?? frame, at, compoundOptions);
           if (node.duration === 'static' && initializedStaticExpressions.has(node)) {
-            operands.push(referenceEvaluation(objectReference, 'literal compuesto'));
+            operands.push(referenceEvaluation(objectReference, 'compound literal'));
           } else {
             if (node.duration === 'static') initializedStaticExpressions.add(node);
-            work.push(() => operands.push(referenceEvaluation(objectReference, 'literal compuesto')));
+            work.push(() => operands.push(referenceEvaluation(objectReference, 'compound literal')));
             initializeObject(objectReference, node.objectType, node.initializer, frame, depth + 1);
           }
         } else if (node.kind === 'vaArg') {
           work.push(() => {
             const handleResult = operands.pop();
-            if (!handleResult) failure('ENGINE_STACK_ERROR', 'Falta la lista de argumentos de va_arg.', at);
+            if (!handleResult) failure('ENGINE_STACK_ERROR', 'Missing va_arg argument list.', at);
             const handle = materialize(handleResult, at);
             const id = markerId(handle);
             const cursor = id === undefined ? undefined : vaCursors.get(id);
             if (!cursor?.active || cursor.indeterminate || cursor.frame.returned || !cursor.frame.vaCursorIds.has(id!)) {
-              failure('INVALID_VA_LIST', 'va_arg requiere una lista activa dentro de la vida de su llamada.', at);
+              failure('INVALID_VA_LIST', 'va_arg requires an active list within the lifetime of its call.', at);
             }
             const argument = cursor.args[cursor.index];
-            if (!argument) failure('VA_ARG_EXHAUSTED', 'va_arg solicitó un argumento después del final de la lista.', at);
+            if (!argument) failure('VA_ARG_EXHAUSTED', 'va_arg requested an argument past the end of the list.', at);
             if (!compatibleType(argument.type, node.valueType) && !sameType(argument.type, node.valueType)) {
-              failure('VA_ARG_TYPE_MISMATCH', `va_arg solicitó ${String(node.valueType)} pero el argumento promovido es ${String(argument.type)}.`, at);
+              failure('VA_ARG_TYPE_MISMATCH', `va_arg requested ${String(node.valueType)}, but the promoted argument is ${String(argument.type)}.`, at);
             }
             cursor.index++;
             operands.push(plain(valueForType(argument, node.valueType, at)));
@@ -2192,7 +2192,7 @@ function createRuntimeSession(
           work.push(() => {
             const evaluated = operands.splice(start);
             const callee = node.callee && !intrinsicBuiltin ? evaluated.shift() : undefined;
-            if (evaluated.length !== node.args.length) failure('ENGINE_STACK_ERROR', 'La cantidad de argumentos evaluados no coincide.', at);
+            if (evaluated.length !== node.args.length) failure('ENGINE_STACK_ERROR', 'The number of evaluated arguments does not match.', at);
             let effects = plain(integer(0));
             if (callee) {
               materialize(callee, at);
@@ -2214,7 +2214,7 @@ function createRuntimeSession(
               if (!isPointer(calleeValue.type) || !isFunction(pointedToType(calleeValue.type) ?? 'void') ||
                   typeof calleeValue.value !== 'object' || calleeValue.value === null ||
                   (calleeValue.value as { kind?: string }).kind !== 'function-pointer') {
-                failure('INVALID_CALL', 'La expresión llamada no es un puntero a función.', at);
+                failure('INVALID_CALL', 'The called expression is not a function pointer.', at);
               }
               functionIndex = (calleeValue.value as { functionIndex: number | null }).functionIndex ?? undefined;
             }
@@ -2251,10 +2251,10 @@ function createRuntimeSession(
               }
             } else {
               if (functionIndex === undefined && functionName) functionIndex = functionIndices.get(functionName);
-              if (functionIndex === undefined) failure('UNKNOWN_FUNCTION', 'No se pudo resolver la función llamada.', at);
+              if (functionIndex === undefined) failure('UNKNOWN_FUNCTION', 'Could not resolve the called function.', at);
               work.push(() => {
                 const result = operands.pop();
-                if (!result) failure('ENGINE_STACK_ERROR', 'La llamada no produjo un resultado.', at);
+                if (!result) failure('ENGINE_STACK_ERROR', 'The call did not produce a result.', at);
                 effects.value = result.value;
                 effects.pointerBases = activePointerBases(result.pointerBases);
                 operands.push(effects);
@@ -2272,18 +2272,18 @@ function createRuntimeSession(
       const id = markerId(handle);
       const cursor = id === undefined ? undefined : vaCursors.get(id);
       if (!cursor?.active || cursor.frame.returned || !cursor.frame.vaCursorIds.has(id!)) {
-        failure('INVALID_VA_LIST', 'La lista de argumentos no está activa o su función terminó.', at);
+        failure('INVALID_VA_LIST', 'The argument list is inactive or its function has returned.', at);
       }
       if (cursor.indeterminate && !allowIndeterminate) {
-        failure('INVALID_VA_LIST', 'La va_list quedó indeterminada después de una rutina v*.', at);
+        failure('INVALID_VA_LIST', 'The va_list became indeterminate after a v* function.', at);
       }
       memory.assertAlive(handle, at);
       return { id: id!, cursor };
     }
     function storeVaCursor(destination: CValue, owner: Frame, args: readonly CValue[], index: number, at: Location): void {
-      if (!isPointer(destination.type) || destination.value === null) failure('INVALID_VA_LIST', 'La operación va_list requiere la dirección de una lista.', at);
+      if (!isPointer(destination.type) || destination.value === null) failure('INVALID_VA_LIST', 'The va_list operation requires the address of a list.', at);
       const target = memory.dereference(destination, at);
-      if (!isPointer(target.type) || unqualifiedType(pointedToType(target.type) ?? 'void') !== 'void') failure('INVALID_VA_LIST', 'El destino no tiene tipo va_list.', at);
+      if (!isPointer(target.type) || unqualifiedType(pointedToType(target.type) ?? 'void') !== 'void') failure('INVALID_VA_LIST', 'The destination does not have va_list type.', at);
       const marker = memory.allocate('char', 'automatic', at);
       const value = memory.addressOf(marker, pointerTo('char'));
       const handle = valueForType(value, pointerTo('void'), at);
@@ -2308,25 +2308,25 @@ function createRuntimeSession(
       runtimeLocation = at;
       io!.setLocation(at);
       if (name === '__builtin_va_start') {
-        if (args.length !== 2) failure('ARGUMENT_COUNT', 'va_start requiere la dirección de la lista y el último parámetro nombrado.', at);
-        if (!frame.compiled.fn.variadic || !frame.compiled.fn.parameters.length) failure('INVALID_VA_START', 'va_start requiere una función variádica con al menos un parámetro nombrado.', at);
+        if (args.length !== 2) failure('ARGUMENT_COUNT', 'va_start requires the list address and the last named parameter.', at);
+        if (!frame.compiled.fn.variadic || !frame.compiled.fn.parameters.length) failure('INVALID_VA_START', 'va_start requires a variadic function with at least one named parameter.', at);
         const last = memory.dereference(args[1], at);
         const lastParameter = frame.compiled.fn.parameters.at(-1)!;
         const expected = frame.cells.get(lastParameter.binding!)?.reference;
-        if (!expected || expected.objectId !== last.objectId) failure('INVALID_VA_START', 'El segundo argumento de va_start debe designar el último parámetro nombrado.', at);
+        if (!expected || expected.objectId !== last.objectId) failure('INVALID_VA_START', 'The second argument to va_start must designate the last named parameter.', at);
         const target = memory.dereference(args[0], at);
-        if (!isPointer(target.type) || unqualifiedType(pointedToType(target.type) ?? 'void') !== 'void') failure('INVALID_VA_LIST', 'El primer argumento de va_start no es una va_list.', at);
+        if (!isPointer(target.type) || unqualifiedType(pointedToType(target.type) ?? 'void') !== 'void') failure('INVALID_VA_LIST', 'The first va_start argument is not a va_list.', at);
         storeVaCursor(args[0], frame, frame.variadicArgs, 0, at);
         return { type: 'void', value: 0n };
       }
       if (name === '__builtin_va_copy') {
-        if (args.length !== 2) failure('ARGUMENT_COUNT', 'va_copy requiere el destino y el origen.', at);
+        if (args.length !== 2) failure('ARGUMENT_COUNT', 'va_copy requires a destination and a source.', at);
         const source = cursorFromHandle(args[1], at).cursor;
         storeVaCursor(args[0], frame, source.args, source.index, at);
         return { type: 'void', value: 0n };
       }
       if (name === '__builtin_va_end') {
-        if (args.length !== 1) failure('ARGUMENT_COUNT', 'va_end requiere la dirección de la lista.', at);
+        if (args.length !== 1) failure('ARGUMENT_COUNT', 'va_end requires the address of the list.', at);
         const target = memory.dereference(args[0], at);
         const handle = memory.read(target, at);
         const { id, cursor } = cursorFromHandle(handle, at, true);
@@ -2337,24 +2337,24 @@ function createRuntimeSession(
       const library = dispatchLibraryBuiltin(name, args, resultType, libraryContext);
       if (library) return library;
       if (name === 'malloc') {
-        if (args.length !== 1) failure('ARGUMENT_COUNT', 'malloc requiere un argumento.', at);
+        if (args.length !== 1) failure('ARGUMENT_COUNT', 'malloc requires one argument.', at);
         const amount = args[0].value;
-        if (typeof amount !== 'bigint' || amount < 0n) failure('INVALID_ALLOCATION_SIZE', 'malloc requiere un tamaño entero no negativo.', at);
-        if (amount > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'El tamaño de malloc excede el rango representable.', at);
+        if (typeof amount !== 'bigint' || amount < 0n) failure('INVALID_ALLOCATION_SIZE', 'malloc requires a nonnegative integer size.', at);
+        if (amount > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'malloc size exceeds the representable range.', at);
         const pointer = allocateDebugHeap(Number(amount), at);
         return { type: resultType && isPointer(resultType) ? resultType : pointerTo('void'), value: pointer };
       }
       if (name === 'realloc') {
-        if (args.length !== 2) failure('ARGUMENT_COUNT', 'realloc requiere dos argumentos.', at);
+        if (args.length !== 2) failure('ARGUMENT_COUNT', 'realloc requires two arguments.', at);
         const source = valueForType(args[0], pointerTo('void'), at);
         const amount = args[1].value;
-        if (typeof amount !== 'bigint' || amount < 0n) failure('INVALID_ALLOCATION_SIZE', 'realloc requiere un tamaño entero no negativo.', at);
-        if (amount > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'El tamaño de realloc excede el rango representable.', at);
+        if (typeof amount !== 'bigint' || amount < 0n) failure('INVALID_ALLOCATION_SIZE', 'realloc requires a nonnegative integer size.', at);
+        if (amount > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'realloc size exceeds the representable range.', at);
         const pointer = reallocateDebugHeap(source.value as ObjectPointerValue | null, Number(amount), at);
         return { type: resultType && isPointer(resultType) ? resultType : pointerTo('void'), value: pointer };
       }
       if (name === 'free') {
-        if (args.length !== 1) failure('ARGUMENT_COUNT', 'free requiere un argumento.', at);
+        if (args.length !== 1) failure('ARGUMENT_COUNT', 'free requires one argument.', at);
         const pointer = valueForType(args[0], pointerTo('void'), at);
         const objectPointer = pointer.value as ObjectPointerValue | null;
         const shouldTraceDelete = !!debugEvents && !!debugObjects && memory.canFree(objectPointer) &&
@@ -2430,7 +2430,7 @@ function createRuntimeSession(
         frame.compiled.fn.parameters.forEach((parameter, index) => {
           const target = localCell(frame, parameter.binding!, parameter.location);
           const argument = frame.args[index];
-          if (!argument) failure('ARGUMENT_COUNT', 'Falta un argumento de función para «' + parameter.name + '».', parameter.location);
+          if (!argument) failure('ARGUMENT_COUNT', 'Missing function argument for «' + parameter.name + '».', parameter.location);
           if (debugEvents) publishAutomaticBinding(frame, runtimeScope, target.binding, target.reference);
           memory.write(target.reference, valueForType(argument, parameter.type, parameter.location), parameter.location, true);
           if (isPointer(parameter.type)) setPointerBasesForObject(target.reference, frame.argumentPointerBases?.[index]);
@@ -2439,7 +2439,7 @@ function createRuntimeSession(
     }
     function leave(frame: Frame, eventLocation: Location = runtimeLocation): void {
       const scope = frame.scopes.at(-1);
-      if (!scope) failure('INVALID_SCOPE', 'No hay un ámbito activo para cerrar.', runtimeLocation);
+      if (!scope) failure('INVALID_SCOPE', 'There is no active scope to close.', runtimeLocation);
       for (const base of scope.restrictBases) {
         activeRestrictBases.delete(base);
         restrictObservations.delete(base);
@@ -2516,7 +2516,7 @@ function createRuntimeSession(
       const global = ir.globals[globalIndex];
       if (!global.declarationOnly && global.initializer) {
         const reference = globalReferences.get(global.id);
-        if (!reference) failure('UNKNOWN_OBJECT', 'No se encontró el objeto global durante su inicialización.', global.location);
+        if (!reference) failure('UNKNOWN_OBJECT', 'Global object was not found during initialization.', global.location);
         initializeObject(reference, global.type, global.initializer, frame);
       }
     }
@@ -2573,7 +2573,7 @@ function createRuntimeSession(
                 break;
               }
             }
-            if (!ownerScope) failure('INACTIVE_OBJECT', 'La declaración no pertenece a un ámbito activo.', node.location);
+            if (!ownerScope) failure('INACTIVE_OBJECT', 'The declaration does not belong to an active scope.', node.location);
             publishAutomaticBinding(frame, ownerScope, target.binding, target.reference);
           }
           if (node.initializer && (!hasPersistentDuration(target.binding) || !initializedStaticBindings.has(target.binding))) {
@@ -2607,7 +2607,7 @@ function createRuntimeSession(
         } else if (node.op === 'switch') {
           evaluateFullExpression(node.value, frame, () => {
             const result = operands.pop();
-            if (!result) failure('ENGINE_STACK_ERROR', 'Falta el valor del switch.', node.location);
+            if (!result) failure('ENGINE_STACK_ERROR', 'Missing switch value.', node.location);
             const value = valueForType(materialize(result, node.location), promote(node.value.type!), node.location);
             const match = node.cases.find((item) => valueForType(item.value, value.type, node.location).value === value.value);
             jump(frame, match?.target ?? node.target);
@@ -2622,10 +2622,10 @@ function createRuntimeSession(
       used = true,
       argumentPointerBases?: readonly ReadonlySet<number>[],
     ): void {
-      if (!compiled?.fn.body) failure('UNDEFINED_FUNCTION', 'La función llamada no tiene definición en este archivo.', at);
+      if (!compiled?.fn.body) failure('UNDEFINED_FUNCTION', 'The called function has no definition in this file.', at);
       const parameterCount = compiled.fn.parameters.length;
       if (args.length < parameterCount || !compiled.fn.variadic && args.length !== parameterCount) {
-        failure('ARGUMENT_COUNT', 'La función «' + compiled.fn.name + '» requiere ' + compiled.fn.parameters.length + ' argumentos.', at);
+        failure('ARGUMENT_COUNT', 'Function «' + compiled.fn.name + '» requires ' + compiled.fn.parameters.length + ' arguments.', at);
       }
       enforceLimit('maxDepth', callDepth + 1, limits.maxDepth, at);
       const frameId = debugEvents ? nextDebugFrameId++ : null;
@@ -2670,13 +2670,13 @@ function createRuntimeSession(
           if (reservedFrameExit) debugEvents!.cancel();
           throw error;
         }
-        if (compiled.fn.noreturn) failure('NORETURN_RETURN', `La función «${compiled.fn.name}» fue declarada _Noreturn pero regresó.`, compiled.fn.location);
+        if (compiled.fn.noreturn) failure('NORETURN_RETURN', `Function «${compiled.fn.name}» was declared _Noreturn but returned.`, compiled.fn.location);
         let value = frame.result;
         if (!value) {
           if (compiled.fn.name === 'main') value = integer(0);
           else if (unqualifiedType(compiled.fn.returnType) === 'void') value = { type: 'void', value: 0n };
           else if (!used) value = defaultReturn(compiled.fn.returnType, at);
-          else failure('MISSING_RETURN', 'La función «' + compiled.fn.name + '» termina sin devolver un valor.', compiled.fn.location);
+          else failure('MISSING_RETURN', 'Function «' + compiled.fn.name + '» ends without returning a value.', compiled.fn.location);
         }
         const result = plain(value);
         if (isPointer(value.type)) result.pointerBases = activePointerBases(frame.resultPointerBases);
@@ -2688,10 +2688,10 @@ function createRuntimeSession(
       if (!isPointer(callee.type) || !isFunction(pointedToType(callee.type) ?? 'void') ||
           typeof callee.value !== 'object' || callee.value === null || callee.value.kind !== 'function-pointer' ||
           callee.value.functionIndex === null) {
-        failure('INVALID_LIBRARY_CALLBACK', `${label} requiere un puntero a función C ejecutable.`, at);
+        failure('INVALID_LIBRARY_CALLBACK', `${label} requires an executable C function pointer.`, at);
       }
       const target = functions[callee.value.functionIndex];
-      if (!target?.fn.body) failure('UNDEFINED_FUNCTION', `${label} apunta a una función sin definición ejecutable.`, at);
+      if (!target?.fn.body) failure('UNDEFINED_FUNCTION', `${label} points to a function without an executable definition.`, at);
       return target;
     }
     function scheduleTerminationHandler(at: Location): void {
@@ -2701,13 +2701,13 @@ function createRuntimeSession(
         termination.completed = true;
         return;
       }
-      const target = callbackTarget(handler, 'El manejador de terminación', at);
+      const target = callbackTarget(handler, 'The termination handler', at);
       if (target.fn.parameters.length !== 0 || unqualifiedType(target.fn.returnType) !== 'void') {
-        failure('INVALID_TERMINATION_HANDLER', 'El manejador debe tener tipo compatible con void(void).', target.fn.location);
+        failure('INVALID_TERMINATION_HANDLER', 'The handler must have a type compatible with void(void).', target.fn.location);
       }
       work.push(() => {
         const result = operands.pop();
-        if (!result) failure('ENGINE_STACK_ERROR', 'El manejador de terminación no produjo un resultado.', at);
+        if (!result) failure('ENGINE_STACK_ERROR', 'The termination handler did not produce a result.', at);
         scheduleTerminationHandler(at);
       });
       invoke(target, [], at, false);
@@ -2717,7 +2717,7 @@ function createRuntimeSession(
     ): void {
       const skipsHandlers = mode === 'immediate' || mode === 'abort';
       if (termination && !termination.completed && !skipsHandlers) {
-        failure('INVALID_TERMINATION', 'No se puede iniciar exit o quick_exit durante la ejecución de manejadores de terminación.', at);
+        failure('INVALID_TERMINATION', 'Cannot start exit or quick_exit while termination handlers are running.', at);
       }
       work.length = 0;
       operands.length = 0;
@@ -2751,10 +2751,10 @@ function createRuntimeSession(
         return;
       }
       if (request.kind === 'call-user') {
-        const target = callbackTarget(request.callee, 'El callback de una rutina de biblioteca', at);
+        const target = callbackTarget(request.callee, 'A library routine callback', at);
         if (request.args.length < target.fn.parameters.length ||
             !target.fn.variadic && request.args.length !== target.fn.parameters.length) {
-          failure('ARGUMENT_COUNT', `El callback «${target.fn.name}» recibió una cantidad de argumentos no válida.`, at);
+          failure('ARGUMENT_COUNT', `Callback «${target.fn.name}» received an invalid number of arguments.`, at);
         }
         const callbackArgs = request.args.map((argument, index) => {
           const parameter = target.fn.parameters[index];
@@ -2765,16 +2765,16 @@ function createRuntimeSession(
             ? activePointerBases(pointerValueBases.get(argument.value)) : new Set<number>());
         work.push(() => {
           const callbackResult = operands.pop();
-          if (!callbackResult) failure('ENGINE_STACK_ERROR', 'El callback C no produjo un resultado.', at);
+          if (!callbackResult) failure('ENGINE_STACK_ERROR', 'The C callback did not produce a result.', at);
           continueLibraryGenerator(generator, effects, at, callbackResult.value);
         });
         invoke(target, callbackArgs, at, true, argumentBases);
         return;
       }
       if (request.kind === 'register-termination-handler') {
-        const target = callbackTarget(request.callee, 'El manejador de terminación', at);
+        const target = callbackTarget(request.callee, 'The termination handler', at);
         if (target.fn.parameters.length !== 0 || unqualifiedType(target.fn.returnType) !== 'void') {
-          failure('INVALID_TERMINATION_HANDLER', 'El manejador debe tener tipo compatible con void(void).', target.fn.location);
+          failure('INVALID_TERMINATION_HANDLER', 'The handler must have a type compatible with void(void).', target.fn.location);
         }
         const handlers = request.mode === 'normal' ? normalTerminationHandlers : quickTerminationHandlers;
         const accepted = handlers.length < 32;
@@ -2791,7 +2791,7 @@ function createRuntimeSession(
     }
     function defaultReturn(type: CValue['type'], at: Location): CValue {
       if (isAggregate(type)) return { type: unqualifiedType(type), value: { kind: 'aggregate-value', snapshot: { initialized: true, zeroInitialized: true } } };
-      if (isArray(type) || isFunction(type) || unqualifiedType(type) === 'void') failure('MISSING_RETURN', 'La función termina sin un valor de retorno válido.', at);
+      if (isArray(type) || isFunction(type) || unqualifiedType(type) === 'void') failure('MISSING_RETURN', 'The function ends without a valid return value.', at);
       return valueForType(integer(0), type, at);
     }
 
@@ -2802,9 +2802,9 @@ function createRuntimeSession(
       const argvElementPointer = argvPointer ? pointerType(argvPointer) : undefined;
       if (parameters.length !== 2 || unqualifiedType(parameters[0]?.type ?? 'void') !== 'int' || !argvElementPointer ||
           unqualifiedType(pointedToType(argvPointer!) ?? 'void') !== 'char') {
-        failure('INVALID_ENTRY_SIGNATURE', 'main debe tener la forma int main(void) o int main(int, char **).', compiled.fn.location);
+        failure('INVALID_ENTRY_SIGNATURE', 'main must have the form int main(void) or int main(int, char **).', compiled.fn.location);
       }
-      if (io!.argv.length > 2147483647) failure('ARGUMENT_COUNT_RANGE', 'El vector argv excede el rango de int para argc.', compiled.fn.location);
+      if (io!.argv.length > 2147483647) failure('ARGUMENT_COUNT_RANGE', 'The argv vector exceeds the int range for argc.', compiled.fn.location);
       const pointerToChar = pointerTo('char');
       const vector = memory.allocate(arrayOf(pointerToChar, io!.argv.length + 1), 'static', compiled.fn.location);
       memory.zeroInitialize(vector, compiled.fn.location);
@@ -2850,7 +2850,7 @@ function createRuntimeSession(
       pc: 0, cells: new Map(), scopes: [], returned: false,
     };
     const entryFunction = functions[ir.mainIndex];
-    if (!entryFunction?.fn.body) failure('UNDEFINED_ENTRY', 'main no tiene una definición ejecutable.', entryFunction?.fn.location ?? location);
+    if (!entryFunction?.fn.body) failure('UNDEFINED_ENTRY', 'main has no executable definition.', entryFunction?.fn.location ?? location);
     const entryArgs = mainArguments(entryFunction);
     work.push(() => invoke(entryFunction, entryArgs, entryFunction.fn.location));
     for (let index = ir.globals.length - 1; index >= 0; index--) {
@@ -2866,9 +2866,9 @@ function createRuntimeSession(
       if (awaitingInput) return { kind: 'input-needed', metrics, ...output() };
       if (!termination) {
         const result = operands.pop();
-        if (!result) failure('ENGINE_STACK_ERROR', 'main no produjo un estado de terminación.', entryFunction.fn.location);
+        if (!result) failure('ENGINE_STACK_ERROR', 'main did not produce a termination status.', entryFunction.fn.location);
         const status = valueForType(materialize(result, entryFunction.fn.location), 'int', entryFunction.fn.location).value;
-        if (typeof status !== 'bigint') failure('ENGINE_INTERNAL_ERROR', 'El estado de main no es entero.', entryFunction.fn.location);
+        if (typeof status !== 'bigint') failure('ENGINE_INTERNAL_ERROR', 'main status is not an integer.', entryFunction.fn.location);
         startTermination('normal', status, entryFunction.fn.location);
         while (work.length && !awaitingInput && !debugPause) work.pop()!();
         if (debugPause) {
@@ -2877,7 +2877,7 @@ function createRuntimeSession(
         }
         if (awaitingInput) return { kind: 'input-needed', metrics, ...output() };
       }
-      if (!termination?.completed) failure('ENGINE_INTERNAL_ERROR', 'La terminación no completó su secuencia de manejadores.', runtimeLocation);
+      if (!termination?.completed) failure('ENGINE_INTERNAL_ERROR', 'Termination did not complete its handler sequence.', runtimeLocation);
       const rawExitStatus = Number(BigInt.asIntN(32, termination.status));
       return {
         kind: 'terminated',

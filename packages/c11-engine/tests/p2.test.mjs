@@ -207,7 +207,7 @@ test('explicit runtime frames support recursion deeper than the host stack with 
   const result = execute(program, { limits: { maxInstructions: null, maxMemoryBytes: null, maxDepth: null } });
   assert.equal(result.kind, 'terminated', JSON.stringify(result));
   assert.equal(result.mainReturn, 3000);
-  assert.equal(result.metrics.peakMemoryBytes, 4, 'la recursión conserva 3000 frames VM sin reservar parámetros ni locales automáticos');
+  assert.equal(result.metrics.peakMemoryBytes, 4, 'recursion preserves 3,000 VM frames without allocating parameters or automatic locals');
 });
 
 test('known virtual headers expose exact constants, aliases and bool without host I/O', () => {
@@ -223,7 +223,7 @@ test('wchar.h and wchar_t are unavailable', () => {
   for (const literal of [`L'a'`, 'L"wide"']) {
     const wideLiteral = rejects(`int main(void) { return sizeof(${literal}); }`);
     assert.equal(wideLiteral.code, 'UNSUPPORTED_FEATURE');
-    assert.match(wideLiteral.message, /literales anchos/);
+    assert.match(wideLiteral.message, /wide literals/);
   }
 });
 

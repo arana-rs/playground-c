@@ -29,11 +29,11 @@ test('console decodes stdout/stderr before the exit status', () => {
       rawExitStatus: 42,
       mainReturn: 42,
       metrics,
-      stdout: bytes('salida: café\n'),
-      stderr: bytes('aviso'),
+      stdout: bytes('output: café\n'),
+      stderr: bytes('warning'),
     },
   });
-  assert.equal(text, 'salida: café\nstderr:\naviso\nexit code: 42');
+  assert.equal(text, 'output: café\nstderr:\nwarning\nexit code: 42');
 });
 
 test('console keeps partial streams when execution ends with a diagnostic or limit', () => {
@@ -41,13 +41,13 @@ test('console keeps partial streams when execution ends with a diagnostic or lim
     status: 'finished',
     result: {
       kind: 'runtime-error',
-      diagnostics: [{ code: 'DIV_ZERO', message: 'división por cero', file: 'main.c', line: 9, column: 3 }],
+      diagnostics: [{ code: 'DIV_ZERO', message: 'Integer division or remainder by zero: undefined behavior in C11.', file: 'main.c', line: 9, column: 3 }],
       metrics,
-      stdout: bytes('parcial'),
-      stderr: bytes('detalle\n'),
+      stdout: bytes('partial'),
+      stderr: bytes('detail\n'),
     },
   });
-  assert.equal(runtimeError, 'parcial\nstderr:\ndetalle\nError durante la ejecución:\nmain.c:9:3: división por cero');
+  assert.equal(runtimeError, 'partial\nstderr:\ndetail\nRuntime error:\nmain.c:9:3: Integer division or remainder by zero: undefined behavior in C11.');
 
   const limited = formatConsole({
     status: 'finished',
@@ -56,13 +56,13 @@ test('console keeps partial streams when execution ends with a diagnostic or lim
       stage: 'execute',
       resource: 'maxIOBytes',
       limit: 4,
-      diagnostics: [{ code: 'LIMIT_EXCEEDED', message: 'límite agotado', file: 'main.c', line: 1, column: 1 }],
+      diagnostics: [{ code: 'LIMIT_EXCEEDED', message: 'maxIOBytes limit exceeded: 4.', file: 'main.c', line: 1, column: 1 }],
       metrics,
       stdout: bytes('hell'),
       stderr: new Uint8Array(),
     },
   });
-  assert.equal(limited, 'hell\nLa ejecución se detuvo: se alcanzó el límite de datos de entrada y salida (4 bytes permitidos). El presupuesto cubre los datos que el programa puede leer y escribir.\nmain.c:1:1');
+  assert.equal(limited, 'hell\nExecution stopped: the input and output data limit was reached (4 bytes allowed). This budget covers data that the program can read and write.\nmain.c:1:1');
 
   const instructionLimit = formatConsole({
     status: 'finished',
@@ -71,18 +71,18 @@ test('console keeps partial streams when execution ends with a diagnostic or lim
       stage: 'execute',
       resource: 'maxInstructions',
       limit: 100_000,
-      diagnostics: [{ code: 'LIMIT_EXCEEDED', message: 'Se superó maxInstructions: límite 100000.', file: 'main.c', line: 1, column: 28 }],
+      diagnostics: [{ code: 'LIMIT_EXCEEDED', message: 'maxInstructions limit exceeded: 100000.', file: 'main.c', line: 1, column: 28 }],
       metrics: { ...metrics, instructionCount: 100_001 },
       stdout: new Uint8Array(),
       stderr: new Uint8Array(),
     },
   });
-  assert.equal(instructionLimit, 'La ejecución se detuvo: se alcanzó el límite de pasos de ejecución (100.000 pasos permitidos; se contabilizaron 100.001). Revisa bucles o recursión extensos; un cálculo válido también puede superar este presupuesto.\nmain.c:1:28');
+  assert.equal(instructionLimit, 'Execution stopped: the execution steps limit was reached (100,000 steps allowed; 100,001 were counted). Check for long loops or recursion; a valid calculation can also exceed this budget.\nmain.c:1:28');
   assert.doesNotMatch(instructionLimit, /maxInstructions/);
 });
 
 test('console colors output by source and keeps program text that resembles a diagnostic', () => {
-  const imitation = 'La ejecución se detuvo: se alcanzó el límite de pasos de ejecución.';
+  const imitation = 'Execution stopped: the execution steps limit was reached.';
   const programResult = {
     status: 'finished',
     result: {
@@ -106,7 +106,7 @@ test('console colors output by source and keeps program text that resembles a di
       stage: 'execute',
       resource: 'maxInstructions',
       limit: 100_000,
-      diagnostics: [{ code: 'LIMIT_EXCEEDED', message: 'límite alcanzado', file: 'main.c', line: 4, column: 5 }],
+      diagnostics: [{ code: 'LIMIT_EXCEEDED', message: 'maxInstructions limit exceeded: 100000.', file: 'main.c', line: 4, column: 5 }],
       metrics: { ...metrics, instructionCount: 100_001 },
       stdout: bytes('........'),
       stderr: new Uint8Array(),
@@ -115,7 +115,7 @@ test('console colors output by source and keeps program text that resembles a di
   const limitedSegments = formatConsoleSegments(limitedState);
   assert.deepEqual(limitedSegments.map(({ tone }) => tone), ['program', 'warning']);
   assert.equal(limitedSegments[0].text, '........');
-  assert.match(limitedSegments[1].text, /La ejecución se detuvo/u);
+  assert.match(limitedSegments[1].text, /Execution stopped/u);
   assert.match(limitedSegments[1].text, /main\.c:4:5/u);
   assert.equal(limitedSegments.map(({ text }) => text).join(''), formatConsole(limitedState));
 
@@ -123,13 +123,13 @@ test('console colors output by source and keeps program text that resembles a di
     status: 'running',
     inputRequestId: 1,
     transcript: [
-      { stream: 'stdout', text: 'salida' },
-      { stream: 'stdin', text: 'entrada\n' },
-      { stream: 'stderr', text: 'aviso' },
+      { stream: 'stdout', text: 'output' },
+      { stream: 'stdin', text: 'input\n' },
+      { stream: 'stderr', text: 'warning' },
       { stream: 'system', text: '\n[EOF]\n' },
     ],
   });
-  assert.equal(transcriptSegments.map(({ text }) => text).join(''), 'salidaentrada\nstderr:\naviso\n[EOF]\n');
+  assert.equal(transcriptSegments.map(({ text }) => text).join(''), 'outputinput\nstderr:\nwarning\n[EOF]\n');
   assert.deepEqual(transcriptSegments.map(({ tone }) => tone), ['program', 'system']);
 });
 
@@ -138,31 +138,31 @@ test('console frames preparation diagnostics and distinguishes worker failures, 
     status: 'finished',
     result: {
       kind: 'prepare-error',
-      diagnostics: [{ code: 'PREPROCESSOR_ERROR', message: 'include no encontrado', file: 'main.c', line: 1, column: 1 }],
+      diagnostics: [{ code: 'PREPROCESSOR_ERROR', message: 'Virtual header «missing.h» was not found.', file: 'main.c', line: 1, column: 1 }],
       metrics,
     },
   });
-  assert.equal(preparationError, 'No se pudo preparar el programa:\nmain.c:1:1: include no encontrado');
+  assert.equal(preparationError, 'Could not prepare the program:\nmain.c:1:1: Virtual header «missing.h» was not found.');
   assert.equal(formatConsole({
     status: 'error',
     file: 'main.c',
     reason: 'run',
-    message: 'El motor terminó inesperadamente.',
-  }), 'El motor de ejecución falló mientras procesaba «main.c»: El motor terminó inesperadamente.');
+    message: 'The execution engine stopped unexpectedly.',
+  }), 'The execution engine failed while processing "main.c": The execution engine stopped unexpectedly.');
   assert.equal(formatConsole({ status: 'timeout', file: 'main.c', timeoutMs: 10_000 }),
-    'Se agotó el tiempo máximo (10 s) mientras se iniciaba, leía, preparaba o ejecutaba «main.c»; se detuvo la ejecución. Revisa código lento, como bucles o recursión; un programa válido también puede necesitar más tiempo.');
-  assert.equal(formatConsole({ status: 'cancelled' }), 'Ejecución cancelada por el usuario.');
+    'The 10 s time limit expired while starting, reading, preparing, or running "main.c"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.');
+  assert.equal(formatConsole({ status: 'cancelled' }), 'Execution cancelled by the user.');
 });
 
 test('console status follows runner outcomes without treating a nonzero exit as an error', () => {
-  assert.deepEqual(getConsoleStatus({ status: 'idle' }), { label: 'Listo', tone: 'ready' });
-  assert.deepEqual(getConsoleStatus({ status: 'running' }), { label: 'Ejecutando', tone: 'running' });
-  assert.deepEqual(getConsoleStatus({ status: 'cancelled' }), { label: 'Cancelado', tone: 'cancelled' });
+  assert.deepEqual(getConsoleStatus({ status: 'idle' }), { key: 'ready', tone: 'ready' });
+  assert.deepEqual(getConsoleStatus({ status: 'running' }), { key: 'running', tone: 'running' });
+  assert.deepEqual(getConsoleStatus({ status: 'cancelled' }), { key: 'cancelled', tone: 'cancelled' });
   assert.deepEqual(getConsoleStatus({ status: 'timeout', file: 'main.c', timeoutMs: 10_000 }), {
-    label: 'Tiempo agotado', tone: 'stopped',
+    key: 'timedOut', tone: 'stopped',
   });
-  assert.deepEqual(getConsoleStatus({ status: 'error', file: 'main.c', reason: 'run', message: 'falló' }), {
-    label: 'Error', tone: 'error',
+  assert.deepEqual(getConsoleStatus({ status: 'error', file: 'main.c', reason: 'run', message: 'failed' }), {
+    key: 'error', tone: 'error',
   });
   assert.deepEqual(getConsoleStatus({
     status: 'finished',
@@ -170,13 +170,13 @@ test('console status follows runner outcomes without treating a nonzero exit as 
       kind: 'terminated', exitCode: 42, rawExitStatus: 42, mainReturn: 42, metrics,
       stdout: new Uint8Array(), stderr: new Uint8Array(),
     },
-  }), { label: 'Finalizado', tone: 'finished' });
+  }), { key: 'finished', tone: 'finished' });
   assert.deepEqual(getConsoleStatus({
     status: 'finished',
     result: { kind: 'runtime-error', diagnostics: [], metrics },
-  }), { label: 'Error', tone: 'error' });
+  }), { key: 'error', tone: 'error' });
   assert.deepEqual(getConsoleStatus({
     status: 'finished',
     result: { kind: 'limit', stage: 'execute', resource: 'maxInstructions', limit: 10, diagnostics: [], metrics },
-  }), { label: 'Detenido', tone: 'stopped' });
+  }), { key: 'stopped', tone: 'stopped' });
 });

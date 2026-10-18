@@ -84,16 +84,16 @@ test('stdio formats narrow and hexadecimal values and preserves binary80 long do
 
 test('stdio rejects wide character and string conversions without falling back to narrow', () => {
   const sources = [
-    'int main(void) { printf("%lc", 65); return 0; }',
-    'int main(void) { char text[8]; snprintf(text, sizeof text, "%ls", "x"); return 0; }',
-    'int main(void) { int value; scanf("%lc", &value); return 0; }',
-    'int main(void) { char text[8]; sscanf("x", "%ls", text); return 0; }',
-    'int main(void) { scanf("%*lc"); return 0; }',
-    'int main(void) { sscanf("x", "%*ls"); return 0; }',
-    'int main(void) { sscanf("x", "%*l[a]"); return 0; }',
-    'int main(void) { char text[8]; sscanf("x", "%l[a]", text); return 0; }',
+    ['printf', 'int main(void) { printf("%lc", 65); return 0; }'],
+    ['printf', 'int main(void) { char text[8]; snprintf(text, sizeof text, "%ls", "x"); return 0; }'],
+    ['scanf', 'int main(void) { int value; scanf("%lc", &value); return 0; }'],
+    ['scanf', 'int main(void) { char text[8]; sscanf("x", "%ls", text); return 0; }'],
+    ['scanf', 'int main(void) { scanf("%*lc"); return 0; }'],
+    ['scanf', 'int main(void) { sscanf("x", "%*ls"); return 0; }'],
+    ['scanf', 'int main(void) { sscanf("x", "%*l[a]"); return 0; }'],
+    ['scanf', 'int main(void) { char text[8]; sscanf("x", "%l[a]", text); return 0; }'],
   ];
-  for (const source of sources) {
+  for (const [conversion, source] of sources) {
     const program = prepareProject(prepare, {
       entry: 'wide-format.c',
       files: [{ name: 'wide-format.c', source: `#include <stdio.h>\n${source}` }],
@@ -101,7 +101,7 @@ test('stdio rejects wide character and string conversions without falling back t
     const result = execute(program);
     assert.equal(result.kind, 'runtime-error', JSON.stringify(result));
     assert.equal(result.diagnostics[0].code, 'UNSUPPORTED_FEATURE');
-    assert.match(result.diagnostics[0].message, /conversión wide/);
+    assert.match(result.diagnostics[0].message, new RegExp(`^Wide ${conversion} conversion`));
   }
 });
 

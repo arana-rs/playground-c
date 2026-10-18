@@ -24,7 +24,7 @@ function runToTerminal(session, maxSteps = 2_000) {
     if (progress.kind !== 'paused') return { result: progress, events, steps, stepEvents };
     assert.deepEqual(session.currentLocation(), progress.location);
   }
-  assert.fail(`DebugSession no alcanzó un estado terminal en ${maxSteps} pausas.`);
+  assert.fail(`DebugSession did not reach a terminal state in ${maxSteps} pauses.`);
 }
 
 function pauseBeforeLine(session, targetLine, maxSteps = 2_000) {
@@ -32,7 +32,7 @@ function pauseBeforeLine(session, targetLine, maxSteps = 2_000) {
     const progress = session.resume();
     if (progress.kind !== 'paused' || progress.location.line === targetLine) return progress;
   }
-  assert.fail(`DebugSession no alcanzó la línea ${targetLine} en ${maxSteps} pausas.`);
+  assert.fail(`DebugSession did not reach line ${targetLine} in ${maxSteps} pauses.`);
 }
 
 function advanceToInputNeeded(session, maxSteps = 2_000) {
@@ -41,7 +41,7 @@ function advanceToInputNeeded(session, maxSteps = 2_000) {
     if (progress.kind === 'input-needed') return progress;
     assert.equal(progress.kind, 'paused', JSON.stringify(progress));
   }
-  assert.fail(`DebugSession no solicitó stdin en ${maxSteps} pausas.`);
+  assert.fail(`DebugSession did not request stdin within ${maxSteps} pauses.`);
 }
 
 function assertLifecycleOnly(events) {
@@ -50,7 +50,7 @@ function assertLifecycleOnly(events) {
   assert.ok(events.every((event) => !('value' in event) && !('before' in event) && !('after' in event)));
 }
 
-test('el inspector de agregados publica campos directos y layout sin alterar la VM', () => {
+test('aggregate inspection publishes direct fields and layout without changing the VM', () => {
   const source = `struct Inner { short code; };
 union Choice { int count; char bytes[8]; };
 struct Sample {
@@ -103,10 +103,10 @@ int main(void) {
   session.drainEvents();
 
   const inspection = session.inspectAggregates();
-  assert.deepEqual(session.inspectAggregates(), inspection, 'consultar dos veces no cambia el snapshot actual');
-  assert.deepEqual(session.currentLocation(), locationBefore, 'la inspección no avanza la ejecución');
-  assert.deepEqual(session.drainEvents(), [], 'inspeccionar no crea subobjetos ni eventos');
-  assert.deepEqual(structuredClone(inspection), inspection, 'el DTO completo es serializable');
+  assert.deepEqual(session.inspectAggregates(), inspection, 'querying twice does not change the current snapshot');
+  assert.deepEqual(session.currentLocation(), locationBefore, 'inspection does not advance execution');
+  assert.deepEqual(session.drainEvents(), [], 'inspection does not create subobjects or events');
+  assert.deepEqual(structuredClone(inspection), inspection, 'the complete DTO is serializable');
   assert.equal(inspection.omittedObjects, 0);
 
   const byName = (name) => inspection.aggregates.find((aggregate) => aggregate.name === name);
@@ -123,7 +123,7 @@ int main(void) {
   assert.equal(raw.size, 40);
   assert.deepEqual(raw.padding.map(({ offset, size }) => [offset, size]), [[1, 3], [26, 2], [37, 3]]);
   assert.equal(raw.members[1].initialized, true);
-  assert.equal(raw.members[1].displayValue, '9', 'la asignación mediante -> llega al mismo campo');
+  assert.equal(raw.members[1].displayValue, '9', 'assignment through -> reaches the same field');
   assert.equal(raw.members[2].pointerStatus, 'live');
   assert.deepEqual(
     { allocationId: raw.members[2].target.allocationId, byteOffset: raw.members[2].target.byteOffset },
@@ -137,7 +137,7 @@ int main(void) {
   assert.deepEqual(
     partial.members.slice(0, 3).map(({ name, initialized, displayValue }) => [name, initialized, displayValue]),
     [['lead', false, '?'], ['count', true, '7'], ['link', false, '?']],
-    'los campos automáticos no inicializados se publican sin leerlos como C',
+    'uninitialized automatic fields are published without reading them as C',
   );
   const zero = byName('zero');
   assert.deepEqual(
@@ -161,8 +161,8 @@ int main(void) {
   const updatePause = session.resume();
   assert.equal(updatePause.kind, 'paused');
   assert.equal(session.inspectAggregates().aggregates.find((aggregate) => aggregate.name === 'raw').members[1].displayValue, '11');
-  assert.equal(previousRaw.members[1].displayValue, '9', 'un snapshot guardado no sigue mutaciones posteriores');
-  assert.equal(byName('copy').members[1].displayValue, '9', 'la copia por valor conserva su propia historia');
+  assert.equal(previousRaw.members[1].displayValue, '9', 'a saved snapshot does not track later mutations');
+  assert.equal(byName('copy').members[1].displayValue, '9', 'a by-value copy keeps its own history');
 
   const baseline = createDebugSession(prepared);
   assert.equal(pauseBeforeLine(baseline, beforeWriteLine).kind, 'paused');
@@ -171,14 +171,14 @@ int main(void) {
   assert.equal(
     session.inspectAggregates().aggregates.find((aggregate) => aggregate.name === 'later').rootId,
     baseline.inspectAggregates().aggregates.find((aggregate) => aggregate.name === 'later').rootId,
-    'inspeccionar no materializa miembros que consuman IDs internos',
+    'inspection does not materialize members that consume internal IDs',
   );
   const run = runToTerminal(session);
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
-  assert.equal(run.result.mainReturn, 9, 'la inspección no altera la ejecución C');
+  assert.equal(run.result.mainReturn, 9, 'inspection does not alter C execution');
 });
 
-test('la sesión prepara globals y main, y empieza antes de ejecutar la primera instrucción', () => {
+test('the session prepares globals and main, then starts before the first instruction executes', () => {
   const prepared = program('debug-main-bootstrap.c');
   const session = createDebugSession(prepared);
   const initialEvents = session.drainEvents();
@@ -187,7 +187,7 @@ test('la sesión prepara globals y main, y empieza antes de ejecutar la primera 
   assert.equal(initialLocation.file, 'debug-main-bootstrap.c');
   assert.equal(initialLocation.line, 5);
   assert.ok(initialLocation.column > 0);
-  assert.deepEqual(session.inspectScalars(), [], 'el scope raíz de main no publica declaraciones futuras');
+  assert.deepEqual(session.inspectScalars(), [], 'main’s root scope does not publish future declarations');
   assert.equal(objects(initialEvents, 'object-create').filter((event) => event.duration === 'automatic').length, 0);
   assert.ok(objects(initialEvents, 'object-create').some((event) => event.name === 'global_value'));
   assert.ok(objects(initialEvents, 'object-create').some((event) => event.name === 'global_alias'));
@@ -205,7 +205,7 @@ test('la sesión prepara globals y main, y empieza antes de ejecutar la primera 
   assertLifecycleOnly([...initialEvents, ...run.events]);
 });
 
-test('las automáticas aparecen al ejecutar su declaración y siguen la entrada real a scopes', () => {
+test('automatic objects appear when their declarations execute and follow actual scope entry', () => {
   const prepared = prepareProject(prepare, {
     entry: 'debug-declaration-timing.c',
     files: [{ name: 'debug-declaration-timing.c', source: `int main(void) {
@@ -245,7 +245,7 @@ test('las automáticas aparecen al ejecutar su declaración y siguen la entrada 
   const enterEvents = session.drainEvents();
   events.push(...enterEvents);
   const entered = objects(enterEvents, 'scope-enter');
-  assert.equal(entered.length, 1, 'el bloque anidado entra en su acción fuente');
+  assert.equal(entered.length, 1, 'the nested block enters at its source action');
   assert.equal(session.inspectScalars().some((scalar) => scalar.name === 'nested'), false);
 
   progress = session.resume();
@@ -282,7 +282,7 @@ test('las automáticas aparecen al ejecutar su declaración y siguen la entrada 
   assertLifecycleOnly(events);
 });
 
-test('resume agrupa sentencias de una misma línea y ejecuta el scope de la rama elegida', () => {
+test('resume groups statements on one line and enters the selected branch scope', () => {
   const session = createDebugSession(program('debug-line-groups.c'));
   assert.equal(session.currentLocation().line, 2);
 
@@ -298,7 +298,7 @@ test('resume agrupa sentencias de una misma línea y ejecuta el scope de la rama
   assertLifecycleOnly(run.events);
 });
 
-test('PC repetido en una activación permite avanzar por loops y goto de una sola línea', () => {
+test('a repeated PC in one activation can advance through single-line loops and gotos', () => {
   const session = createDebugSession(program('debug-loop-goto.c'));
   const run = runToTerminal(session, 100);
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
@@ -312,7 +312,7 @@ test('PC repetido en una activación permite avanzar por loops y goto de una sol
   assertLifecycleOnly(run.events);
 });
 
-test('las llamadas recursivas entran por su primera línea y conservan frames dinámicos distintos', () => {
+test('recursive calls enter at their first line and keep distinct dynamic frames', () => {
   const session = createDebugSession(program('recursion-frames.c'));
   assert.equal(session.currentLocation().line, 8);
 
@@ -344,7 +344,7 @@ test('las llamadas recursivas entran por su primera línea y conservan frames di
   assertLifecycleOnly(events);
 });
 
-test('el cuerpo while compuesto del ejemplo usa un solo scope C por iteración y conserva la etiqueta canónica', () => {
+test('the example’s compound while body uses one C scope per iteration and keeps the canonical label', () => {
   const run = runToTerminal(createDebugSession(program('linked-list-scopes.c')));
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
   assert.equal(run.result.mainReturn, 0);
@@ -357,7 +357,7 @@ test('el cuerpo while compuesto del ejemplo usa un solo scope C por iteración y
   const loopName = 'while(...)';
   const loopEnters = objects(run.events, 'scope-enter').filter((event) => event.scopeName === loopName);
   const loopExits = objects(run.events, 'scope-exit').filter((event) => event.scopeName === loopName);
-  assert.equal(loopEnters.length, 6, 'la lista recorre 1 + 2 + 3 nodos antes de salir del while');
+  assert.equal(loopEnters.length, 6, 'the list visits 1 + 2 + 3 nodes before leaving the while loop');
   assert.equal(loopExits.length, loopEnters.length);
   assert.equal(new Set(loopEnters.map((event) => event.scopeId)).size, 6);
   assert.deepEqual(
@@ -373,7 +373,7 @@ test('el cuerpo while compuesto del ejemplo usa un solo scope C por iteración y
       if (event.scopeName === loopName) loopStacks.push(activeScopes.map((scope) => scope.scopeName));
     } else {
       const index = activeScopes.findIndex((scope) => scope.scopeId === event.scopeId);
-      assert.notEqual(index, -1, `scope ${event.scopeId} debe tener un enter previo`);
+      assert.notEqual(index, -1, `scope ${event.scopeId} must have a preceding enter event`);
       activeScopes.splice(index, 1);
     }
   }
@@ -383,15 +383,15 @@ test('el cuerpo while compuesto del ejemplo usa un solo scope C por iteración y
     ['main', 'appendNode', loopName],
   ]);
   assert.deepEqual(loopStacks.slice(3), [
-    ['main', 'bloque', 'appendNode', loopName],
-    ['main', 'bloque', 'appendNode', loopName],
-    ['main', 'bloque', 'appendNode', loopName],
+    ['main', 'block', 'appendNode', loopName],
+    ['main', 'block', 'appendNode', loopName],
+    ['main', 'block', 'appendNode', loopName],
   ]);
-  assert.deepEqual(activeScopes, [], 'todos los scopes reales salen al terminar main');
+  assert.deepEqual(activeScopes, [], 'all real scopes exit when main finishes');
   assertLifecycleOnly(run.events);
 });
 
-test('if, else, for, do, switch y bloques desnudos conservan scopes y ownership de automáticos', () => {
+test('if, else, for, do, switch and bare blocks preserve scopes and automatic-object ownership', () => {
   const prepared = prepareProject(prepare, {
     entry: 'scope-names.c',
     files: [{ name: 'scope-names.c', source: `int main(void) {
@@ -418,12 +418,12 @@ test('if, else, for, do, switch y bloques desnudos conservan scopes y ownership 
   const counts = (name) => enters.filter((event) => event.scopeName === name).length;
   assert.equal(counts('main'), 1);
   assert.equal(counts('if(...)'), 1);
-  assert.equal(counts('else'), 0, 'el bloque else no se activa');
+  assert.equal(counts('else'), 0, 'the else block is not entered');
   assert.equal(counts('do { ... } while (...)'), 1);
   assert.equal(counts('for(...)'), 1);
-  assert.equal(counts('bloque de for'), 2);
+  assert.equal(counts('for block'), 2);
   assert.equal(counts('switch(...)'), 2);
-  assert.equal(counts('bloque'), 2, 'un bloque del case y el bloque desnudo');
+  assert.equal(counts('block'), 2, 'a case block and a bare block');
   assert.deepEqual(
     new Set(exits.map((event) => event.scopeId)),
     new Set(enters.map((event) => event.scopeId)),
@@ -433,16 +433,16 @@ test('if, else, for, do, switch y bloques desnudos conservan scopes y ownership 
   for (const name of ['branch', 'loop', 'choice', 'bare']) {
     const created = objects(run.events, 'object-create').find((event) => event.name === name);
     const deleted = objects(run.events, 'object-delete').find((event) => event.allocationId === created?.allocationId);
-    assert.ok(created, `${name} debe tener una creación automática`);
-    assert.ok(deleted, `${name} debe terminar al cerrar su bloque`);
+    assert.ok(created, `${name} must have an automatic object creation`);
+    assert.ok(deleted, `${name} must end when its block closes`);
     assert.equal(deleted.scopeId, created.scopeId);
-    assert.equal(scopeNamesById.get(created.scopeId), name === 'branch' ? 'if(...)' : name === 'choice' ? 'bloque' : name === 'bare' ? 'bloque' : 'bloque de for');
+    assert.equal(scopeNamesById.get(created.scopeId), name === 'branch' ? 'if(...)' : name === 'choice' ? 'block' : name === 'bare' ? 'block' : 'for block');
   }
   assert.equal(objects(run.events, 'object-create').some((event) => event.name === 'skipped'), false);
   assertLifecycleOnly(run.events);
 });
 
-test('continue y break cierran el scope real de cada iteración sin perder el ownership local', () => {
+test('continue and break close each iteration’s real scope without losing local ownership', () => {
   const prepared = prepareProject(prepare, {
     entry: 'loop-exits.c',
     files: [{ name: 'loop-exits.c', source: `int main(void) {
@@ -483,7 +483,7 @@ test('continue y break cierran el scope real de cada iteración sin perder el ow
   assertLifecycleOnly(run.events);
 });
 
-test('el fallthrough de una función pausa en su llave de cierre y mantiene ubicaciones de scopes anidados', () => {
+test('function fallthrough pauses at its closing brace and keeps nested scope locations', () => {
   const session = createDebugSession(program('debug-function-close.c'));
   const run = runToTerminal(session);
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
@@ -517,7 +517,7 @@ test('el fallthrough de una función pausa en su llave de cierre y mantiene ubic
   assertLifecycleOnly(run.events);
 });
 
-test('los objetos static y literales de string persisten y se informan una sola vez', () => {
+test('static objects and string literals persist and are reported only once', () => {
   const session = createDebugSession(program('static-and-string.c'));
   const initialEvents = session.drainEvents();
   assert.ok(objects(initialEvents, 'object-create').some((event) => event.name === 'file_count'));
@@ -556,7 +556,7 @@ test('los objetos static y literales de string persisten y se informan una sola 
   assertLifecycleOnly(events);
 });
 
-test('la inspección static publica escalares y literales reales y conserva los static locales entre llamadas', () => {
+test('static inspection publishes actual scalars and literals and preserves local statics across calls', () => {
   const session = createDebugSession(program('static-memory-inspection.c'));
   const initialEvents = [...session.drainEvents()];
   const initialLocation = session.currentLocation();
@@ -564,7 +564,7 @@ test('la inspección static publica escalares y literales reales y conserva los 
   assert.deepEqual(staticScalarsOnly.map(({ name, origin }) => ({ name, origin })), [
     { name: 'global_zero', origin: 'variable' },
     { name: 'global_value', origin: 'variable' },
-  ], 'la opción omite literales antes de construir su preview completo');
+  ], 'the option omits literals before building their full preview');
   const initialSnapshots = session.inspectStaticObjects();
 
   assert.deepEqual(initialSnapshots.map(({ name, origin, type, initialized, displayValue }) => ({ name, origin, type, initialized, displayValue })), [
@@ -572,9 +572,9 @@ test('la inspección static publica escalares y literales reales y conserva los 
     { name: 'global_value', origin: 'variable', type: 'long', initialized: true, displayValue: '41' },
     { name: undefined, origin: 'string-literal', type: 'char[12]', initialized: true, displayValue: '"A\\n\\0001B\\001ABA\\"\\\\\\000"' },
   ]);
-  assert.deepEqual(session.currentLocation(), initialLocation, 'la inspección no avanza la VM');
-  assert.deepEqual(session.drainEvents(), [], 'la inspección no publica eventos');
-  assert.deepEqual(structuredClone(initialSnapshots), initialSnapshots, 'los DTO siguen siendo serializables');
+  assert.deepEqual(session.currentLocation(), initialLocation, 'inspection does not advance the VM');
+  assert.deepEqual(session.drainEvents(), [], 'inspection does not publish events');
+  assert.deepEqual(structuredClone(initialSnapshots), initialSnapshots, 'DTOs remain serializable');
   assert.ok(initialSnapshots.every((snapshot) => !('scopeId' in snapshot) && !('frameId' in snapshot)));
 
   const observations = [];
@@ -592,15 +592,15 @@ test('la inspección static publica escalares y literales reales y conserva los 
   const visitsAt = (line) => observations
     .filter((observation) => observation.location?.line === line)
     .map((observation) => observation.snapshots.find((snapshot) => snapshot.name === 'visits')?.displayValue);
-  assert.deepEqual(visitsAt(7), ['2', '3'], 'la inicialización explícita ocurre una vez y luego se conserva entre frames');
-  assert.deepEqual(visitsAt(8), ['3', '4'], 'las escrituras se inspeccionan sin evento de escritura');
-  assert.equal(observations.find((observation) => observation.location?.line === 13)?.snapshots.find((snapshot) => snapshot.name === 'visits')?.displayValue, '3', 'el static local persiste al volver a main');
+  assert.deepEqual(visitsAt(7), ['2', '3'], 'explicit initialization happens once and is then preserved across frames');
+  assert.deepEqual(visitsAt(8), ['3', '4'], 'writes are observed without a write event');
+  assert.equal(observations.find((observation) => observation.location?.line === 13)?.snapshots.find((snapshot) => snapshot.name === 'visits')?.displayValue, '3', 'the local static persists when returning to main');
 
   const created = objects(events, 'object-create');
   const snapshots = [initialSnapshots, ...observations.map((observation) => observation.snapshots)].flat();
   for (const snapshot of snapshots) {
     const create = created.find((event) => event.allocationId === snapshot.id);
-    assert.ok(create, String(snapshot.name ?? snapshot.displayValue) + ' correlaciona con su object-create real');
+    assert.ok(create, String(snapshot.name ?? snapshot.displayValue) + ' matches its actual object-create event');
     assert.equal(create.duration, 'static');
     assert.equal(create.origin, snapshot.origin);
     assert.equal(snapshot.address, '0x' + create.addressVirtual.toString(16));
@@ -612,12 +612,12 @@ test('la inspección static publica escalares y literales reales y conserva los 
   assert.ok(visitsId);
   assert.equal(created.filter((event) => event.allocationId === visitsId).length, 1);
   assert.equal(objects(events, 'object-delete').some((event) => event.allocationId === visitsId), false);
-  assert.equal(session.inspectScalars().length, 0, 'la terminación normal cierra escalares automáticos');
-  assert.equal(session.inspectStaticObjects().find((snapshot) => snapshot.id === visitsId)?.displayValue, '4', 'los static conservan su valor tras salir de main');
+  assert.equal(session.inspectScalars().length, 0, 'normal termination closes automatic scalars');
+  assert.equal(session.inspectStaticObjects().find((snapshot) => snapshot.id === visitsId)?.displayValue, '4', 'static objects retain their value after main exits');
   assertLifecycleOnly(events);
 });
 
-test('la inspección de arrays conserva celdas C reales y es no invasiva', () => {
+test('array inspection preserves actual C cells and is noninvasive', () => {
   assert.deepEqual(DEFAULT_DEBUG_ARRAY_INSPECTION_LIMITS, {
     maxObjects: 1_000,
     maxElementsPerArray: 10,
@@ -628,7 +628,7 @@ const int global_const[2] = { 5, 6 };
 char *literal_ref = "A\\n";
 int main(void) {
   int values[4] = { 10, 20 };
-  char text[5] = "hola";
+  char text[5] = "good";
   char raw[3] = "abc";
   int untouched[2];
   _Bool flags[2] = { 0, 2 };
@@ -653,17 +653,17 @@ int main(void) {
   const beforeInspectionLocation = session.currentLocation();
   const events = [...session.drainEvents()];
   const inspection = session.inspectArrays();
-  assert.deepEqual(session.inspectArrays(), inspection, 'la consulta repetida devuelve el mismo estado actual');
-  assert.deepEqual(session.currentLocation(), beforeInspectionLocation, 'la inspección no avanza la ejecución');
-  assert.deepEqual(session.drainEvents(), [], 'la inspección no crea objetos ni eventos');
-  assert.deepEqual(structuredClone(inspection), inspection, 'el DTO queda serializable');
+  assert.deepEqual(session.inspectArrays(), inspection, 'repeated queries return the same current state');
+  assert.deepEqual(session.currentLocation(), beforeInspectionLocation, 'inspection does not advance execution');
+  assert.deepEqual(session.drainEvents(), [], 'inspection does not create objects or events');
+  assert.deepEqual(structuredClone(inspection), inspection, 'the DTO remains serializable');
   assert.equal(inspection.omittedObjects, 0);
 
   const byName = (name) => inspection.arrays.find((array) => array.name === name);
   const values = byName('values');
   assert.deepEqual(values.elements.map(({ index, initialized, displayValue }) => [index, initialized, displayValue]), [
     [0, true, '10'], [1, true, '20'], [2, true, '0'], [3, true, '0'],
-  ], 'la inicialización parcial deja el resto en cero');
+  ], 'partial initialization leaves the remainder at zero');
   assert.equal(values.status, 'available');
   assert.equal(values.region, 'stack');
   assert.equal(values.elements[0].key, `${values.rootId}:0`);
@@ -672,14 +672,14 @@ int main(void) {
   assert.ok(Number.isInteger(values.frameId) && Number.isInteger(values.scopeId));
 
   const text = byName('text');
-  assert.deepEqual(text.elements.map(({ displayValue }) => displayValue), ["'h'", "'o'", "'l'", "'a'", "'\\0'"]);
-  assert.equal(text.elements.length, 5, 'el terminador ocupa una celda real');
+  assert.deepEqual(text.elements.map(({ displayValue }) => displayValue), ["'g'", "'o'", "'o'", "'d'", "'\\0'"]);
+  assert.equal(text.elements.length, 5, 'the terminator occupies a real cell');
   const raw = byName('raw');
   assert.deepEqual(raw.elements.map(({ displayValue }) => displayValue), ["'a'", "'b'", "'c'"]);
-  assert.equal(raw.elements.length, 3, 'un char array sin NUL es válido y no recibe un terminador inventado');
+  assert.equal(raw.elements.length, 3, 'a char array without NUL is valid and does not receive an invented terminator');
   assert.deepEqual(byName('untouched').elements.map(({ initialized, displayValue }) => [initialized, displayValue]), [
     [false, '?'], [false, '?'],
-  ], 'cada elemento automático no inicializado conserva el estado indeterminado del motor');
+  ], 'each uninitialized automatic element keeps the engine’s indeterminate state');
   assert.deepEqual(byName('flags').elements.map(({ displayValue }) => displayValue), ['0', '1']);
   assert.equal(byName('floats').elements[0].displayValue, '1.5');
   assert.equal(byName('doubles').elements[0].displayValue, '-0');
@@ -690,7 +690,7 @@ int main(void) {
   assert.equal(global.region, 'static');
   assert.equal(global.scopeId, null);
   assert.equal(global.frameId, null);
-  assert.deepEqual(global.elements.map(({ displayValue }) => displayValue), ['9007199254740993', '-2'], 'LP64 conserva BigInt exacto');
+  assert.deepEqual(global.elements.map(({ displayValue }) => displayValue), ['9007199254740993', '-2'], 'LP64 preserves exact BigInt values');
   assert.equal(byName('global_const').readOnly, true);
   const literal = inspection.arrays.find((array) => array.origin === 'string-literal');
   assert.ok(literal);
@@ -698,28 +698,28 @@ int main(void) {
   assert.equal(literal.readOnly, true);
   assert.deepEqual(literal.elements.map(({ displayValue }) => displayValue), ["'A'", "'\\n'", "'\\0'"]);
   assert.ok(session.inspectStaticObjects().some((object) => object.id === literal.rootId && object.origin === 'string-literal'),
-    'el canal nuevo conserva identidad con el literal publicado por la API anterior');
+    'the new channel preserves identity with the literal published by the previous API');
 
   const creates = objects(events, 'object-create');
   for (const array of inspection.arrays) {
     const create = creates.find((event) => event.allocationId === array.rootId);
-    assert.ok(create, `el root ${array.rootId} coincide con object-create`);
+    assert.ok(create, `root ${array.rootId} matches object-create`);
     assert.equal(array.address, `0x${create.addressVirtual.toString(16)}`);
     assert.equal(array.size, create.size);
   }
 
   let progress = session.resume();
   assert.equal(progress.kind, 'paused');
-  assert.equal(session.inspectArrays().arrays.find((array) => array.name === 'values').elements[0].displayValue, '11', 'postfijo actualiza la celda');
+  assert.equal(session.inspectArrays().arrays.find((array) => array.name === 'values').elements[0].displayValue, '11', 'postfix updates the cell');
   progress = session.resume();
   assert.equal(progress.kind, 'paused');
-  assert.equal(session.inspectArrays().arrays.find((array) => array.name === 'values').elements[1].displayValue, '21', 'prefijo actualiza la celda');
+  assert.equal(session.inspectArrays().arrays.find((array) => array.name === 'values').elements[1].displayValue, '21', 'prefix updates the cell');
   progress = session.resume();
   assert.equal(progress.kind, 'paused');
-  assert.equal(session.inspectArrays().arrays.find((array) => array.name === 'values').elements[2].displayValue, '9', 'la asignación por índice actualiza el elemento');
+  assert.equal(session.inspectArrays().arrays.find((array) => array.name === 'values').elements[2].displayValue, '9', 'indexed assignment updates the element');
 });
 
-test('arrays grandes, matrices y tipos de elemento no soportados conservan descriptores acotados y no detienen C', () => {
+test('large arrays, matrices and unsupported element types keep bounded descriptors without stopping C', () => {
   const source = `int main(void) {
   int large[11] = { 0 };
   char text[] = "abcdefghij";
@@ -747,7 +747,7 @@ test('arrays grandes, matrices y tipos de elemento no soportados conservan descr
   assert.equal(byName('large').length, 11);
   assert.deepEqual(byName('large').elements, []);
   assert.equal(byName('text').status, 'too-many-elements');
-  assert.equal(byName('text').length, 11, 'el cap incluye el NUL que completa char texto[]');
+  assert.equal(byName('text').length, 11, 'the cap includes the NUL that completes char text[]');
   assert.deepEqual(byName('text').elements, []);
   assert.equal(byName('matrix').status, 'multidimensional');
   assert.deepEqual(byName('matrix').elements, []);
@@ -766,13 +766,13 @@ test('arrays grandes, matrices y tipos de elemento no soportados conservan descr
   assert.equal(cappedPause.kind, 'paused');
   const cappedInspection = capped.inspectArrays();
   assert.equal(cappedInspection.arrays.length, 2);
-  assert.equal(cappedInspection.omittedObjects, 5, 'solo los roots excluidos por maxObjects se cuentan como omitidos');
+  assert.equal(cappedInspection.omittedObjects, 5, 'only roots excluded by maxObjects count as omitted');
   const run = runToTerminal(session);
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
-  assert.equal(run.result.mainReturn, 7, 'la limitación visual de arrays no limita la ejecución del motor');
+  assert.equal(run.result.mainReturn, 7, 'the array display limit does not limit engine execution');
 });
 
-test('la inspección sigue raíces vivas de scopes, shadowing y frames distintos', () => {
+test('inspection follows live roots across scopes, shadowing and distinct frames', () => {
   const source = `int helper(void) {
   int values[1] = { 4 };
   return values[0];
@@ -798,19 +798,19 @@ int main(void) {
     arrays = session.inspectArrays().arrays.filter((array) => array.name === 'values');
     if (arrays.length === 3) break;
   }
-  assert.equal(arrays.length, 3, 'las dos sombras y el array del helper son roots vivos distintos');
+  assert.equal(arrays.length, 3, 'both shadowed objects and the helper array are distinct live roots');
   assert.equal(new Set(arrays.map((array) => array.rootId)).size, 3);
   assert.equal(new Set(arrays.map((array) => array.frameId)).size, 2);
   assert.equal(new Set(arrays.map((array) => array.scopeId)).size, 3);
   assert.deepEqual(arrays.map((array) => array.elements[0].displayValue).sort(), ['1', '3', '4'],
-    'la raíz exterior conserva 1, la sombra refleja su escritura a 3 y el helper conserva 4');
+    'the outer root retains 1, its shadow reflects the write to 3, and the helper retains 4');
 
   const run = runToTerminal(session);
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
-  assert.deepEqual(session.inspectArrays().arrays, [], 'las raíces automáticas desaparecen al salir de sus scopes');
+  assert.deepEqual(session.inspectArrays().arrays, [], 'automatic roots disappear when their scopes exit');
 });
 
-test('malloc y free informan el ciclo heap; free(NULL) no añade eventos', () => {
+test('malloc and free report the heap lifecycle; free(NULL) adds no events', () => {
   const run = runToTerminal(createDebugSession(program('heap-lifetimes.c')));
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
   const heapCreates = objects(run.events, 'object-create').filter((event) => event.origin === 'heap');
@@ -828,7 +828,7 @@ test('malloc y free informan el ciclo heap; free(NULL) no añade eventos', () =>
   assertLifecycleOnly(run.events);
 });
 
-test('la inspección heap publica direcciones reales ordenadas, respeta tamaños y desaparece al hacer free', () => {
+test('heap inspection publishes ordered actual addresses, respects sizes and disappears after free', () => {
   assert.deepEqual(VIRTUAL_HEAP_LAYOUT, {
     start: 0x0003_0000n,
     endExclusive: 0x0004_0000n,
@@ -864,7 +864,7 @@ test('la inspección heap publica direcciones reales ordenadas, respeta tamaños
   assert.deepEqual(
     objects(first.events, 'object-create').filter((event) => event.origin === 'heap'),
     objects(second.events, 'object-create').filter((event) => event.origin === 'heap'),
-    'el seed permite reproducir direcciones en pruebas',
+    'the seed makes addresses reproducible in tests',
   );
 
   const created = objects(first.events, 'object-create').filter((event) => event.origin === 'heap');
@@ -872,20 +872,20 @@ test('la inspección heap publica direcciones reales ordenadas, respeta tamaños
   const creationsById = new Map(created.map((event) => [event.allocationId, event]));
   const initialAddresses = created.slice(0, 3).map((event) => event.addressVirtual);
   assert.ok(initialAddresses[1] < initialAddresses[2] && initialAddresses[2] < initialAddresses[0],
-    'el seed de muestra fuerza nuevas allocations antes y en medio del orden por dirección');
+    'the sample seed forces new allocations before and within address order');
   for (const { blocks } of first.observations) {
     assert.deepEqual(blocks.map(({ address }) => BigInt(address)),
       [...blocks].map(({ address }) => BigInt(address)).sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
-    'los bloques se ordenan por la dirección virtual exacta');
+    'blocks are ordered by exact virtual address');
     for (const block of blocks) {
       const creation = creationsById.get(block.id);
-      assert.ok(creation, 'id coincide con un object-create real');
+      assert.ok(creation, 'ID matches an actual object-create event');
       assert.equal(block.address, `0x${creation.addressVirtual.toString(16)}`);
       assert.equal(block.size, creation.size);
       assert.equal(block.origin, 'heap');
       const address = BigInt(block.address);
       assert.ok(address >= VIRTUAL_HEAP_LAYOUT.start && address < VIRTUAL_HEAP_LAYOUT.endExclusive);
-      assert.equal(address % BigInt(VIRTUAL_HEAP_LAYOUT.alignmentBytes), 0n, 'el inicio cumple alineación LP64 publicada');
+      assert.equal(address % BigInt(VIRTUAL_HEAP_LAYOUT.alignmentBytes), 0n, 'the start satisfies the published LP64 alignment');
     }
     for (let left = 0; left < blocks.length; left += 1) {
       const leftStart = BigInt(blocks[left].address);
@@ -893,19 +893,19 @@ test('la inspección heap publica direcciones reales ordenadas, respeta tamaños
       for (let right = left + 1; right < blocks.length; right += 1) {
         const rightStart = BigInt(blocks[right].address);
         const rightEnd = rightStart + BigInt(blocks[right].size);
-        assert.ok(leftEnd <= rightStart || rightEnd <= leftStart, 'los rangos vivos no se solapan');
+        assert.ok(leftEnd <= rightStart || rightEnd <= leftStart, 'live ranges do not overlap');
       }
     }
   }
   const afterFreeSecond = first.observations.find(({ line }) => line === 7)?.blocks ?? [];
   assert.equal(afterFreeSecond.length, 2);
   assert.equal(afterFreeSecond.some(({ id }) => id === deleted[0]?.allocationId), false,
-    'free elimina el bloque liberado de la inspección');
+    'free removes the released block from inspection');
   assert.equal(created.length, 4);
   assert.equal(deleted.length, 4);
 });
 
-test('el layout virtual publica regiones disjuntas Static, Stack y Heap con guard y capacidad compartidos', () => {
+test('the virtual layout publishes disjoint Static, Stack and Heap regions with shared guards and capacity', () => {
   assert.deepEqual(VIRTUAL_MEMORY_LAYOUT, {
     alignmentBytes: 16,
     guardBytes: 16,
@@ -929,7 +929,7 @@ test('el layout virtual publica regiones disjuntas Static, Stack y Heap con guar
   assert.equal(CAPABILITIES.virtualMemory.guardBytes, 16);
 });
 
-test('el allocator reutiliza extents liberados y no itera una vez por cada slot reservado', () => {
+test('the allocator reuses released extents without iterating once per reserved slot', () => {
   const location = { file: 'heap-allocator.test.c', line: 1, column: 1 };
   const memory = new VirtualMemory([], null, { peakMemoryBytes: 0 }, () => 0);
   const heapBytes = VIRTUAL_HEAP_LAYOUT.endExclusive - VIRTUAL_HEAP_LAYOUT.start;
@@ -938,17 +938,17 @@ test('el allocator reutiliza extents liberados y no itera una vez por cada slot 
   assert.ok(first);
   const firstAddress = memory.describeObject(memory.rootReference(first.allocationId), location).addressVirtual;
   assert.equal(firstAddress, VIRTUAL_HEAP_LAYOUT.start);
-  assert.equal(memory.allocateRaw(1, location), null, 'los slots libres restantes no alcanzan para request y separación');
-  assert.equal(memory.allocatedBytes, largeBlock, 'un fallo de espacio no contabiliza bytes vivos');
+  assert.equal(memory.allocateRaw(1, location), null, 'the remaining free slots cannot fit the request and separator');
+  assert.equal(memory.allocatedBytes, largeBlock, 'a space failure does not count live bytes');
 
   memory.free(first, location);
   const replacement = memory.allocateRaw(largeBlock, location);
   assert.ok(replacement);
   const replacementAddress = memory.describeObject(memory.rootReference(replacement.allocationId), location).addressVirtual;
-  assert.equal(replacementAddress, firstAddress, 'free libera el intervalo para una asignación posterior');
+  assert.equal(replacementAddress, firstAddress, 'free releases the interval for a later allocation');
 });
 
-test('malloc devuelve NULL al agotar la región heap virtual y no emite un allocation fantasma', () => {
+test('malloc returns NULL when the virtual heap region is exhausted and emits no phantom allocation', () => {
   const run = runToTerminal(createDebugSession(program('heap-region-exhaustion.c'), undefined, { heapAddressSeed: 0 }));
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
   assert.equal(run.result.mainReturn, 0);
@@ -956,7 +956,7 @@ test('malloc devuelve NULL al agotar la región heap virtual y no emite un alloc
   assert.deepEqual(objects(run.events, 'object-delete').filter((event) => event.origin === 'heap'), []);
 });
 
-test('Static y Stack son regiones independientes, reservan el guard y reutilizan Stack al terminar el scope', () => {
+test('Static and Stack are independent regions, reserve the guard and reuse Stack when a scope ends', () => {
   const location = { file: 'virtual-memory-layout.test.c', line: 1, column: 1 };
   const bytes = (length) => ({ kind: 'array', element: 'char', length });
   const memory = new VirtualMemory([], null, { peakMemoryBytes: 0 });
@@ -967,14 +967,14 @@ test('Static y Stack son regiones independientes, reservan el guard y reutilizan
   assert.equal(staticAddress, VIRTUAL_MEMORY_LAYOUT.staticAddressRange.start);
   assert.equal(firstStackAddress, VIRTUAL_MEMORY_LAYOUT.stackAddressRange.start);
   assert.equal(staticAddress + 65520n, firstStackAddress - BigInt(VIRTUAL_MEMORY_LAYOUT.guardBytes),
-    'one-past cae antes del guard y no coincide con la primera base Stack');
+    'one-past falls before the guard and does not match the first Stack base');
   const onePast = memory.pointerAdd(memory.decay(staticBlock), 65520n, location);
   assert.equal(staticAddress + BigInt(onePast.value.byteOffset), firstStackAddress - 16n);
-  assert.equal(memory.allocatedBytes, 65521, 'el guard no se suma a los bytes C vivos');
+  assert.equal(memory.allocatedBytes, 65521, 'the guard is not counted as live C bytes');
 
   assert.throws(() => memory.allocate(bytes(1), 'static', location), (error) =>
     error?.diagnostic?.code === 'STATIC_ADDRESS_SPACE_EXHAUSTED' && error.diagnostic.message.includes('guard'));
-  assert.equal(memory.allocatedBytes, 65521, 'un fallo de región no publica ni cuenta otra reserva');
+  assert.equal(memory.allocatedBytes, 65521, 'a region failure neither publishes nor counts another reservation');
 
   const staleStackPointer = memory.addressOf(stackBlock);
   memory.release(stackBlock, location);
@@ -982,7 +982,7 @@ test('Static y Stack son regiones independientes, reservan el guard y reutilizan
   assert.equal(memory.describeObject(replacement, location).addressVirtual, firstStackAddress);
   assert.notEqual(replacement.allocationId, stackBlock.allocationId);
   assert.throws(() => memory.assertAlive(staleStackPointer, location), (error) => error?.diagnostic?.code === 'INACTIVE_OBJECT',
-    'reutilizar la dirección no revive la procedencia del allocation eliminado');
+    'reusing an address does not revive the provenance of a removed allocation');
 
   const stackExhaustion = new VirtualMemory([], null, { peakMemoryBytes: 0 });
   assert.throws(() => stackExhaustion.allocate(bytes(65521), 'automatic', location), (error) =>
@@ -992,10 +992,10 @@ test('Static y Stack son regiones independientes, reservan el guard y reutilizan
   const budgeted = new VirtualMemory([], 64, { peakMemoryBytes: 0 });
   budgeted.allocate(bytes(32), 'static', location);
   budgeted.allocate(bytes(32), 'automatic', location);
-  assert.equal(budgeted.allocatedBytes, 64, 'el presupuesto cuenta bytes C y excluye los guards de ambas regiones');
+  assert.equal(budgeted.allocatedBytes, 64, 'the budget counts C bytes and excludes guards from both regions');
 });
 
-test('scopes sucesivos reutilizan una pila virtual grande y conservan procedencia por allocation', () => {
+test('successive scopes reuse a large virtual stack and preserve allocation provenance', () => {
   const large = runToTerminal(createDebugSession(program('stack-large-reuse.c')));
   assert.equal(large.result.kind, 'terminated', JSON.stringify(large.result));
   assert.equal(large.result.mainReturn, 15);
@@ -1006,7 +1006,7 @@ test('scopes sucesivos reutilizan una pila virtual grande y conservan procedenci
   assert.equal(largeDeletes.length, 2);
   assert.equal(largeCreates[0].size, 60000);
   assert.equal(largeCreates[0].addressVirtual, largeCreates[1].addressVirtual,
-    'el scope posterior reutiliza el extent grande liberado por el anterior');
+    'the later scope reuses the large extent released by the previous scope');
   assert.notEqual(largeCreates[0].allocationId, largeCreates[1].allocationId);
   assert.ok(large.events.findIndex((event) => event.kind === 'object-delete' && event.allocationId === largeCreates[0].allocationId) <
     large.events.findIndex((event) => event.kind === 'object-create' && event.allocationId === largeCreates[1].allocationId));
@@ -1016,11 +1016,11 @@ test('scopes sucesivos reutilizan una pila virtual grande y conservan procedenci
   assert.equal(stale.result.diagnostics[0].code, 'INACTIVE_OBJECT');
   const values = objects(stale.events, 'object-create').filter(({ name }) => name === 'old_value' || name === 'new_value');
   assert.equal(values.length, 2);
-  assert.equal(values[0].addressVirtual, values[1].addressVirtual, 'la dirección del scope anterior se reutiliza');
+  assert.equal(values[0].addressVirtual, values[1].addressVirtual, 'the previous scope’s address is reused');
   assert.notEqual(values[0].allocationId, values[1].allocationId);
 });
 
-test('reutilizar un address heap no convierte una copia vieja de un puntero en el bloque nuevo', () => {
+test('reusing a heap address does not turn an old pointer copy into the new block', () => {
   const run = runToTerminal(createDebugSession(program('heap-reuse-provenance.c'), undefined, { heapAddressSeed: 0 }));
   assert.equal(run.result.kind, 'runtime-error', JSON.stringify(run.result));
   assert.equal(run.result.diagnostics[0].code, 'INACTIVE_OBJECT');
@@ -1029,20 +1029,20 @@ test('reutilizar un address heap no convierte una copia vieja de un puntero en e
   assert.equal(created.length, 2);
   assert.equal(deleted.length, 1);
   assert.equal(created[0].addressVirtual, deleted[0].addressVirtual);
-  assert.equal(created[0].addressVirtual, created[1].addressVirtual, 'seed 0 permite verificar reutilización del primer hueco');
+  assert.equal(created[0].addressVirtual, created[1].addressVirtual, 'seed 0 verifies reuse of the first free slot');
 });
 
-test('memcpy conserva un puntero one-past y no lo confunde con la base de otra asignación', () => {
+test('memcpy preserves a one-past pointer and does not confuse it with another allocation’s base', () => {
   const run = runToTerminal(createDebugSession(program('heap-onepast-provenance.c'), undefined, { heapAddressSeed: 0 }));
   assert.equal(run.result.kind, 'runtime-error', JSON.stringify(run.result));
   assert.equal(run.result.diagnostics[0].code, 'POINTER_BOUNDS');
   const created = objects(run.events, 'object-create').filter((event) => event.origin === 'heap');
   assert.equal(created.length, 2);
   const firstEnd = created[0].addressVirtual + BigInt(created[0].size);
-  assert.ok(created[1].addressVirtual > firstEnd, 'el guard separa one-past de la base heap siguiente');
+  assert.ok(created[1].addressVirtual > firstEnd, 'the guard separates one-past from the next heap base');
 });
 
-test('free inválido y malloc fallido no generan eventos heap falsos', () => {
+test('invalid free and failed malloc produce no false heap events', () => {
   const invalidFree = runToTerminal(createDebugSession(program('invalid-interior-free.c')));
   assert.equal(invalidFree.result.kind, 'runtime-error');
   assert.equal(invalidFree.result.diagnostics[0].code, 'INVALID_FREE');
@@ -1060,7 +1060,7 @@ test('free inválido y malloc fallido no generan eventos heap falsos', () => {
   assert.equal(objects(allocation.events, 'object-create').filter((event) => event.origin === 'heap').length, 0);
 });
 
-test('realloc publica identidad nueva y ciclo heap coherente aunque conserve la dirección virtual', () => {
+test('realloc publishes a new identity and coherent heap lifecycle even when it keeps the virtual address', () => {
   const session = createDebugSession(program('realloc.c'), undefined, { heapAddressSeed: 0 });
   const run = runToTerminal(session);
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
@@ -1068,13 +1068,13 @@ test('realloc publica identidad nueva y ciclo heap coherente aunque conserve la 
 
   const created = objects(run.events, 'object-create').filter((event) => event.origin === 'heap');
   const deleted = objects(run.events, 'object-delete').filter((event) => event.origin === 'heap');
-  assert.equal(created.length, 2, 'realloc(NULL, n) y la reasignación crean bloques');
-  assert.equal(deleted.length, 1, 'la reasignación elimina el objeto anterior');
+  assert.equal(created.length, 2, 'realloc(NULL, n) and reassignment create blocks');
+  assert.equal(deleted.length, 1, 'reassignment removes the previous object');
   assert.equal(deleted[0].allocationId, created[0].allocationId);
   assert.notEqual(created[0].allocationId, created[1].allocationId);
   assert.equal(created[0].size, 4);
   assert.equal(created[1].size, 8);
-  assert.equal(created[0].addressVirtual, created[1].addressVirtual, 'el crecimiento cabe en el extent reservado');
+  assert.equal(created[0].addressVirtual, created[1].addressVirtual, 'growth fits in the reserved extent');
   assert.ok(run.events.findIndex((event) => event.kind === 'object-delete' && event.allocationId === created[0].allocationId) <
     run.events.findIndex((event) => event.kind === 'object-create' && event.allocationId === created[1].allocationId));
   assert.deepEqual(session.inspectHeapObjects(), [{
@@ -1086,7 +1086,7 @@ test('realloc publica identidad nueva y ciclo heap coherente aunque conserve la 
   assertLifecycleOnly(run.events);
 });
 
-test('realloc sin espacio conserva el bloque anterior y no emite eventos heap falsos', () => {
+test('realloc without space preserves the previous block and emits no false heap events', () => {
   const session = createDebugSession(program('realloc-failure.c'), undefined, { heapAddressSeed: 0 });
   const run = runToTerminal(session);
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
@@ -1098,7 +1098,7 @@ test('realloc sin espacio conserva el bloque anterior y no emite eventos heap fa
   assertLifecycleOnly(run.events);
 });
 
-test('realloc se mueve frente a un vecino, conserva datos, emite delete/create y libera el extent anterior', () => {
+test('realloc moves around a neighbor, preserves data, emits delete/create and releases the previous extent', () => {
   const run = runToTerminal(createDebugSession(program('realloc-move.c'), undefined, { heapAddressSeed: 0 }));
   assert.equal(run.result.kind, 'terminated', JSON.stringify(run.result));
   assert.equal(run.result.mainReturn, 0);
@@ -1108,12 +1108,12 @@ test('realloc se mueve frente a un vecino, conserva datos, emite delete/create y
   assert.equal(created.length, 4);
   assert.equal(deleted.length, 4);
   assert.equal(created[1].addressVirtual, created[0].addressVirtual + 32n,
-    'el segundo bloque ocupa el siguiente extent y bloquea el crecimiento en sitio');
+    'the second block occupies the next extent and prevents in-place growth');
   assert.equal(created[2].size, 40);
   assert.notEqual(created[2].addressVirtual, created[0].addressVirtual,
-    'realloc debe reservar otro extent cuando el vecino impide crecer');
+    'realloc must reserve another extent when a neighbor prevents growth');
   assert.equal(created[3].addressVirtual, created[0].addressVirtual,
-    'una nueva reserva reutiliza la dirección del extent viejo');
+    'a new reservation reuses the old extent’s address');
   assert.equal(deleted[0].allocationId, created[0].allocationId);
   assert.notEqual(created[2].allocationId, created[0].allocationId);
   assert.ok(run.events.findIndex((event) => event.kind === 'object-delete' && event.allocationId === created[0].allocationId) <
@@ -1121,7 +1121,7 @@ test('realloc se mueve frente a un vecino, conserva datos, emite delete/create y
   assertLifecycleOnly(run.events);
 });
 
-test('realloc no restaura provenance de puntero truncada aunque se reponga el byte faltante', () => {
+test('realloc does not restore truncated pointer provenance when the missing byte is written back', () => {
   const at = { file: 'realloc-provenance.test.c', line: 1, column: 1 };
   const memory = new VirtualMemory([], null, { peakMemoryBytes: 0 }, () => 0);
   const target = memory.allocateRaw(4, at);
@@ -1152,10 +1152,10 @@ test('realloc no restaura provenance de puntero truncada aunque se reponga el by
   const inspected = memory.inspectPointer(restoredSlot, at);
   assert.equal(inspected.initialized, true);
   assert.equal(inspected.status, 'unmapped');
-  assert.equal(inspected.target, undefined, 'los ocho bytes no reconstruyen la identidad del puntero original');
+  assert.equal(inspected.target, undefined, 'the eight bytes do not reconstruct the original pointer identity');
 });
 
-test('debug ejecuta stdio sobre stdin y archivos virtuales y conserva retornos, errno y salida', () => {
+test('debug runs stdio on stdin and virtual files and preserves return values, errno and output', () => {
   const source = `#include <errno.h>
 #include <stdio.h>
 int main(void) {
@@ -1198,7 +1198,7 @@ int main(void) {
   assertLifecycleOnly(run.events);
 });
 
-test('debug publica el prompt, suspende scanf parcialmente y reanuda la misma visita sin repetir &a[i++]', () => {
+test('debug publishes the prompt, partially suspends scanf and resumes the same visit without repeating &a[i++]', () => {
   const source = `#include <stdio.h>
 int main(void) {
   int values[2] = { 0, 0 };
@@ -1235,7 +1235,7 @@ int main(void) {
   session.appendStdin(new TextEncoder().encode('34\n'));
   const continued = session.resume();
   assert.equal(continued.kind, 'paused', JSON.stringify(continued));
-  assert.equal(continued.location.line, nextLine, 'la continuación se detiene antes de la instrucción de la línea siguiente');
+  assert.equal(continued.location.line, nextLine, 'continuation stops before the next line’s instruction');
   assert.equal(decodeBytes(continued.stdout), 'Numbers: ');
   assert.equal(session.inspectScalars().find((scalar) => scalar.name === 'index')?.displayValue, '1');
   const completed = session.inspectArrays().arrays.find((array) => array.name === 'values');
@@ -1247,7 +1247,7 @@ int main(void) {
   assert.equal(run.result.mainReturn, 0);
 });
 
-test('debug conserva fgets y fread parciales hasta EOF sticky sin volver a ejecutar la línea', () => {
+test('debug preserves partial fgets and fread through sticky EOF without re-executing the line', () => {
   const source = `#include <stdio.h>
 int main(void) {
   char line[8] = { 0 };
@@ -1289,7 +1289,7 @@ int main(void) {
   assert.equal(run.result.mainReturn, 0);
 });
 
-test('debug comparte maxIOBytes y conserva snapshots de stdout y stderr al limitar', () => {
+test('debug shares maxIOBytes and preserves stdout and stderr snapshots when limited', () => {
   const prepared = prepareProject(prepare, {
     entry: 'debug-stdio-limit.c',
     files: [{
@@ -1310,7 +1310,7 @@ test('debug comparte maxIOBytes y conserva snapshots de stdout y stderr al limit
   assert.equal(decodeBytes(limited.stderr), 'E');
 });
 
-test('los límites de eventos conservan un prefijo y no mutan memoria tras agotarse', () => {
+test('event limits preserve a prefix and do not mutate memory after exhaustion', () => {
   const prepared = program('debug-heap-first-line.c');
   const baseline = createDebugSession(prepared);
   const setupEvents = baseline.drainEvents();
@@ -1335,7 +1335,7 @@ test('los límites de eventos conservan un prefijo y no mutan memoria tras agota
   assertLifecycleOnly([...initialEvents, ...firstEvents]);
 });
 
-test('el límite de eventos reserva la publicación de parámetros antes de escribir su argumento', () => {
+test('the event limit reserves parameter publication before writing its argument', () => {
   const prepared = prepareProject(prepare, {
     entry: 'debug-parameter-event-budget.c',
     files: [{ name: 'debug-parameter-event-budget.c', source: `int echo(int value) {
@@ -1362,7 +1362,7 @@ int main(void) {
   assert.equal(prefix.length, setupEvents.length + 2);
   const pendingFrame = objects(prefix, 'frame-enter').find((event) => event.functionName === 'echo');
   const pendingScope = objects(prefix, 'scope-enter').find((event) => event.frameId === pendingFrame?.frameId);
-  assert.ok(pendingFrame && pendingScope, 'se conserva el prefijo confirmado de entrada al frame y scope');
+  assert.ok(pendingFrame && pendingScope, 'the confirmed prefix entering the frame and scope is preserved');
   assert.equal(objects(prefix, 'object-create').some((event) => event.name === 'value'), false);
   assert.equal(beforeParameterCreate.inspectScalars().some((scalar) => scalar.name === 'value'), false);
 
@@ -1370,14 +1370,14 @@ int main(void) {
   const run = runToTerminal(afterParameterCreate);
   assert.equal(run.result.kind, 'debug-limit');
   const parameterCreate = objects(run.events, 'object-create').find((event) => event.name === 'value');
-  assert.ok(parameterCreate, 'el presupuesto confirma el object-create del parámetro antes de agotarse');
+  assert.ok(parameterCreate, 'the budget confirms the parameter object-create event before exhaustion');
   assert.equal(parameterCreate.origin, 'parameter');
   assert.deepEqual(afterParameterCreate.inspectScalars().map((scalar) => ({ name: scalar.name, origin: scalar.origin, initialized: scalar.initialized, displayValue: scalar.displayValue })), [
     { name: 'value', origin: 'parameter', initialized: true, displayValue: '42' },
   ]);
 });
 
-test('las opciones debug nulas explícitas producen un diagnóstico', () => {
+test('explicit null debug options produce a diagnostic', () => {
   const session = createDebugSession(program('recursion-frames.c'), undefined, null);
   const result = session.resume();
   assert.equal(result.kind, 'runtime-error');
@@ -1385,7 +1385,7 @@ test('las opciones debug nulas explícitas producen un diagnóstico', () => {
   assert.deepEqual(session.drainEvents(), []);
 });
 
-test('el límite de instrucciones no fabrica salidas de scope o frame', () => {
+test('the instruction limit does not fabricate scope or frame exits', () => {
   const run = runToTerminal(createDebugSession(
     program('instruction-limit.c'), { limits: { maxInstructions: 6 } },
   ));
@@ -1398,7 +1398,7 @@ test('el límite de instrucciones no fabrica salidas de scope o frame', () => {
   assert.deepEqual(objects(run.events, 'object-delete'), []);
 });
 
-test('debug conserva argv y stdin iniciales, y la sesión normal conserva su contrato interactivo', () => {
+test('debug preserves initial argv and stdin, and the normal session keeps its interactive contract', () => {
   const argvProgram = prepareProject(prepare, {
     entry: 'debug-argv.c',
     files: [{
@@ -1436,7 +1436,7 @@ test('debug conserva argv y stdin iniciales, y la sesión normal conserva su con
   assert.equal(batch.metrics.peakMemoryBytes, finished.metrics.peakMemoryBytes);
 });
 
-test('la instrumentación conserva las métricas y la sesión normal no expone eventos', () => {
+test('instrumentation preserves metrics, and the normal session exposes no events', () => {
   const prepared = program('lifecycle-roots-scopes.c');
   const normal = execute(prepared);
   const debugSession = createDebugSession(prepared);
@@ -1454,7 +1454,7 @@ test('la instrumentación conserva las métricas y la sesión normal no expone e
   assert.equal('inspectArrays' in ordinarySession, false);
 });
 
-test('los roots de memoria conservan identidad, duración y ubicación', () => {
+test('memory roots preserve identity, duration and location', () => {
   const prepared = program('lifecycle-roots-scopes.c');
   const session = createDebugSession(prepared);
   const run = runToTerminal(session);
@@ -1495,21 +1495,21 @@ test('los roots de memoria conservan identidad, duración y ubicación', () => {
   for (const event of events) {
     if (event.kind === 'object-create') {
       const range = rangesByDuration[event.duration];
-      assert.ok(range, `duración conocida: ${event.duration}`);
+      assert.ok(range, `known duration: ${event.duration}`);
       assert.ok(event.addressVirtual >= range.start);
       assert.ok(event.addressVirtual + BigInt(event.size) + BigInt(VIRTUAL_MEMORY_LAYOUT.guardBytes) <= range.endExclusive,
-        'el objeto y su guard quedan dentro de su región');
+        'the object and its guard remain within their region');
       assert.equal(event.addressVirtual % BigInt(VIRTUAL_MEMORY_LAYOUT.alignmentBytes), 0n);
       for (const prior of liveAddresses.values()) {
         const priorEnd = prior.address + BigInt(prior.size);
         const eventEnd = event.addressVirtual + BigInt(event.size);
         assert.ok(priorEnd + BigInt(VIRTUAL_MEMORY_LAYOUT.guardBytes) <= event.addressVirtual ||
           eventEnd + BigInt(VIRTUAL_MEMORY_LAYOUT.guardBytes) <= prior.address,
-        'los objetos vivos no se solapan y el guard separa one-past de una base vecina');
+        'live objects do not overlap, and the guard separates one-past from a neighboring base');
       }
       liveAddresses.set(event.allocationId, { address: event.addressVirtual, size: event.size });
     } else if (event.kind === 'object-delete') {
-      assert.ok(liveAddresses.delete(event.allocationId), 'la eliminación corresponde a un objeto vivo');
+      assert.ok(liveAddresses.delete(event.allocationId), 'deletion corresponds to a live object');
     }
   }
   assert.ok(created.every((event) => event.location.line > 0 && event.location.column > 0));
@@ -1541,7 +1541,7 @@ test('los roots de memoria conservan identidad, duración y ubicación', () => {
   assertLifecycleOnly(events);
 });
 
-test('la sesión debug inspecciona escalares automáticos vivos sin leer los no inicializados', () => {
+test('the debug session inspects live automatic scalars without reading uninitialized values', () => {
   assert.deepEqual(CAPABILITIES.debugSession.values, {
     liveAutomaticScalars: true,
     liveStaticScalars: true,
@@ -1564,11 +1564,11 @@ test('la sesión debug inspecciona escalares automáticos vivos sin leer los no 
   const creates = objects(initialEvents, 'object-create');
   const firstLocation = session.currentLocation();
   const before = session.inspectScalars();
-  assert.deepEqual(before, [], 'main ya tiene scope activo, pero ninguna declaración local ejecutada');
+  assert.deepEqual(before, [], 'main already has an active scope, but no local declaration has executed');
   assert.equal(creates.some((event) => event.duration === 'automatic'), false);
-  assert.deepEqual(session.currentLocation(), firstLocation, 'la inspección no avanza la VM');
-  assert.deepEqual(session.drainEvents(), [], 'la inspección no genera eventos');
-  assert.deepEqual(structuredClone(before), before, 'los DTO son serializables');
+  assert.deepEqual(session.currentLocation(), firstLocation, 'inspection does not advance the VM');
+  assert.deepEqual(session.drainEvents(), [], 'inspection does not generate events');
+  assert.deepEqual(structuredClone(before), before, 'DTOs are serializable');
 
   const observations = [];
   const events = initialEvents.slice();
@@ -1586,56 +1586,56 @@ test('la sesión debug inspecciona escalares automáticos vivos sin leer los no 
   const createById = new Map(allCreates.map((event) => [event.allocationId, event]));
   for (const scalar of all) {
     const created = createById.get(scalar.id);
-    assert.ok(created, `${scalar.name} comparte ID con su object-create real`);
+    assert.ok(created, `${scalar.name} shares an ID with its actual object-create event`);
     assert.equal(created.scopeId, scalar.scopeId);
     assert.equal(created.frameId, scalar.frameId);
     assert.equal(created.origin, scalar.origin);
     assert.equal(scalar.address, `0x${created.addressVirtual.toString(16)}`);
     assert.equal(scalar.size, created.size);
   }
-  assert.deepEqual(objects(observations[0].emitted, 'object-create').map((event) => event.name), ['largo']);
+  assert.deepEqual(objects(observations[0].emitted, 'object-create').map((event) => event.name), ['long_value']);
   assert.deepEqual(observations[0].scalars.map((scalar) => [scalar.name, scalar.initialized, scalar.displayValue]), [
-    ['largo', true, '9007199254740993'],
+    ['long_value', true, '9007199254740993'],
   ]);
   const hasValue = (name, type, value) => all.some((scalar) => scalar.name === name && scalar.type === type && scalar.displayValue === value);
-  assert.ok(hasValue('largo', 'long', '9007199254740993'));
-  assert.ok(hasValue('muy_largo', 'long long', '-9223372036854775808'));
-  assert.ok(hasValue('sin_signo', 'unsigned long long', '18446744073709551615'));
-  assert.ok(hasValue('activo', '_Bool', '1'));
-  assert.ok(hasValue('letra', 'char', "'C'"));
-  assert.ok(hasValue('nueva_linea', 'char', "'\\n'"));
-  assert.ok(hasValue('corto', 'short', '-1234'));
-  assert.ok(hasValue('decimal', 'float', '3.5'));
-  assert.ok(hasValue('precision', 'double', '2.718281828459045'));
-  assert.ok(hasValue('cero_negativo', 'double', '-0'));
-  assert.ok(hasValue('estado', 'enum Estado', '4'), 'el snapshot conserva el tipo enum y su representación int');
-  assert.ok(all.filter((scalar) => scalar.name === 'pendiente').every((scalar) => !scalar.initialized && scalar.displayValue === '?'));
+  assert.ok(hasValue('long_value', 'long', '9007199254740993'));
+  assert.ok(hasValue('very_long', 'long long', '-9223372036854775808'));
+  assert.ok(hasValue('unsigned_value', 'unsigned long long', '18446744073709551615'));
+  assert.ok(hasValue('active', '_Bool', '1'));
+  assert.ok(hasValue('letter', 'char', "'C'"));
+  assert.ok(hasValue('newline', 'char', "'\\n'"));
+  assert.ok(hasValue('short_value', 'short', '-1234'));
+  assert.ok(hasValue('decimal_value', 'float', '3.5'));
+  assert.ok(hasValue('precision_value', 'double', '2.718281828459045'));
+  assert.ok(hasValue('negative_zero', 'double', '-0'));
+  assert.ok(hasValue('status', 'enum Status', '4'), 'the snapshot preserves the enum type and its int representation');
+  assert.ok(all.filter((scalar) => scalar.name === 'uninitialized').every((scalar) => !scalar.initialized && scalar.displayValue === '?'));
   assert.ok(all.some((scalar) => scalar.name === 'mutable' && scalar.displayValue === '1'));
-  assert.ok(all.some((scalar) => scalar.name === 'mutable' && scalar.displayValue === '2'), 'la asignación posterior se refleja sin evento de escritura');
+  assert.ok(all.some((scalar) => scalar.name === 'mutable' && scalar.displayValue === '2'), 'the later assignment is reflected without a write event');
 
-  const temporal = all.find((scalar) => scalar.name === 'temporal');
-  assert.ok(temporal);
-  const laterSnapshots = observations.slice(observations.findIndex((item) => item.scalars.some((scalar) => scalar.id === temporal.id)) + 1);
-  assert.ok(laterSnapshots.some((item) => !item.scalars.some((scalar) => scalar.id === temporal.id)), 'el valor desaparece al cerrar el scope');
-  assert.ok(all.some((scalar) => scalar.name === 'parametro' && scalar.displayValue === '2'));
-  assert.ok(all.some((scalar) => scalar.name === 'parametro' && scalar.origin === 'parameter'));
+  const temporary = all.find((scalar) => scalar.name === 'temporary');
+  assert.ok(temporary);
+  const laterSnapshots = observations.slice(observations.findIndex((item) => item.scalars.some((scalar) => scalar.id === temporary.id)) + 1);
+  assert.ok(laterSnapshots.some((item) => !item.scalars.some((scalar) => scalar.id === temporary.id)), 'the value disappears when its scope closes');
+  assert.ok(all.some((scalar) => scalar.name === 'parameter' && scalar.displayValue === '2'));
+  assert.ok(all.some((scalar) => scalar.name === 'parameter' && scalar.origin === 'parameter'));
   assert.ok(all.some((scalar) => scalar.name === 'local' && scalar.displayValue === '2'));
   assert.ok(all.some((scalar) => scalar.name === 'local' && scalar.origin === 'variable'));
   assert.ok(all.some((scalar) => scalar.name === 'local' && scalar.displayValue === '3'));
-  const adjustFrame = objects(events, 'frame-enter').find((event) => event.functionName === 'ajustar');
+  const adjustFrame = objects(events, 'frame-enter').find((event) => event.functionName === 'adjust');
   const adjustScope = objects(events, 'scope-enter').find((event) => event.frameId === adjustFrame.frameId);
-  const parameterCreate = allCreates.find((event) => event.name === 'parametro');
+  const parameterCreate = allCreates.find((event) => event.name === 'parameter');
   const firstLocalCreate = allCreates.find((event) => event.name === 'local');
   assert.ok(adjustFrame.sequence < adjustScope.sequence && adjustScope.sequence < parameterCreate.sequence);
-  assert.ok(parameterCreate.sequence < firstLocalCreate.sequence, 'el parámetro se publica al entrar, antes de la primera declaración local');
+  assert.ok(parameterCreate.sequence < firstLocalCreate.sequence, 'the parameter is published on entry, before the first local declaration');
   assert.equal(parameterCreate.origin, 'parameter');
   assert.equal(firstLocalCreate.origin, 'variable');
   assert.equal(parameterCreate.frameId, adjustFrame.frameId);
-  assert.deepEqual(session.inspectScalars(), [], 'el retorno normal cierra los scopes y sus objetos');
+  assert.deepEqual(session.inspectScalars(), [], 'normal return closes scopes and their objects');
   assert.equal(session.currentLocation(), null);
 });
 
-test('los snapshots debug muestran binary80 exacto en escalares, arrays y campos serializables', () => {
+test('debug snapshots show exact binary80 in scalars, arrays and serializable fields', () => {
   const session = createDebugSession(program('long-double-values.c'));
   const pause = pauseBeforeLine(session, 14);
   assert.equal(pause.kind, 'paused');
@@ -1654,10 +1654,10 @@ test('los snapshots debug muestran binary80 exacto en escalares, arrays y campos
     .find((member) => member.name === 'precise')?.displayValue, precise);
   const snapshots = { scalars, arrays, aggregates };
   assert.deepEqual(JSON.parse(JSON.stringify(snapshots)), snapshots,
-    'los DTO publican binary80 como texto sin filtrar valores internos no serializables');
+    'DTOs publish binary80 as text without leaking nonserializable internal values');
 });
 
-test('los parámetros recursivos conservan origen, frame y scope hasta el retorno de cada activación', () => {
+test('recursive parameters preserve origin, frame and scope until each activation returns', () => {
   const session = createDebugSession(program('recursion-frames.c'));
   const events = [...session.drainEvents()];
   const snapshots = [];
@@ -1673,7 +1673,7 @@ test('los parámetros recursivos conservan origen, frame y scope hasta el retorn
 
   const deepest = snapshots.find((snapshot) => snapshot.filter((scalar) => scalar.name === 'remaining').length === 4 &&
     snapshot.filter((scalar) => scalar.name === 'saved').length === 4);
-  assert.ok(deepest, 'se observan a la vez las cuatro activaciones recursivas');
+  assert.ok(deepest, 'all four recursive activations are observed at once');
   const parameters = deepest.filter((scalar) => scalar.name === 'remaining');
   const locals = deepest.filter((scalar) => scalar.name === 'saved');
   assert.equal(new Set(parameters.map((scalar) => scalar.frameId)).size, 4);
@@ -1683,13 +1683,13 @@ test('los parámetros recursivos conservan origen, frame y scope hasta el retorn
   assert.deepEqual(locals.map((scalar) => scalar.origin), ['variable', 'variable', 'variable', 'variable']);
   for (const parameter of parameters) {
     const local = locals.find((scalar) => scalar.frameId === parameter.frameId);
-    assert.ok(local, `la variable local comparte la activación ${parameter.frameId}`);
-    assert.equal(local.scopeId, parameter.scopeId, 'parámetro y local comparten el scope raíz de la función');
+    assert.ok(local, `the local variable shares activation ${parameter.frameId}`);
+    assert.equal(local.scopeId, parameter.scopeId, 'the parameter and local share the function’s root scope');
     assert.notEqual(local.id, parameter.id);
     assert.notEqual(local.address, parameter.address);
   }
-  assert.equal(new Set(deepest.map((scalar) => scalar.id)).size, deepest.length, 'las celdas vivas no aliasan sus asignaciones');
-  assert.equal(new Set(deepest.map((scalar) => scalar.address)).size, deepest.length, 'las celdas vivas tienen direcciones distintas');
+  assert.equal(new Set(deepest.map((scalar) => scalar.id)).size, deepest.length, 'live cells do not alias their allocations');
+  assert.equal(new Set(deepest.map((scalar) => scalar.address)).size, deepest.length, 'live cells have distinct addresses');
 
   const creates = objects(events, 'object-create');
   const deletes = new Map(objects(events, 'object-delete').map((event) => [event.allocationId, event]));
@@ -1706,15 +1706,15 @@ test('los parámetros recursivos conservan origen, frame y scope hasta el retorn
   }
   for (const created of creates) {
     const deleted = deletes.get(created.allocationId);
-    assert.ok(deleted, `el retorno elimina ${created.name} de su activación`);
+    assert.ok(deleted, `return removes ${created.name} from its activation`);
     assert.equal(deleted.frameId, created.frameId);
     assert.equal(deleted.scopeId, created.scopeId);
     assert.equal(deleted.origin, created.origin);
   }
-  assert.deepEqual(session.inspectScalars(), [], 'todas las activaciones y parámetros desaparecen al retornar');
+  assert.deepEqual(session.inspectScalars(), [], 'all activations and parameters disappear on return');
 });
 
-test('la inspección conserva objetos vivos al detenerse por error y no inventa unwinds', () => {
+test('inspection preserves live objects after an error and does not invent unwinds', () => {
   const prepared = prepareProject(prepare, {
     entry: 'debug-inspection-error.c',
     files: [{ name: 'debug-inspection-error.c', source: 'int main(void) {\n  int keep = 7;\n  int broken = 1 / 0;\n  return 0;\n}\n' }],
@@ -1729,11 +1729,11 @@ test('la inspección conserva objetos vivos al detenerse por error y no inventa 
   ]);
   const events = session.drainEvents();
   assert.deepEqual(objects(events, 'object-create').map((event) => event.name), ['keep', 'broken']);
-  assert.deepEqual(objects(events, 'object-delete'), [], 'el error no elimina objetos vivos');
-  assert.equal(objects(events, 'scope-exit').length, 0, 'el error no sintetiza cierres');
+  assert.deepEqual(objects(events, 'object-delete'), [], 'an error does not remove live objects');
+  assert.equal(objects(events, 'scope-exit').length, 0, 'an error does not synthesize exits');
 });
 
-test('inspectPointers separa la dirección propia del valor, observa NULL y no ejecuta lecturas C', () => {
+test('inspectPointers separates an object’s own address from its value, observes NULL and performs no C reads', () => {
   const prepared = prepareProject(prepare, {
     entry: 'debug-pointers-basic.c',
     files: [{ name: 'debug-pointers-basic.c', source: `int *global_pointer;
@@ -1769,10 +1769,10 @@ int main(void) {
   const repeated = session.inspectPointers();
   assert.deepEqual(session.inspectPointers(), repeated);
   assert.deepEqual(session.currentLocation(), stableLocation);
-  assert.deepEqual(session.drainEvents(), [], 'inspeccionar no genera eventos');
+  assert.deepEqual(session.drainEvents(), [], 'inspection does not generate events');
   assert.equal(Object.isFrozen(repeated), true);
   assert.equal(Object.isFrozen(uninitialized), true);
-  assert.deepEqual(structuredClone(repeated), repeated, 'los snapshots se serializan sin convertir direcciones a Number');
+  assert.deepEqual(structuredClone(repeated), repeated, 'snapshots serialize without converting addresses to Number');
 
   assert.equal(pauseBeforeLine(session, 7).kind, 'paused');
   const pointsToN = session.inspectPointers().find((pointer) => pointer.name === 'p');
@@ -1787,7 +1787,7 @@ int main(void) {
 
   assert.equal(pauseBeforeLine(session, 8).kind, 'paused');
   const afterIndirectWrite = session.inspectPointers().find((pointer) => pointer.name === 'p');
-  assert.deepEqual(afterIndirectWrite, pointsToN, 'escribir *p no altera la identidad ni produce un valor target');
+  assert.deepEqual(afterIndirectWrite, pointsToN, 'writing *p does not change identity or produce a target value');
   assert.equal(session.inspectScalars().find((scalar) => scalar.name === 'n')?.displayValue, '9');
 
   assert.equal(pauseBeforeLine(session, 9).kind, 'paused');
@@ -1795,7 +1795,7 @@ int main(void) {
   const other = session.inspectScalars().find((scalar) => scalar.name === 'other');
   assert.ok(pointsToOther && other);
   assert.equal(pointsToOther.id, pointsToN.id);
-  assert.equal(pointsToOther.address, pointsToN.address, 'la dirección de p no depende de su valor');
+  assert.equal(pointsToOther.address, pointsToN.address, 'p’s address does not depend on its value');
   assert.equal(pointsToOther.displayValue, other.address);
   assert.equal(pointsToOther.target?.name, 'other');
 
@@ -1809,19 +1809,19 @@ int main(void) {
   assert.equal(nullPointer.displayValue, '0x0');
   const result = runToTerminal(session).result;
   assert.equal(result.kind, 'terminated', JSON.stringify(result));
-  assert.equal(result.mainReturn, 0, 'la escritura mediante *p tuvo efecto en C');
+  assert.equal(result.mainReturn, 0, 'the write through *p took effect in C');
 });
 
-test('inspectPointers expone offsets exactos para celdas de arrays, cadenas y terminadores sin mutar historial', () => {
+test('inspectPointers exposes exact offsets for array cells, strings and terminators without mutating history', () => {
   const source = `int main(void) {
   int a[3] = { 10, 20, 30 };
   int *p = &a[0];
   p++;
   *p = 99;
-  char texto[] = "hola";
-  char *q = texto;
+  char text[] = "code";
+  char *q = text;
   q++;
-  char *terminator = texto + 4;
+  char *terminator = text + 4;
   int *one_past = a + 3;
   char *interior_byte = (char *)a + 1;
   int large[11] = { 0 };
@@ -1848,7 +1848,7 @@ test('inspectPointers expone offsets exactos para celdas de arrays, cadenas y te
   assert.equal(pointerBeforeWrite.status, 'live');
   assert.equal(pointerBeforeWrite.target?.allocationId, intArrayBeforeWrite.rootId);
   assert.equal(pointerBeforeWrite.target?.type, 'int');
-  assert.equal(pointerBeforeWrite.target?.byteOffset, 4, 'p++ conserva el offset byte-exacto de a[1]');
+  assert.equal(pointerBeforeWrite.target?.byteOffset, 4, 'p++ preserves the byte-exact offset of a[1]');
   const exactCell = (pointer, array) => array.elements.find((element) =>
     element.type === pointer.target?.type &&
     BigInt(element.address) - BigInt(array.address) === BigInt(pointer.target?.byteOffset ?? -1));
@@ -1861,7 +1861,7 @@ test('inspectPointers expone offsets exactos para celdas de arrays, cadenas y te
   assert.equal(Object.isFrozen(intArrayBeforeWrite.elements), true);
   assert.equal(Object.isFrozen(intArrayBeforeWrite.elements[1]), true);
   assert.deepEqual(session.currentLocation(), locationBeforeInspection);
-  assert.deepEqual(session.drainEvents(), [], 'inspeccionar el puntero no emite lecturas C ni eventos');
+  assert.deepEqual(session.drainEvents(), [], 'inspecting the pointer emits no C reads or events');
 
   const returnLine = source.split('\n').findIndex((line) => line.trim().startsWith('return a[1] == 99')) + 1;
   assert.equal(pauseBeforeLine(session, returnLine).kind, 'paused');
@@ -1871,15 +1871,15 @@ test('inspectPointers expone offsets exactos para celdas de arrays, cadenas y te
   const pointers = session.inspectPointers();
   const arraysAfterWrite = session.inspectArrays();
   const intArray = arraysAfterWrite.arrays.find((array) => array.name === 'a');
-  const textArray = arraysAfterWrite.arrays.find((array) => array.name === 'texto');
+  const textArray = arraysAfterWrite.arrays.find((array) => array.name === 'text');
   const largeArray = arraysAfterWrite.arrays.find((array) => array.name === 'large');
   const matrix = arraysAfterWrite.arrays.find((array) => array.name === 'matrix');
   assert.ok(intArray && textArray && largeArray && matrix);
   assert.deepEqual(intArray.elements.map((element) => element.displayValue), ['10', '99', '30']);
   assert.deepEqual(intArrayBeforeWrite.elements.map((element) => element.displayValue), ['10', '20', '30'],
-    'el historial conserva el snapshot previo a *p = 99');
+    'history preserves the snapshot from before *p = 99');
   assert.deepEqual(pointerBeforeWrite, session.inspectPointers().find((pointer) => pointer.name === 'p'),
-    'el snapshot de p permanece estable después de ejecutar la escritura indirecta');
+    'p’s snapshot remains stable after the indirect write executes');
 
   const q = pointers.find((pointer) => pointer.name === 'q');
   const terminator = pointers.find((pointer) => pointer.name === 'terminator');
@@ -1887,48 +1887,48 @@ test('inspectPointers expone offsets exactos para celdas de arrays, cadenas y te
   assert.ok(q && terminator && onePast);
   assert.equal(q.status, 'live');
   assert.equal(q.target?.allocationId, textArray.rootId);
-  assert.equal(q.target?.byteOffset, 1, 'q++ avanza una celda char');
+  assert.equal(q.target?.byteOffset, 1, 'q++ advances by one char cell');
   assert.equal(q.target?.type, 'char');
   assert.equal(exactCell(q, textArray)?.index, 1);
   assert.equal(terminator.target?.allocationId, textArray.rootId);
   assert.equal(terminator.target?.byteOffset, 4);
   const nulCell = exactCell(terminator, textArray);
   assert.equal(nulCell?.index, 4);
-  assert.equal(nulCell?.displayValue, "'\\0'", 'el NUL final es una celda real del array de char');
+  assert.equal(nulCell?.displayValue, "'\\0'", 'the final NUL is a real cell in the char array');
   assert.equal(onePast.status, 'one-past');
   assert.equal(onePast.target?.allocationId, intArray.rootId);
   assert.equal(onePast.target?.byteOffset, intArray.size);
-  assert.equal(exactCell(onePast, intArray), undefined, 'one-past no coincide con una celda visible');
+  assert.equal(exactCell(onePast, intArray), undefined, 'one-past does not match a visible cell');
   const interiorByte = pointers.find((pointer) => pointer.name === 'interior_byte');
   const largeLast = pointers.find((pointer) => pointer.name === 'large_last');
   const matrixCell = pointers.find((pointer) => pointer.name === 'matrix_cell');
   assert.ok(interiorByte && largeLast && matrixCell);
   assert.equal(interiorByte.target?.allocationId, intArray.rootId);
   assert.equal(interiorByte.target?.byteOffset, 1);
-  assert.equal(exactCell(interiorByte, intArray), undefined, 'un byte interior no coincide con una celda int alineada');
+  assert.equal(exactCell(interiorByte, intArray), undefined, 'an interior byte does not match an aligned int cell');
   assert.equal(largeArray.status, 'too-many-elements');
   assert.deepEqual(largeArray.elements, []);
   assert.equal(largeLast.target?.allocationId, largeArray.rootId);
   assert.equal(largeLast.target?.byteOffset, 40);
-  assert.equal(exactCell(largeLast, largeArray), undefined, 'un array placeholder no publica celdas enlazables');
+  assert.equal(exactCell(largeLast, largeArray), undefined, 'an array placeholder publishes no bindable cells');
   assert.equal(matrix.status, 'multidimensional');
   assert.deepEqual(matrix.elements, []);
   assert.equal(matrixCell.target?.allocationId, matrix.rootId);
   assert.equal(matrixCell.target?.byteOffset, 0);
-  assert.equal(exactCell(matrixCell, matrix), undefined, 'una matriz no se aplana como array unidimensional');
+  assert.equal(exactCell(matrixCell, matrix), undefined, 'a matrix is not flattened into a one-dimensional array');
   assert.equal(Object.isFrozen(pointers), true);
   assert.equal(Object.isFrozen(q), true);
   assert.equal(Object.isFrozen(q.target), true);
   assert.deepEqual(structuredClone({ pointers, arraysAfterWrite }), { pointers, arraysAfterWrite });
   assert.deepEqual(session.currentLocation(), locationAtReturn);
-  assert.deepEqual(session.drainEvents(), [], 'consultar arrays y punteros no cambia ubicación ni eventos');
+  assert.deepEqual(session.drainEvents(), [], 'querying arrays and pointers does not change location or events');
 
   const result = runToTerminal(session).result;
   assert.equal(result.kind, 'terminated', JSON.stringify(result));
-  assert.equal(result.mainReturn, 0, 'p++ y la escritura por *p conservan la semántica C');
+  assert.equal(result.mainReturn, 0, 'p++ and the write through *p preserve C semantics');
 });
 
-test('inspectPointers conserva identidad de parámetros, sombras y static locals', () => {
+test('inspectPointers preserves the identity of parameters, shadowed variables and static locals', () => {
   const prepared = prepareProject(prepare, {
     entry: 'debug-pointers-scopes.c',
     files: [{ name: 'debug-pointers-scopes.c', source: `void inspect(int *p) {
@@ -1961,7 +1961,7 @@ int main(void) {
   const shadowed = snapshots.find((snapshot) =>
     snapshot.filter((pointer) => pointer.name === 'p').length === 2 &&
     snapshot.some((pointer) => pointer.name === 'saved' && pointer.duration === 'static'));
-  assert.ok(shadowed, 'la activación muestra el parámetro y el puntero local sombreado');
+  assert.ok(shadowed, 'the activation shows the parameter and shadowed local pointer');
   const pBindings = shadowed.filter((pointer) => pointer.name === 'p');
   assert.equal(pBindings[0].origin, 'parameter');
   assert.equal(pBindings[1].origin, 'variable');
@@ -1979,7 +1979,7 @@ int main(void) {
   assert.equal(saved.target?.name, 'target');
 });
 
-test('un target dangling de array no se asocia con las celdas de otro allocation vivo', () => {
+test('a dangling array target is not associated with cells from another live allocation', () => {
   const source = `int *saved;
 void leave(void) {
   int retired[2] = { 1, 2 };
@@ -2009,16 +2009,16 @@ int main(void) {
   assert.equal(current.status, 'live');
   assert.equal(current.target.allocationId, replacement.rootId);
   assert.notEqual(saved.target.allocationId, replacement.rootId,
-    'la identidad retirada nunca se asigna al array actual');
+    'a retired identity is never assigned to the current array');
   assert.equal(arrays.some((array) => array.rootId === saved.target?.allocationId), false,
-    'el allocation retired no tiene celdas vivas en el snapshot actual');
+    'the retired allocation has no live cells in the current snapshot');
   assert.equal(current.target.type, replacement.elementType);
   assert.equal(current.target.byteOffset, 0);
   assert.equal(Object.isFrozen(saved.target), true);
   assert.equal(Object.isFrozen(current.target), true);
 });
 
-test('un pointer dangling no se religa a otro objeto cuando Stack reutiliza su dirección', () => {
+test('a dangling pointer is not rebound to another object when Stack reuses its address', () => {
   const prepared = prepareProject(prepare, {
     entry: 'debug-pointers-reuse.c',
     files: [{ name: 'debug-pointers-reuse.c', source: `int *saved;
@@ -2054,17 +2054,17 @@ int main(void) {
     const current = snapshot.find((pointer) => pointer.name === 'current');
     return saved?.status === 'dangling' && current?.status === 'live';
   });
-  assert.ok(reused, 'se observan simultáneamente el valor dangling y el objeto nuevo');
+  assert.ok(reused, 'the dangling value and new object are observed simultaneously');
   const saved = reused.find((pointer) => pointer.name === 'saved');
   const current = reused.find((pointer) => pointer.name === 'current');
   assert.ok(saved?.target && current?.target);
-  assert.equal(saved.displayValue, current.displayValue, 'la dirección virtual fue reutilizada');
-  assert.notEqual(saved.target.allocationId, current.target.allocationId, 'la identidad de allocation evita enlazar el objeto nuevo');
-  assert.equal(saved.target.name, undefined, 'no se infiere el nombre por la dirección reutilizada');
+  assert.equal(saved.displayValue, current.displayValue, 'the virtual address was reused');
+  assert.notEqual(saved.target.allocationId, current.target.allocationId, 'allocation identity prevents binding to the new object');
+  assert.equal(saved.target.name, undefined, 'the name is not inferred from the reused address');
   assert.equal(current.target.name, 'replacement');
 });
 
-test('inspectPointers conserva estados one-past, interiores, function y bytes sin identidad', () => {
+test('inspectPointers preserves one-past, interior, function and identity-free byte states', () => {
   const prepared = prepareProject(prepare, {
     entry: 'debug-pointers-statuses.c',
     files: [{ name: 'debug-pointers-statuses.c', source: `int add_one(int value) { return value + 1; }
@@ -2091,7 +2091,7 @@ int main(void) {
   assert.ok(values);
   assert.equal(interior.status, 'live');
   assert.equal(interior.target?.byteOffset, 4);
-  assert.equal(interior.target?.name, undefined, 'un offset interior no hereda el nombre del array root');
+  assert.equal(interior.target?.name, undefined, 'an interior offset does not inherit the array root name');
   assert.equal(onePast.status, 'one-past');
   assert.equal(onePast.target?.byteOffset, 8);
   assert.equal(onePast.target?.name, undefined);
@@ -2100,10 +2100,10 @@ int main(void) {
   assert.equal(functionPointer.target, undefined);
   assert.equal(unmapped.status, 'unmapped');
   assert.equal(unmapped.displayValue, `0x${(BigInt(values.address) + 1n).toString(16)}`);
-  assert.equal(unmapped.target, undefined, 'los bytes por sí solos no recuperan identidad por dirección');
+  assert.equal(unmapped.target, undefined, 'bytes alone do not recover identity from an address');
   const location = session.currentLocation();
   session.drainEvents();
   assert.deepEqual(session.inspectPointers(), pointers);
   assert.deepEqual(session.currentLocation(), location);
-  assert.deepEqual(session.drainEvents(), [], 'clasificar representaciones no añade eventos ni diagnósticos');
+  assert.deepEqual(session.drainEvents(), [], 'classifying representations adds no events or diagnostics');
 });

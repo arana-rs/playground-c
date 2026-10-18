@@ -111,22 +111,22 @@ function selectGenericAssociation(
   const seenAssociationTypes: CType[] = [];
   for (const association of associations) {
     if (!association.type) {
-      if (defaultExpression) failure('TYPE_ERROR', '_Generic no puede repetir la asociación default.', association.location);
+      if (defaultExpression) failure('TYPE_ERROR', '_Generic cannot repeat the default association.', association.location);
       defaultExpression = association.expression;
       continue;
     }
     const associationType = association.type;
     if (!isComplete(associationType, aggregates) || isFunction(associationType) || unqualifiedType(associationType) === 'void') {
-      failure('TYPE_ERROR', 'Una asociación de _Generic debe nombrar un tipo de objeto completo.', association.location);
+      failure('TYPE_ERROR', 'A _Generic association must name a complete object type.', association.location);
     }
     if (seenAssociationTypes.some((prior) => compatibleType(prior, associationType))) {
-      failure('TYPE_ERROR', 'Las asociaciones de _Generic no pueden tener tipos compatibles entre sí.', association.location);
+      failure('TYPE_ERROR', '_Generic associations cannot have compatible types.', association.location);
     }
     seenAssociationTypes.push(associationType);
     if (compatibleType(normalizedControlType, associationType)) selected = association.expression;
   }
   selected ??= defaultExpression;
-  if (!selected) failure('NO_GENERIC_ASSOCIATION', 'Ninguna asociación de _Generic coincide con el tipo de control.', at);
+  if (!selected) failure('NO_GENERIC_ASSOCIATION', 'No _Generic association matches the controlling type.', at);
   return selected;
 }
 
@@ -211,7 +211,7 @@ function requireIntegerConstantExpression(
   resolveGeneric?: GenericSelectionResolver,
 ): void {
   if (!isIntegerConstantExpression(expression, aggregates, resolveGeneric)) {
-    failure('TYPE_ERROR', `${context} debe ser una expresión constante entera.`, expression.location);
+    failure('TYPE_ERROR', `${context} must be an integer constant expression.`, expression.location);
   }
 }
 
@@ -219,19 +219,19 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   let cursor = 0;
   const peek = (offset = 0) => tokens[Math.min(cursor + offset, tokens.length - 1)];
   const consume = () => tokens[cursor++];
-  const unsupported = (token: Token, message?: string): never => failure('UNSUPPORTED_FEATURE', message ?? `P3 aún no implementa «${token.text}» en este contexto.`, token);
+  const unsupported = (token: Token, message?: string): never => failure('UNSUPPORTED_FEATURE', message ?? `P3 does not yet implement «${token.text}» in this context.`, token);
   const expect = (text: string) => {
     const token = peek();
     if (token.text !== text) {
       if (unsupportedWords.has(token.text)) unsupported(token);
-      failure('SYNTAX_ERROR', `Se esperaba «${text}»; se encontró ${token.kind === 'eof' ? 'el final del archivo' : `«${token.text}»`}.`, token);
+      failure('SYNTAX_ERROR', `Expected «${text}»; found ${token.kind === 'eof' ? 'end of file' : `«${token.text}»`}.`, token);
     }
     return consume();
   };
   const identifier = (): Token => {
     const token = peek();
-    if (reserved.has(token.text)) failure('SYNTAX_ERROR', `«${token.text}» es una palabra reservada y no puede ser un nombre.`, token);
-    if (token.kind !== 'identifier') failure('SYNTAX_ERROR', 'Se esperaba un identificador.', token);
+    if (reserved.has(token.text)) failure('SYNTAX_ERROR', `«${token.text}» is a reserved word and cannot be a name.`, token);
+    if (token.kind !== 'identifier') failure('SYNTAX_ERROR', 'Expected an identifier.', token);
     return consume();
   };
   const typedefScopes: Map<string, TypedefBinding>[] = [new Map()];
@@ -301,8 +301,8 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   };
   const declareOrdinary = (name: string, location: Location, type?: CType): void => {
     const scope = ordinaryScopes[ordinaryScopes.length - 1];
-    if (typedefScopes.at(-1)?.has(name)) failure('REDECLARATION', `El identificador «${name}» ya es un nombre typedef en este ámbito.`, location);
-    if (typeof scope.get(name) === 'bigint') failure('REDECLARATION', `El enumerador «${name}» ya está declarado en este ámbito.`, location);
+    if (typedefScopes.at(-1)?.has(name)) failure('REDECLARATION', `Identifier «${name}» is already a typedef name in this scope.`, location);
+    if (typeof scope.get(name) === 'bigint') failure('REDECLARATION', `Enumerator «${name}» is already declared in this scope.`, location);
     scope.set(name, null);
     if (type) ordinaryTypeScopes.at(-1)!.set(name, type);
   };
@@ -315,12 +315,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   };
   const declareTypedef = (name: string, type: CType, isConst: boolean, location: Location): void => {
     if (ordinaryScopes.at(-1)?.has(name)) {
-      failure('REDECLARATION', `El identificador «${name}» ya está declarado en este ámbito.`, location);
+      failure('REDECLARATION', `Identifier «${name}» is already declared in this scope.`, location);
     }
     const prior = typedefScopes.at(-1)?.get(name);
     if (prior) {
       if (sameType(prior.type, type)) return;
-      failure('CONFLICTING_TYPES', `La redeclaración de typedef «${name}» tiene un tipo incompatible.`, location);
+      failure('CONFLICTING_TYPES', `Redeclaration of typedef «${name}» has an incompatible type.`, location);
     }
     typedefScopes.at(-1)!.set(name, { type, isConst });
   };
@@ -339,20 +339,20 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     let tag: string | null = null;
     if (peek().kind === 'identifier' && !reserved.has(peek().text)) tag = consume().text;
     if (peek().text !== '{') {
-      if (!tag) failure('SYNTAX_ERROR', `Se esperaba una etiqueta o una definición de ${kind}.`, peek());
+      if (!tag) failure('SYNTAX_ERROR', `Expected a tag or a ${kind} definition.`, peek());
       const nearest = nearestTagKind(tag);
-      if (nearest?.kind === 'enum') failure('CONFLICTING_TYPES', `La etiqueta «${tag}» ya declara un enum.`, kindToken);
+      if (nearest?.kind === 'enum') failure('CONFLICTING_TYPES', `Tag «${tag}» already declares an enum.`, kindToken);
       let definition = nearest?.aggregate;
       if (!definition) {
         definition = { id: nextAggregateId++, kind, tag, complete: false, members: [], location: kindToken };
         aggregates.push(definition); tagScopes[tagScopes.length - 1].set(tag, definition);
-      } else if (definition.kind !== kind) failure('CONFLICTING_TYPES', `La etiqueta «${tag}» ya declara otro tipo agregado.`, kindToken);
+      } else if (definition.kind !== kind) failure('CONFLICTING_TYPES', `Tag «${tag}» already declares a different aggregate type.`, kindToken);
       return aggregateRef(definition.id);
     }
 
     const existing = tag === null ? undefined : currentTag(tag);
-    if (tag !== null && enumTagScopes[enumTagScopes.length - 1].has(tag)) failure('CONFLICTING_TYPES', `La etiqueta «${tag}» ya declara un enum en este ámbito.`, kindToken);
-    if (existing?.complete) failure('REDEFINITION', `El tipo ${kind} ${tag} ya está definido en este ámbito.`, kindToken);
+    if (tag !== null && enumTagScopes[enumTagScopes.length - 1].has(tag)) failure('CONFLICTING_TYPES', `Tag «${tag}» already declares an enum in this scope.`, kindToken);
+    if (existing?.complete) failure('REDEFINITION', `Type ${kind} ${tag} is already defined in this scope.`, kindToken);
     const definition: AggregateDefinition = existing ?? { id: nextAggregateId++, kind, tag, complete: false, members: [], location: kindToken };
     if (!existing) {
       aggregates.push(definition);
@@ -361,13 +361,13 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     consume();
     const members: AggregateMember[] = [];
     while (peek().text !== '}') {
-      if (peek().kind === 'eof') failure('SYNTAX_ERROR', `Falta el cierre } de ${kind}.`, peek());
-      if (peek().text === ';') failure('SYNTAX_ERROR', 'Un agregado necesita declaraciones de miembros.', peek());
+      if (peek().kind === 'eof') failure('SYNTAX_ERROR', `Missing closing } for ${kind}.`, peek());
+      if (peek().text === ';') failure('SYNTAX_ERROR', 'An aggregate requires member declarations.', peek());
       if (peek().text === '_Static_assert') { staticAssertions.push(parseStaticAssert()); continue; }
       const alignmentSpecifiers: number[] = [];
       const memberBase = parseTypeSpecifier((token) => {
         if (token.text !== '_Alignas') {
-          failure('SYNTAX_ERROR', `«${token.text}» no es válido en la lista de especificadores de un miembro.`, token);
+          failure('SYNTAX_ERROR', `«${token.text}» is invalid in a member specifier list.`, token);
         }
         alignmentSpecifiers.push(parseAlignmentSpecifier());
       });
@@ -375,39 +375,39 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const memberConst = lastSpecifierConst;
       if (peek().text === ';') {
         const anonymousType = memberBase;
-        if (!isAggregate(anonymousType)) failure('SYNTAX_ERROR', 'Un miembro anónimo necesita un especificador struct o union completo.', peek());
+        if (!isAggregate(anonymousType)) failure('SYNTAX_ERROR', 'An anonymous member requires a complete struct or union specifier.', peek());
         const anonymousDefinition = aggregates.find(value => value.id === aggregateType(anonymousType)?.id);
-        if (!anonymousDefinition?.complete || anonymousDefinition.tag !== null) failure('TYPE_ERROR', 'Un miembro anónimo necesita un struct o union anónimo completo.', peek());
-        if (alignmentSpecifiers.length) failure('TYPE_ERROR', '_Alignas no se admite en miembros anónimos.', peek());
+        if (!anonymousDefinition?.complete || anonymousDefinition.tag !== null) failure('TYPE_ERROR', 'An anonymous member requires a complete anonymous struct or union.', peek());
+        if (alignmentSpecifiers.length) failure('TYPE_ERROR', '_Alignas is not allowed on anonymous members.', peek());
         const location = consume();
         const anonymousMemberType = qualifyType(anonymousType, memberQualifiers);
         members.push({ name: '', type: anonymousMemberType, index: members.length, offset: 0, location, isConst: memberConst });
         continue;
       }
-      if (memberBase === 'void' || isFunction(memberBase)) failure('TYPE_ERROR', 'Un miembro de agregado debe tener tipo de objeto.', peek());
+      if (memberBase === 'void' || isFunction(memberBase)) failure('TYPE_ERROR', 'An aggregate member must have an object type.', peek());
       do {
         const declarator = parseDeclarator(true);
         const memberType = declaredType(declarator, memberBase, memberQualifiers);
-        if (isFunction(memberType)) failure('TYPE_ERROR', 'Un miembro de agregado no puede ser una función.', declarator.location);
+        if (isFunction(memberType)) failure('TYPE_ERROR', 'An aggregate member cannot be a function.', declarator.location);
         let bitWidth: number | undefined;
         let unnamedBitField = false;
         if (peek().text === ':') {
-          if (alignmentSpecifiers.length) failure('TYPE_ERROR', '_Alignas no puede aplicarse a un bit-field.', declarator.location);
+          if (alignmentSpecifiers.length) failure('TYPE_ERROR', '_Alignas cannot be applied to a bit-field.', declarator.location);
           const colon = consume();
-          const width = parseIntegerConstant('El ancho del bit-field');
-          if (width < 0n || width > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_ERROR', 'El ancho del bit-field debe ser un entero no negativo representable.', colon);
+          const width = parseIntegerConstant('The bit-field width');
+          if (width < 0n || width > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_ERROR', 'A bit-field width must be a representable nonnegative integer.', colon);
           bitWidth = Number(width);
-          if (!isInteger(memberType)) failure('TYPE_ERROR', 'Un bit-field debe tener un tipo entero o enum.', declarator.location);
+          if (!isInteger(memberType)) failure('TYPE_ERROR', 'A bit-field must have an integer or enum type.', declarator.location);
           unnamedBitField = declarator.name === '';
-          if (bitWidth === 0 && !unnamedBitField) failure('TYPE_ERROR', 'Un bit-field de ancho cero debe ser anónimo.', declarator.location);
+          if (bitWidth === 0 && !unnamedBitField) failure('TYPE_ERROR', 'A zero-width bit-field must be unnamed.', declarator.location);
         } else if (!declarator.name) {
-          failure('SYNTAX_ERROR', 'Un declarador de miembro sin nombre requiere un ancho de bit-field.', peek());
+          failure('SYNTAX_ERROR', 'An unnamed member declarator requires a bit-field width.', peek());
         }
-        if (declarator.name && members.some(member => member.name === declarator.name)) failure('REDECLARATION', `El miembro «${declarator.name}» aparece más de una vez.`, declarator.location);
+        if (declarator.name && members.some(member => member.name === declarator.name)) failure('REDECLARATION', `Member «${declarator.name}» appears more than once.`, declarator.location);
         const memberAlignment = alignmentSpecifiers.filter((value) => value !== 0);
         const requestedAlignment = memberAlignment.length ? Math.max(...memberAlignment) : undefined;
         if (alignmentSpecifiers.some((value) => value > 0 && value < alignOfType(memberType, aggregates, declarator.location))) {
-          failure('TYPE_ERROR', '_Alignas no puede reducir la alineación natural de un miembro.', declarator.location);
+          failure('TYPE_ERROR', '_Alignas cannot reduce a member’s natural alignment.', declarator.location);
         }
         const field: AggregateMember = {
           name: declarator.name, type: memberType, index: members.length, offset: 0, location: declarator.location,
@@ -427,7 +427,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     expect('}');
     definition.members = members;
     definition.complete = true;
-    if (!members.length) failure('TYPE_ERROR', 'Un struct o union debe declarar al menos un miembro.', kindToken);
+    if (!members.length) failure('TYPE_ERROR', 'A struct or union must declare at least one member.', kindToken);
     layoutAggregate(definition, aggregates, kindToken);
     lastSpecifierDefinesTag = true;
     return aggregateRef(definition.id);
@@ -437,15 +437,15 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const enumToken = consume();
     const tag = peek().kind === 'identifier' && !reserved.has(peek().text) ? consume().text : null;
     if (peek().text !== '{') {
-      if (!tag) failure('SYNTAX_ERROR', 'Se esperaba una etiqueta o una definición de enum.', peek());
+      if (!tag) failure('SYNTAX_ERROR', 'Expected a tag or an enum definition.', peek());
       const nearest = nearestTagKind(tag);
-      if (!nearest) failure('INCOMPLETE_TYPE', `El enum «${tag}» no está definido.`, enumToken);
-      if (nearest.kind !== 'enum') failure('CONFLICTING_TYPES', `La etiqueta «${tag}» ya declara un tipo agregado.`, enumToken);
-      if (!nearest.enumeration!.complete) failure('INCOMPLETE_TYPE', `El enum «${tag}» todavía está incompleto.`, enumToken);
+      if (!nearest) failure('INCOMPLETE_TYPE', `Enum «${tag}» is not defined.`, enumToken);
+      if (nearest.kind !== 'enum') failure('CONFLICTING_TYPES', `Tag «${tag}» already declares an aggregate type.`, enumToken);
+      if (!nearest.enumeration!.complete) failure('INCOMPLETE_TYPE', `Enum «${tag}» is still incomplete.`, enumToken);
       return enumRef(nearest.enumeration!);
     }
-    if (tag !== null && tagScopes[tagScopes.length - 1].has(tag)) failure('CONFLICTING_TYPES', `La etiqueta «${tag}» ya declara un agregado en este ámbito.`, enumToken);
-    if (tag !== null && enumTagScopes[enumTagScopes.length - 1].has(tag)) failure('REDEFINITION', `El enum «${tag}» ya está definido en este ámbito.`, enumToken);
+    if (tag !== null && tagScopes[tagScopes.length - 1].has(tag)) failure('CONFLICTING_TYPES', `Tag «${tag}» already declares an aggregate in this scope.`, enumToken);
+    if (tag !== null && enumTagScopes[enumTagScopes.length - 1].has(tag)) failure('REDEFINITION', `Enum «${tag}» is already defined in this scope.`, enumToken);
     const definition: EnumDefinition = {
       id: nextEnumId++, tag, complete: false, integerType: 'int', enumerators: [], translationUnit, location: enumToken,
     };
@@ -455,18 +455,18 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     let nextValue = 0n;
     let count = 0;
     while (peek().text !== '}') {
-      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Falta el cierre } del enum.', peek());
+      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Missing closing } for enum.', peek());
       const enumerator = identifier();
       let value = nextValue;
       if (peek().text === '=') {
         consume();
         const expression = parseExpression(2, new Set([',', '}']));
-        requireIntegerConstantExpression(expression, 'El valor de un enumerador', aggregates, resolveGenericSelection);
+        requireIntegerConstantExpression(expression, 'The enumerator value', aggregates, resolveGenericSelection);
         const constant = constantExpression(expression, aggregates, resolveGenericSelection);
-        if (!isInteger(constant.type) || typeof constant.value !== 'bigint') failure('TYPE_ERROR', 'El valor de un enumerador debe ser una expresión constante entera.', enumerator);
+        if (!isInteger(constant.type) || typeof constant.value !== 'bigint') failure('TYPE_ERROR', 'An enumerator value must be an integer constant expression.', enumerator);
         value = constant.value;
       }
-      if (value < INT_MIN || value > INT_MAX) failure('TYPE_SIZE_RANGE', 'El valor de un enumerador debe caber en int.', enumerator);
+      if (value < INT_MIN || value > INT_MAX) failure('TYPE_SIZE_RANGE', 'An enumerator value must fit in int.', enumerator);
       declareEnumerator(enumerator.text, value, enumerator);
       definition.enumerators.push({ name: enumerator.text, value, location: enumerator });
       nextValue = value + 1n;
@@ -475,7 +475,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       consume();
       if (peek().text === '}') break;
     }
-    if (!count) failure('SYNTAX_ERROR', 'Un enum necesita al menos un enumerador.', enumToken);
+    if (!count) failure('SYNTAX_ERROR', 'An enum requires at least one enumerator.', enumToken);
     expect('}');
     definition.complete = true;
     lastSpecifierDefinesTag = true;
@@ -483,8 +483,8 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   };
   const declareEnumerator = (name: string, value: bigint, location: Location): void => {
     const scope = ordinaryScopes[ordinaryScopes.length - 1];
-    if (typedefScopes.at(-1)?.has(name)) failure('REDECLARATION', `El enumerador «${name}» ya es un nombre typedef en este ámbito.`, location);
-    if (scope.has(name)) failure('REDECLARATION', `El identificador «${name}» ya está declarado en este ámbito.`, location);
+    if (typedefScopes.at(-1)?.has(name)) failure('REDECLARATION', `Enumerator «${name}» is already a typedef name in this scope.`, location);
+    if (scope.has(name)) failure('REDECLARATION', `Identifier «${name}» is already declared in this scope.`, location);
     scope.set(name, value);
   };
 
@@ -498,14 +498,14 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       return;
     }
     if (token.text === '_Thread_local') {
-      if (state.storageClasses.has(token.text)) failure('TYPE_ERROR', 'Un especificador de clase de almacenamiento no puede repetirse.', token);
+      if (state.storageClasses.has(token.text)) failure('TYPE_ERROR', 'A storage-class specifier cannot be repeated.', token);
       state.storageClasses.add(token.text);
       consume();
       state.threadLocal = true;
       return;
     }
     if (['static', 'extern', 'typedef', 'auto', 'register'].includes(token.text)) {
-      if (state.storageClasses.has(token.text)) failure('TYPE_ERROR', 'Un especificador de clase de almacenamiento no puede repetirse.', token);
+      if (state.storageClasses.has(token.text)) failure('TYPE_ERROR', 'A storage-class specifier cannot be repeated.', token);
       state.storageClasses.add(token.text);
       consume();
       if (token.text === 'static') state.static = true;
@@ -517,7 +517,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     }
     if (token.text === 'inline') { consume(); state.inline = true; return; }
     if (token.text === '_Noreturn') { consume(); state.noreturn = true; return; }
-    failure('ENGINE_INTERNAL_ERROR', `El especificador «${token.text}» no se puede recopilar aquí.`, token);
+    failure('ENGINE_INTERNAL_ERROR', `Specifier «${token.text}» cannot be collected here.`, token);
   };
 
   function parseTypeSpecifier(consumeDeclarationSpecifier?: DeclarationSpecifierConsumer): CType {
@@ -579,27 +579,27 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       if (scalarWords.has(peek().text)) { words.push(consume().text); continue; }
       break;
     }
-    if (!words.length) failure('SYNTAX_ERROR', 'Se esperaba un especificador de tipo.', at);
+    if (!words.length) failure('SYNTAX_ERROR', 'Expected a type specifier.', at);
     const count = (word: string) => words.filter(value => value === word).length;
-    for (const word of scalarWords) if (count(word) > (word === 'long' ? 2 : 1)) failure('TYPE_ERROR', 'Especificadores de tipo incompatibles o repetidos.', at);
+    for (const word of scalarWords) if (count(word) > (word === 'long' ? 2 : 1)) failure('TYPE_ERROR', 'Incompatible or repeated type specifiers.', at);
     const signed = count('signed'), unsigned = count('unsigned');
-    if (signed && unsigned) failure('TYPE_ERROR', 'Un tipo no puede ser signed y unsigned a la vez.', at);
+    if (signed && unsigned) failure('TYPE_ERROR', 'A type cannot be both signed and unsigned.', at);
     for (const special of ['void', '_Bool', 'float']) {
       if (count(special)) {
-        if (words.length !== 1) failure('TYPE_ERROR', 'Especificadores de tipo incompatibles.', at);
+    if (words.length !== 1) failure('TYPE_ERROR', 'Incompatible type specifiers.', at);
         return special as ScalarCType;
       }
     }
     if (count('double')) {
       if (count('long') === 1 && words.length === 2) return 'long double';
-      if (words.length !== 1) failure('TYPE_ERROR', 'Especificadores de tipo incompatibles.', at);
+    if (words.length !== 1) failure('TYPE_ERROR', 'Incompatible type specifiers.', at);
       return 'double';
     }
     if (count('char')) {
-      if (count('int') || count('short') || count('long')) failure('TYPE_ERROR', 'Especificadores de tipo incompatibles.', at);
+    if (count('int') || count('short') || count('long')) failure('TYPE_ERROR', 'Incompatible type specifiers.', at);
       return unsigned ? 'unsigned char' : signed ? 'signed char' : 'char';
     }
-    if (count('short') && count('long')) failure('TYPE_ERROR', 'Un tipo no puede ser short y long a la vez.', at);
+    if (count('short') && count('long')) failure('TYPE_ERROR', 'A type cannot be both short and long.', at);
     if (count('short')) return unsigned ? 'unsigned short' : 'short';
     if (count('long') === 2) return unsigned ? 'unsigned long long' : 'long long';
     if (count('long')) return unsigned ? 'unsigned long' : 'long';
@@ -607,9 +607,9 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   }
 
   const parseArrayBound = (): number => {
-    if (peek().text === ']') failure('INCOMPLETE_TYPE', 'P3 requiere una longitud para arrays locales; sólo se infiere con un inicializador.', peek());
-    const length = parseIntegerConstant('La longitud del array');
-    if (length <= 0n || length > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'La longitud del array debe ser positiva y representable.', peek());
+    if (peek().text === ']') failure('INCOMPLETE_TYPE', 'P3 requires a length for local arrays; it is inferred only from an initializer.', peek());
+    const length = parseIntegerConstant('The array length');
+    if (length <= 0n || length > BigInt(Number.MAX_SAFE_INTEGER)) failure('TYPE_SIZE_RANGE', 'Array length must be positive and representable.', peek());
     consume();
     return Number(length);
   };
@@ -650,8 +650,8 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     } else if (abstractAllowed) {
       direct = base => base;
     } else {
-      if (peek().text === '[') failure('SYNTAX_ERROR', 'Un array declarado necesita un identificador.', peek());
-      failure('SYNTAX_ERROR', 'Se esperaba un declarador con nombre.', peek());
+      if (peek().text === '[') failure('SYNTAX_ERROR', 'A declared array requires an identifier.', peek());
+      failure('SYNTAX_ERROR', 'Expected a named declarator.', peek());
     }
     let sawArraySuffix = false;
     while (true) {
@@ -661,22 +661,22 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         const arrayQualifiers: TypeQualifiers = {};
         let hasStaticMinimum = false;
         if (peek().text === 'static') {
-          if (!supportsParameterArrayModifiers) failure('TYPE_ERROR', 'static dentro de corchetes sólo se admite en el declarador de un parámetro array.', peek());
+          if (!supportsParameterArrayModifiers) failure('TYPE_ERROR', 'static inside brackets is only allowed in an array parameter declarator.', peek());
           consume(); hasStaticMinimum = true;
         }
         while (['const', 'volatile', 'restrict'].includes(peek().text)) {
-          if (!supportsParameterArrayModifiers) failure('TYPE_ERROR', 'Los cualificadores de array sólo se admiten en el declarador de un parámetro array.', peek());
+          if (!supportsParameterArrayModifiers) failure('TYPE_ERROR', 'Array qualifiers are only allowed in an array parameter declarator.', peek());
           const qualifier = consume().text as keyof TypeQualifiers;
           (arrayQualifiers as { const?: boolean; volatile?: boolean; restrict?: boolean })[qualifier] = true;
         }
         if (peek().text === 'static') {
-          if (!supportsParameterArrayModifiers || hasStaticMinimum) failure('TYPE_ERROR', 'static dentro de corchetes sólo se admite una vez en un parámetro array.', peek());
+          if (!supportsParameterArrayModifiers || hasStaticMinimum) failure('TYPE_ERROR', 'static inside brackets is only allowed once in an array parameter.', peek());
           consume(); hasStaticMinimum = true;
         }
         let length: number | null;
         if (peek().text === ']') { consume(); length = null; }
         else length = parseArrayBound();
-        if (hasStaticMinimum && length === null) failure('TYPE_ERROR', 'Un límite static de parámetro requiere una longitud constante positiva.', bracket);
+        if (hasStaticMinimum && length === null) failure('TYPE_ERROR', 'A static parameter bound requires a positive constant length.', bracket);
         if (Object.values(arrayQualifiers).some(Boolean) || hasStaticMinimum) {
           parameterArrayQualifiers = arrayQualifiers;
           if (hasStaticMinimum && length !== null) minimumArrayBound = length;
@@ -706,7 +706,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
             declareOrdinary(parameter.text, parameter, 'int');
             if (peek().text !== ',') break;
             consume();
-            if (peek().text === ')') failure('SYNTAX_ERROR', 'Falta un identificador en la lista antigua de parámetros.', peek());
+            if (peek().text === ')') failure('SYNTAX_ERROR', 'An identifier is missing from the old-style parameter list.', peek());
           } while (true);
           for (const parameter of names) {
             parameters.push({ name: parameter.text, type: 'int', location: parameter });
@@ -716,21 +716,21 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           while (true) {
             const parameterAt = peek();
             if (peek().text === '...') {
-              if (!parameters.length) failure('SYNTAX_ERROR', 'Una función variádica requiere al menos un parámetro con tipo.', peek());
+              if (!parameters.length) failure('SYNTAX_ERROR', 'A variadic function requires at least one typed parameter.', peek());
               consume(); variadic = true; break;
             }
             const parameterSpecifiers = newDeclarationSpecifiers();
             const parameterBase = parseTypeSpecifier((token) => {
-              if (token.text !== 'register') failure('TYPE_ERROR', 'register es la única clase de almacenamiento permitida en un parámetro.', token);
+              if (token.text !== 'register') failure('TYPE_ERROR', 'register is the only storage class allowed for a parameter.', token);
               consumeDeclarationSpecifier(parameterSpecifiers, token);
             });
             const registerParameter = parameterSpecifiers.register;
             const parameterQualifiers = { ...lastSpecifierQualifiers };
             const parameterDeclarator = parseDeclarator(true, true);
             let parameterType = declaredType(parameterDeclarator, parameterBase, parameterQualifiers);
-            if (parameterType === 'void') failure('TYPE_ERROR', 'void sólo puede aparecer como lista de parámetros vacía.', parameterAt);
+            if (parameterType === 'void') failure('TYPE_ERROR', 'void may only appear as an empty parameter list.', parameterAt);
             if (parameterDeclarator.parameterArrayQualifiers && !isArray(parameterType)) {
-              failure('TYPE_ERROR', 'static y los cualificadores entre corchetes sólo se aplican al array externo de un parámetro.', parameterAt);
+              failure('TYPE_ERROR', 'static and bracket qualifiers only apply to a parameter’s outer array.', parameterAt);
             }
             const minimumArrayBound = parameterDeclarator.minimumArrayBound;
             if (isArray(parameterType)) {
@@ -781,7 +781,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const array = arrayType(current);
     if (array) {
       if (!isComplete(array.element, aggregates)) {
-        failure('INCOMPLETE_TYPE', 'El elemento de un array debe tener un tipo completo.', at);
+        failure('INCOMPLETE_TYPE', 'An array element must have a complete type.', at);
       }
       validateDeclaratorTypeConstraints(array.element, at, visited);
       return;
@@ -794,7 +794,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const fn = functionType(current);
     if (fn) {
       if (isArray(fn.returnType) || isFunction(fn.returnType)) {
-        failure('TYPE_ERROR', 'Una función no puede devolver un array ni otra función.', at);
+        failure('TYPE_ERROR', 'A function cannot return an array or another function.', at);
       }
       validateDeclaratorTypeConstraints(fn.returnType, at, visited);
       for (const parameter of fn.parameters) validateDeclaratorTypeConstraints(parameter, at, visited);
@@ -802,7 +802,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   };
   const declaredType = (declarator: Declarator, base: CType, specifiers: TypeQualifiers | boolean = {}): CType => {
     const qualifiers = typeof specifiers === 'boolean' ? specifiers ? { const: true } : {} : specifiers;
-    if (qualifiers.restrict && !pointerType(base)) failure('TYPE_ERROR', 'restrict sólo puede calificar un tipo puntero.', declarator.location);
+    if (qualifiers.restrict && !pointerType(base)) failure('TYPE_ERROR', 'restrict can only qualify a pointer type.', declarator.location);
     const type = declarator.apply(qualifyType(base, qualifiers));
     validateDeclaratorTypeConstraints(type, declarator.location);
     validateRestrictType(type, declarator.location);
@@ -815,7 +815,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const qualifiers = qualifiersOf(type);
     const pointer = pointerType(type);
     if (qualifiers.restrict && (!pointer || isFunction(pointedToType(type)!))) {
-      failure('TYPE_ERROR', 'restrict sólo puede calificar un puntero a objeto.', at);
+      failure('TYPE_ERROR', 'restrict can only qualify an object pointer.', at);
     }
     const base = unqualifiedType(type);
     if (typeof base === 'string') return;
@@ -828,7 +828,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
   }
 
   const decodeString = (text: string, at: Location): number[] => {
-    if (!text.startsWith('"') || !text.endsWith('"')) failure('UNTERMINATED_STRING', 'Literal de cadena sin cierre.', at);
+    if (!text.startsWith('"') || !text.endsWith('"')) failure('UNTERMINATED_STRING', 'Unterminated string literal.', at);
     const result: number[] = [];
     const body = text.slice(1, -1);
     for (let index = 0; index < body.length; index++) {
@@ -836,10 +836,10 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const char = body[index];
       if (char !== '\\') {
         code = body.charCodeAt(index);
-        if (code > 127) unsupported({ ...at, text: char, kind: 'string' }, 'P3 admite cadenas de caracteres ASCII; Unicode queda pendiente.');
+        if (code > 127) unsupported({ ...at, text: char, kind: 'string' }, 'P3 supports ASCII string literals; Unicode support is pending.');
       } else {
         const next = body[++index];
-        if (next === undefined) failure('SYNTAX_ERROR', 'Escape incompleto en literal de cadena.', at);
+        if (next === undefined) failure('SYNTAX_ERROR', 'Incomplete escape in string literal.', at);
         const simple: Record<string, number> = { "'": 39, '"': 34, '?': 63, '\\': 92, a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
         if (Object.hasOwn(simple, next)) code = simple[next];
         else if (/[0-7]/.test(next)) {
@@ -849,10 +849,10 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         } else if (next === 'x') {
           let digits = '';
           while (/[0-9a-fA-F]/.test(body[index + 1] ?? '')) digits += body[++index];
-          if (!digits) failure('SYNTAX_ERROR', 'El escape hexadecimal de cadena requiere al menos un dígito.', at);
+          if (!digits) failure('SYNTAX_ERROR', 'A hexadecimal string escape requires at least one digit.', at);
           code = Number.parseInt(digits, 16);
-        } else if (next === 'u' || next === 'U') unsupported({ ...at, text: `\\${next}`, kind: 'string' }, 'P3 no implementa escapes Unicode.');
-        else failure('SYNTAX_ERROR', `Escape de cadena desconocido: \\${next}.`, at);
+        } else if (next === 'u' || next === 'U') unsupported({ ...at, text: `\\${next}`, kind: 'string' }, 'P3 does not implement Unicode escapes.');
+    else failure('SYNTAX_ERROR', `Unknown string escape: \\${next}.`, at);
       }
       result.push(code);
     }
@@ -864,7 +864,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const expression = parseExpression(1, new Set([']', ',', ';', '}']));
     requireIntegerConstantExpression(expression, context, aggregates, resolveGenericSelection);
     const value = constantExpression(expression, aggregates, resolveGenericSelection);
-    if (!isInteger(value.type) || typeof value.value !== 'bigint') failure('TYPE_ERROR', `${context} debe ser una expresión constante entera.`, at);
+    if (!isInteger(value.type) || typeof value.value !== 'bigint') failure('TYPE_ERROR', `${context} must be an integer constant expression.`, at);
     return value.value;
   };
 
@@ -881,7 +881,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     consume();
     const list: { designators: InitializerDesignator[]; initializer: Initializer; location: Location }[] = [];
     while (peek().text !== '}') {
-      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Falta el cierre } del inicializador.', peek());
+      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Missing closing } for initializer.', peek());
       const itemAt = peek();
       const designators: InitializerDesignator[] = [];
       while (peek().text === '.' || peek().text === '[') {
@@ -890,8 +890,8 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           designators.push({ kind: 'member', name: name.text, location: designator });
         } else {
           const designator = consume();
-          const index = parseIntegerConstant('El designador de array');
-          if (index < 0n) failure('INVALID_DESIGNATOR', 'El índice de un designador no puede ser negativo.', designator);
+          const index = parseIntegerConstant('The array designator');
+          if (index < 0n) failure('INVALID_DESIGNATOR', 'A designator index cannot be negative.', designator);
           expect(']'); designators.push({ kind: 'index', index, location: designator });
         }
       }
@@ -902,7 +902,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       consume();
       if (peek().text === '}') break;
     }
-    if (!list.length) failure('SYNTAX_ERROR', 'Un inicializador con llaves necesita al menos un elemento en C11.', at);
+    if (!list.length) failure('SYNTAX_ERROR', 'A braced initializer requires at least one element in C11.', at);
     expect('}');
     return { kind: 'list', items: list, location: at };
   };
@@ -920,18 +920,18 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     let alignment: bigint;
     if (startsType()) {
       const type = typeName();
-      if (!isComplete(type, aggregates) || isFunction(type)) failure('INCOMPLETE_TYPE', '_Alignas requiere un tipo de objeto completo.', at);
+      if (!isComplete(type, aggregates) || isFunction(type)) failure('INCOMPLETE_TYPE', '_Alignas requires a complete object type.', at);
       alignment = BigInt(alignOfType(type, aggregates, at));
     } else {
       const expression = parseExpression(1, new Set([')']));
       requireIntegerConstantExpression(expression, '_Alignas', aggregates, resolveGenericSelection);
       const value = constantExpression(expression, aggregates, resolveGenericSelection);
-      if (!isInteger(value.type) || typeof value.value !== 'bigint') failure('TYPE_ERROR', '_Alignas requiere una expresión constante entera o un nombre de tipo.', at);
+      if (!isInteger(value.type) || typeof value.value !== 'bigint') failure('TYPE_ERROR', '_Alignas requires an integer constant expression or a type name.', at);
       alignment = value.value;
     }
     expect(')');
     if (alignment < 0n || alignment > 65536n || alignment !== 0n && (alignment & (alignment - 1n)) !== 0n) {
-      failure('TYPE_ERROR', 'El perfil admite _Alignas(0) o alineaciones potencia de dos entre 1 y 65536.', at);
+      failure('TYPE_ERROR', 'The profile supports _Alignas(0) or power-of-two alignments from 1 to 65536.', at);
     }
     return Number(alignment);
   }
@@ -942,7 +942,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const condition = parseExpression(1, new Set([',']));
     requireIntegerConstantExpression(condition, '_Static_assert', aggregates, resolveGenericSelection);
     expect(',');
-    if (peek().kind !== 'string') failure('SYNTAX_ERROR', '_Static_assert requiere un literal de cadena como mensaje.', peek());
+    if (peek().kind !== 'string') failure('SYNTAX_ERROR', '_Static_assert requires a string literal message.', peek());
     const first = consume();
     const bytes = decodeString(first.text, first);
     while (peek().kind === 'string') bytes.push(...decodeString(consume().text, first));
@@ -975,10 +975,10 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const reduce = (): void => {
       const operator = stack.pop();
       if (!operator || operator.kind === 'group' || operator.kind === 'call' || operator.kind === 'index' || operator.kind === 'question') {
-        failure('SYNTAX_ERROR', 'Expresión incompleta.', operator?.token ?? peek());
+        failure('SYNTAX_ERROR', 'Incomplete expression.', operator?.token ?? peek());
       }
       const right = values.pop();
-      if (!right) failure('SYNTAX_ERROR', 'Falta el operando derecho.', operator.token);
+      if (!right) failure('SYNTAX_ERROR', 'Missing right operand.', operator.token);
       if (operator.kind === 'unary') {
         const expression: Expression = operator.operator === 'sizeof'
           ? { kind: 'sizeof', operand: right.expression, location: operator.token }
@@ -991,10 +991,10 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         return;
       }
       const left = values.pop();
-      if (!left) failure('SYNTAX_ERROR', 'Falta el operando izquierdo.', operator.token);
+      if (!left) failure('SYNTAX_ERROR', 'Missing left operand.', operator.token);
       if (operator.kind === 'conditional') {
         const condition = values.pop();
-        if (!condition) failure('SYNTAX_ERROR', 'Falta la condición de ?: .', operator.token);
+        if (!condition) failure('SYNTAX_ERROR', 'Missing condition in ?: expression.', operator.token);
         pushValue({ kind: 'conditional', condition: condition.expression, then: left.expression, else: right.expression, location: operator.token },
           Math.max(condition.depth, left.depth, right.depth) + 1);
       } else {
@@ -1012,21 +1012,21 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     };
     const closeMarker = (kind: Marker['kind'], token: Token): void => {
       const open = markers[markers.length - 1];
-      if (open === undefined) failure('SYNTAX_ERROR', `«${token.text}» sin apertura correspondiente.`, token);
+      if (open === undefined) failure('SYNTAX_ERROR', `«${token.text}» has no matching opening delimiter.`, token);
       while (stack.length > open + 1) reduce();
       const marker = stack.pop()! as Marker;
-      if (marker.kind !== kind) failure('SYNTAX_ERROR', `Se esperaba el cierre de «${marker.kind === 'group' || marker.kind === 'call' ? '(' : '['}».`, token);
+      if (marker.kind !== kind) failure('SYNTAX_ERROR', `Expected closing «${marker.kind === 'group' || marker.kind === 'call' ? '(' : '['}».`, token);
       markers.pop(); questionCounts.pop(); consume();
       if (marker.kind === 'group') {
-        if (values.length !== marker.valueStart + 1) failure('SYNTAX_ERROR', 'Expresión inválida dentro de paréntesis.', token);
+        if (values.length !== marker.valueStart + 1) failure('SYNTAX_ERROR', 'Invalid expression inside parentheses.', token);
         expectingOperand = false;
         return;
       }
       if (marker.kind === 'call') {
         if (expectingOperand) {
-          if (values.length !== marker.valueStart || marker.args.length || stack.length !== open) failure('SYNTAX_ERROR', 'Falta un argumento de la llamada.', token);
+          if (values.length !== marker.valueStart || marker.args.length || stack.length !== open) failure('SYNTAX_ERROR', 'Missing function-call argument.', token);
         } else {
-          if (values.length !== marker.valueStart + 1) failure('SYNTAX_ERROR', 'Argumento inválido.', token);
+          if (values.length !== marker.valueStart + 1) failure('SYNTAX_ERROR', 'Invalid argument.', token);
           const argument = values.pop()!;
           marker.args.push(argument.expression); marker.maxDepth = Math.max(marker.maxDepth, argument.depth);
         }
@@ -1035,7 +1035,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         expectingOperand = false;
         return;
       }
-      if (expectingOperand || values.length !== marker.valueStart + 1) failure('SYNTAX_ERROR', 'El subíndice requiere una expresión.', token);
+      if (expectingOperand || values.length !== marker.valueStart + 1) failure('SYNTAX_ERROR', 'Subscript requires an expression.', token);
       const index = values.pop()!;
       pushValue({ kind: 'index', base: marker.base, index: index.expression, location: marker.token }, Math.max(marker.baseDepth, index.depth) + 1);
       expectingOperand = false;
@@ -1069,10 +1069,10 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         if (token.text === '_Alignof') {
           consume();
           expect('(');
-          if (!startsType()) failure('SYNTAX_ERROR', '_Alignof requiere un nombre de tipo entre paréntesis en C11.', peek());
+          if (!startsType()) failure('SYNTAX_ERROR', '_Alignof requires a parenthesized type name in C11.', peek());
           const type = typeName();
           expect(')');
-          if (!isComplete(type, aggregates) || isFunction(type)) failure('INCOMPLETE_TYPE', '_Alignof requiere un tipo de objeto completo.', token);
+          if (!isComplete(type, aggregates) || isFunction(type)) failure('INCOMPLETE_TYPE', '_Alignof requires a complete object type.', token);
           const alignment = alignOfType(type, aggregates, token);
           pushValue({ kind: 'literal', value: { type: 'unsigned long', value: BigInt(alignment) }, location: token }, 1);
           expectingOperand = false;
@@ -1090,22 +1090,22 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
             let associationType: CType | undefined;
             if (peek().text === 'default') {
               consume();
-              if (defaultSeen) failure('TYPE_ERROR', '_Generic no puede repetir la asociación default.', associationAt);
+              if (defaultSeen) failure('TYPE_ERROR', '_Generic cannot repeat the default association.', associationAt);
               defaultSeen = true;
             } else {
-              if (!startsType()) failure('SYNTAX_ERROR', 'Se esperaba un tipo o default en una asociación de _Generic.', peek());
+              if (!startsType()) failure('SYNTAX_ERROR', 'Expected a type or default in a _Generic association.', peek());
               associationType = typeName();
-              if (arrayType(associationType) && arrayType(associationType)!.length === null) failure('TYPE_ERROR', 'Una asociación de _Generic no puede usar un tipo de array incompleto.', associationAt);
+              if (arrayType(associationType) && arrayType(associationType)!.length === null) failure('TYPE_ERROR', 'A _Generic association cannot use an incomplete array type.', associationAt);
             }
             expect(':');
             const expression = parseExpression(2, new Set([',', ')']));
             associations.push({ ...(associationType ? { type: associationType } : {}), expression, location: associationAt });
             if (peek().text !== ',') break;
             consume();
-            if (peek().text === ')') failure('SYNTAX_ERROR', 'Falta una asociación después de la coma en _Generic.', peek());
+            if (peek().text === ')') failure('SYNTAX_ERROR', 'Missing association after the comma in _Generic.', peek());
           }
           expect(')');
-          if (!associations.length) failure('SYNTAX_ERROR', '_Generic requiere al menos una asociación.', token);
+          if (!associations.length) failure('SYNTAX_ERROR', '_Generic requires at least one association.', token);
           const genericNode: Extract<Expression, { kind: 'generic' }> = {
             kind: 'generic', control, associations, selected: associations[0].expression, location: token,
           };
@@ -1126,7 +1126,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           const addMember = (name: string, at: Location): void => {
             const path = aggregateMemberPath(currentType, name, aggregates, at);
             for (const member of path) {
-              if (member.bitField) failure('TYPE_ERROR', 'offsetof no puede designar un bit-field.', at);
+              if (member.bitField) failure('TYPE_ERROR', 'offsetof cannot designate a bit-field.', at);
               offset += member.offset;
               currentType = member.type;
             }
@@ -1141,12 +1141,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
               const indexExpression = parseExpression(1, new Set([']']));
               const indexValue = constantExpression(indexExpression, aggregates);
               if (!isInteger(indexValue.type) || typeof indexValue.value !== 'bigint' || indexValue.value < 0n || indexValue.value > BigInt(Number.MAX_SAFE_INTEGER)) {
-                failure('TYPE_ERROR', 'El índice de offsetof debe ser una constante entera no negativa representable.', bracket);
+                failure('TYPE_ERROR', 'An offsetof index must be a representable nonnegative integer constant.', bracket);
               }
               expect(']');
               const array = arrayType(currentType);
-              if (!array) failure('TYPE_ERROR', 'El designador con índice de offsetof requiere un miembro de array.', bracket);
-              if (array.length !== null && indexValue.value >= BigInt(array.length)) failure('INVALID_DESIGNATOR', 'El índice de offsetof excede el array.', bracket);
+              if (!array) failure('TYPE_ERROR', 'An indexed offsetof designator requires an array member.', bracket);
+              if (array.length !== null && indexValue.value >= BigInt(array.length)) failure('INVALID_DESIGNATOR', 'The offsetof index exceeds the array bounds.', bracket);
               offset += Number(indexValue.value) * sizeOfType(array.element, aggregates, bracket);
               currentType = array.element;
             }
@@ -1198,13 +1198,13 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           expectingOperand = false; continue;
         }
         if (unsupportedWords.has(token.text)) unsupported(token);
-        failure('SYNTAX_ERROR', 'Se esperaba una expresión de C.', token);
+        failure('SYNTAX_ERROR', 'Expected a C expression.', token);
       }
 
       if (token.text === ')' || token.text === ']') {
         if (open < 0) {
           if (stops.has(token.text)) break;
-          failure('SYNTAX_ERROR', `«${token.text}» sin apertura correspondiente.`, token);
+          failure('SYNTAX_ERROR', `«${token.text}» has no matching opening delimiter.`, token);
         }
         const marker = stack[open];
         const wanted: Marker['kind'] = token.text === ']' ? 'index' : marker.kind === 'call' ? 'call' : 'group';
@@ -1212,7 +1212,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       }
       if (token.text === '[' || token.text === '(') {
         const base = values.pop();
-        if (!base) failure('SYNTAX_ERROR', `El operador «${token.text}» no tiene una expresión base.`, token);
+        if (!base) failure('SYNTAX_ERROR', `Operator «${token.text}» has no base expression.`, token);
         consume();
         if (token.text === '[') openMarker({ kind: 'index', token, valueStart: values.length, base: base.expression, baseDepth: base.depth });
         else openMarker({ kind: 'call', token, valueStart: values.length, callee: base.expression, baseDepth: base.depth, args: [], maxDepth: 0 });
@@ -1247,7 +1247,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         const question = stack[stack.length - 1];
         if (!question || question.kind !== 'question') {
           if (open < 0 && stops.has(':')) break;
-          failure('SYNTAX_ERROR', '«:» sin «?» correspondiente.', token);
+          failure('SYNTAX_ERROR', '«:» has no matching «?».', token);
         }
         stack.pop(); questionCounts[questionCounts.length - 1]--;
         stack.push({ kind: 'conditional', token: question.token, operator: '?:' }); consume(); expectingOperand = true; continue;
@@ -1255,7 +1255,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       if (token.text === ',' && open >= 0 && stack[open].kind === 'call' && !pendingQuestion) {
         while (stack.length > open + 1) reduce();
         const call = stack[open] as Extract<Marker, { kind: 'call' }>;
-        if (values.length !== call.valueStart + 1) failure('SYNTAX_ERROR', 'Argumento inválido.', token);
+        if (values.length !== call.valueStart + 1) failure('SYNTAX_ERROR', 'Invalid argument.', token);
         const argument = values.pop()!;
         call.args.push(argument.expression); call.maxDepth = Math.max(call.maxDepth, argument.depth);
         consume(); expectingOperand = true; continue;
@@ -1273,12 +1273,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         stack.push({ kind: 'binary', token: consume(), operator: token.text }); expectingOperand = true; continue;
       }
       if (unsupportedWords.has(token.text)) unsupported(token);
-      failure('SYNTAX_ERROR', `Falta un operador antes de «${token.text}».`, token);
+      failure('SYNTAX_ERROR', `Missing operator before «${token.text}».`, token);
     }
-    if (expectingOperand) failure('SYNTAX_ERROR', 'Falta una expresión u operando.', peek());
-    if (markers.length) failure('SYNTAX_ERROR', 'Falta cerrar un paréntesis o subíndice.', peek());
+    if (expectingOperand) failure('SYNTAX_ERROR', 'Missing expression or operand.', peek());
+    if (markers.length) failure('SYNTAX_ERROR', 'Missing closing parenthesis or subscript bracket.', peek());
     while (stack.length) reduce();
-    if (values.length !== 1) failure('SYNTAX_ERROR', 'Expresión inválida.', peek());
+    if (values.length !== 1) failure('SYNTAX_ERROR', 'Invalid expression.', peek());
     return values[0].expression;
   };
 
@@ -1416,7 +1416,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         length = Math.max(length, next);
       }
     }
-    if (!length) failure('INCOMPLETE_TYPE', 'Un array incompleto necesita un inicializador que determine su longitud.', initializer.location);
+    if (!length) failure('INCOMPLETE_TYPE', 'An incomplete array requires an initializer that determines its length.', initializer.location);
     return arrayOf(array.element, length);
   };
 
@@ -1432,28 +1432,28 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const alignments = specifiers.alignments;
     const storageClassCount = Number(isStatic) + Number(isExtern) + Number(isTypedef) + Number(isAuto) + Number(isRegister);
     if (storageClassCount > 1 || isThreadLocal && (isTypedef || isAuto || isRegister) || !local && (isAuto || isRegister)) {
-      failure('TYPE_ERROR', 'Clases de almacenamiento incompatibles o inválidas en este ámbito.', at);
+      failure('TYPE_ERROR', 'Incompatible or invalid storage classes in this scope.', at);
     }
     if (local && isRegister && alignments.length) {
-      failure('TYPE_ERROR', '_Alignas no puede aplicarse a un objeto con almacenamiento register.', at);
+      failure('TYPE_ERROR', '_Alignas cannot be applied to a register object.', at);
     }
-    if (isThreadLocal && local && !isStatic && !isExtern) failure('TYPE_ERROR', '_Thread_local en ámbito de bloque requiere static o extern.', at);
-    if (!local && isThreadLocal && !isStatic && !isExtern) failure('TYPE_ERROR', '_Thread_local en ámbito de archivo requiere static o extern.', at);
+    if (isThreadLocal && local && !isStatic && !isExtern) failure('TYPE_ERROR', '_Thread_local at block scope requires static or extern.', at);
+    if (!local && isThreadLocal && !isStatic && !isExtern) failure('TYPE_ERROR', '_Thread_local at file scope requires static or extern.', at);
     const baseQualifiers = { ...lastSpecifierQualifiers };
     const standaloneTag = lastSpecifierDefinesTag;
     if (peek().text === ';' && (isAggregate(base) || standaloneTag)) {
       if (alignments.length || isStatic || isExtern || isTypedef || isThreadLocal || isAuto || isRegister || isInline || isNoreturn) {
-        failure('TYPE_ERROR', 'Los especificadores de almacenamiento/alineación requieren un declarador.', at);
+        failure('TYPE_ERROR', 'Storage/alignment specifiers require a declarator.', at);
       }
       consume(); return { kind: 'empty', location: at };
     }
-    if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline y _Noreturn solo se aplican a declaraciones de función.', at);
+    if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline and _Noreturn only apply to function declarations.', at);
     if (isTypedef) {
-      if (alignments.length || isThreadLocal) failure('TYPE_ERROR', 'typedef no admite _Alignas ni _Thread_local.', at);
+      if (alignments.length || isThreadLocal) failure('TYPE_ERROR', 'typedef does not allow _Alignas or _Thread_local.', at);
       do {
         const declarator = parseDeclarator(false);
         const type = declaredType(declarator, base, baseQualifiers);
-        if (peek().text === '=') failure('SYNTAX_ERROR', 'Un typedef no admite inicializador.', peek());
+        if (peek().text === '=') failure('SYNTAX_ERROR', 'A typedef cannot have an initializer.', peek());
         declareTypedef(declarator.name, type, isConstObjectType(type), declarator.location);
         if (peek().text !== ',') break;
         consume();
@@ -1466,9 +1466,9 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const declarator = parseDeclarator(false);
       let type = declaredType(declarator, base, baseQualifiers);
       if (isFunction(type)) {
-        if (!local) failure('ENGINE_INTERNAL_ERROR', 'La declaración de función de ámbito de archivo debe manejarse en el parser externo.', declarator.location);
-        if (alignments.length || isStatic || isThreadLocal || isAuto || isRegister) failure('TYPE_ERROR', 'Una declaración de función no admite este especificador de almacenamiento o alineación.', declarator.location);
-        if (peek().text === '=') failure('TYPE_ERROR', 'Una declaración de función no admite inicializador.', peek());
+        if (!local) failure('ENGINE_INTERNAL_ERROR', 'File-scope function declarations must be handled by the outer parser.', declarator.location);
+        if (alignments.length || isStatic || isThreadLocal || isAuto || isRegister) failure('TYPE_ERROR', 'A function declaration does not allow this storage or alignment specifier.', declarator.location);
+        if (peek().text === '=') failure('TYPE_ERROR', 'A function declaration cannot have an initializer.', peek());
         declareOrdinary(declarator.name, declarator.location, type);
         const priorLinkage = fileLinkage.get(declarator.name);
         const linkage: 'internal' | 'external' = priorLinkage ?? 'external';
@@ -1487,12 +1487,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         consume();
         continue;
       }
-      if (unqualifiedType(type) === 'void') failure('TYPE_ERROR', 'Una variable no puede tener tipo void.', declarator.location);
-      if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline y _Noreturn solo se aplican a funciones.', declarator.location);
+      if (unqualifiedType(type) === 'void') failure('TYPE_ERROR', 'A variable cannot have type void.', declarator.location);
+      if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline and _Noreturn only apply to functions.', declarator.location);
       let initializer: Initializer | undefined;
       declareOrdinary(declarator.name, declarator.location, type);
       if (peek().text === '=') {
-        if (local && isExtern) failure('TYPE_ERROR', 'Un objeto extern de ámbito de bloque no puede tener inicializador.', peek());
+        if (local && isExtern) failure('TYPE_ERROR', 'A block-scope extern object cannot have an initializer.', peek());
         consume();
         const priorDuration = expressionDuration;
         if (isStatic || isThreadLocal) expressionDuration = 'static';
@@ -1501,11 +1501,11 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       type = inferArrayType(type, initializer);
       setOrdinaryType(declarator.name, type);
       const incompleteExternArray = isExtern && arrayType(type)?.length === null && isComplete(arrayType(type)!.element, aggregates);
-      if (!isComplete(type, aggregates) && !incompleteExternArray) failure('INCOMPLETE_TYPE', 'El objeto declarado debe tener un tipo completo.', declarator.location);
-      if (arrayType(type) && containsFlexibleAggregate(arrayType(type)!.element, aggregates)) failure('TYPE_ERROR', 'No se puede declarar un array de struct que contiene un miembro flexible.', declarator.location);
+      if (!isComplete(type, aggregates) && !incompleteExternArray) failure('INCOMPLETE_TYPE', 'The declared object must have a complete type.', declarator.location);
+      if (arrayType(type) && containsFlexibleAggregate(arrayType(type)!.element, aggregates)) failure('TYPE_ERROR', 'Cannot declare an array of a struct that contains a flexible member.', declarator.location);
       const requestedAlignment = alignments.filter((value) => value > 0);
       const naturalAlignment = alignOfType(type, aggregates, declarator.location);
-      if (requestedAlignment.some((value) => value < naturalAlignment)) failure('TYPE_ERROR', '_Alignas no puede reducir la alineación natural del objeto.', declarator.location);
+      if (requestedAlignment.some((value) => value < naturalAlignment)) failure('TYPE_ERROR', '_Alignas cannot reduce the object’s natural alignment.', declarator.location);
       const alignment = Math.max(naturalAlignment, ...requestedAlignment, 1);
       if (local && isExtern) {
         const linkage = fileLinkage.get(declarator.name) ?? 'external';
@@ -1513,7 +1513,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         const symbolKey = linkage === 'internal' ? `internal:${translationUnit}:${declarator.name}` : `external:${declarator.name}`;
         const prior = globals.find((global) => global.symbolKey === symbolKey);
         if (prior && (!compatibleType(prior.type, type) || !!prior.threadLocal !== isThreadLocal)) {
-          failure('CONFLICTING_TYPES', `Declaraciones incompatibles del objeto «${declarator.name}».`, declarator.location);
+          failure('CONFLICTING_TYPES', `Incompatible declarations of object «${declarator.name}».`, declarator.location);
         }
         const global = prior ?? {
           id: globals.length, name: declarator.name, type, location: declarator.location, linkage, symbolKey,
@@ -1554,7 +1554,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       if (peek().text === '}') {
         current.block.endLocation = consume(); popTags(); pending.pop(); continue;
       }
-      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Falta el cierre } del bloque.', peek());
+      if (peek().kind === 'eof') failure('SYNTAX_ERROR', 'Missing closing } for block.', peek());
       enforceLimit('maxDepth', current.depth + 1, limits.maxDepth, peek());
       if (peek().text === '{') {
         const nestedOpen = consume();
@@ -1576,7 +1576,7 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       return { kind: 'staticAssert', ...assertion };
     }
     if (isDeclarationStart(token)) {
-      if (!allowDeclaration) failure('SYNTAX_ERROR', 'Una declaración debe estar dentro de un bloque o en el inicializador de for.', token);
+      if (!allowDeclaration) failure('SYNTAX_ERROR', 'A declaration must be inside a block or in a for initializer.', token);
       return parseDeclaration(depth, true);
     }
     if (unsupportedWords.has(token.text)) unsupported(token);
@@ -1652,12 +1652,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
     const storageClassCount = Number(isStatic) + Number(isExtern) + Number(isTypedef) + Number(isAuto) + Number(isRegister);
     if (storageClassCount > 1 || isTypedef && (isInline || isNoreturn || isThreadLocal || alignments.length) ||
         isAuto || isRegister) {
-      failure('TYPE_ERROR', 'Clases de almacenamiento o especificadores de función incompatibles.', at);
+      failure('TYPE_ERROR', 'Incompatible storage classes or function specifiers.', at);
     }
     const baseQualifiers = { ...lastSpecifierQualifiers };
     const standaloneTag = lastSpecifierDefinesTag;
     if ((isAggregate(base) || standaloneTag) && peek().text === ';') {
-      if (isStatic || isExtern || isTypedef || isAuto || isRegister || isInline || isNoreturn || isThreadLocal || alignments.length) failure('TYPE_ERROR', 'Los especificadores de almacenamiento/alineación requieren un declarador.', at);
+      if (isStatic || isExtern || isTypedef || isAuto || isRegister || isInline || isNoreturn || isThreadLocal || alignments.length) failure('TYPE_ERROR', 'Storage/alignment specifiers require a declarator.', at);
       consume(); continue;
     }
     let first = true;
@@ -1668,23 +1668,23 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       const detachedScope = parameterScope ? popTags() : undefined;
       if (parameterScope && (!detachedScope || detachedScope.tags !== parameterScope.tags || detachedScope.enumTags !== parameterScope.enumTags ||
           detachedScope.ordinary !== parameterScope.ordinary || detachedScope.ordinaryTypes !== parameterScope.ordinaryTypes || detachedScope.typedefs !== parameterScope.typedefs)) {
-        failure('ENGINE_INTERNAL_ERROR', 'El ámbito de parámetros no coincide con la pila de ámbitos del declarador.', declarator.location);
+        failure('ENGINE_INTERNAL_ERROR', 'The parameter scope does not match the declarator scope stack.', declarator.location);
       }
       if (isTypedef) {
-        if (alignments.length || isThreadLocal) failure('TYPE_ERROR', 'typedef no admite _Alignas ni _Thread_local.', declarator.location);
-        if (peek().text === '=') failure('SYNTAX_ERROR', 'Un typedef no admite inicializador.', peek());
+        if (alignments.length || isThreadLocal) failure('TYPE_ERROR', 'typedef does not allow _Alignas or _Thread_local.', declarator.location);
+        if (peek().text === '=') failure('SYNTAX_ERROR', 'A typedef cannot have an initializer.', peek());
         declareTypedef(declarator.name, type, isConstObjectType(type), declarator.location);
         if (peek().text !== ',') break;
         consume(); first = false; continue;
       }
       if (isFunction(type)) {
-        if (alignments.length || isThreadLocal) failure('TYPE_ERROR', '_Alignas y _Thread_local no pueden aplicarse a funciones.', declarator.location);
+        if (alignments.length || isThreadLocal) failure('TYPE_ERROR', '_Alignas and _Thread_local cannot be applied to functions.', declarator.location);
         declareOrdinary(declarator.name, declarator.location, type);
         const fnType = functionType(type)!;
         let linkage: 'internal' | 'external' = isStatic ? 'internal' : 'external';
         if (isExtern && fileLinkage.get(declarator.name) === 'internal') linkage = 'internal';
         const previousLinkage = fileLinkage.get(declarator.name);
-        if (previousLinkage && previousLinkage !== linkage) failure('CONFLICTING_LINKAGE', `La función «${declarator.name}» mezcla linkage interno y externo.`, declarator.location);
+        if (previousLinkage && previousLinkage !== linkage) failure('CONFLICTING_LINKAGE', `Function «${declarator.name}» mixes internal and external linkage.`, declarator.location);
         fileLinkage.set(declarator.name, linkage);
         const parameterTypes = fnType.parameters;
         const sourceParameters = declarator.parameters ?? [];
@@ -1700,11 +1700,11 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
           oldStyle: !!declarator.oldStyle, inline: isInline, extern: isExtern, noreturn: isNoreturn,
         };
         if (peek().text === '{' || declarator.oldStyle && isDeclarationStart()) {
-          if (!first || peek(1).text === ';') failure('SYNTAX_ERROR', 'Una definición de función debe ser una declaración externa independiente.', peek());
-          if (isNoreturn && declarator.name === 'main') failure('TYPE_ERROR', 'main no puede declararse _Noreturn.', declarator.location);
+          if (!first || peek(1).text === ';') failure('SYNTAX_ERROR', 'A function definition must be a separate external declaration.', peek());
+          if (isNoreturn && declarator.name === 'main') failure('TYPE_ERROR', 'main cannot be declared _Noreturn.', declarator.location);
           if (parameterScope) restoreTags(parameterScope);
           if (unqualifiedType(fn.returnType) !== 'void' && !isComplete(fn.returnType, aggregates)) {
-            failure('INCOMPLETE_TYPE', 'La definición de una función requiere un tipo de retorno de objeto completo o void.', declarator.location);
+            failure('INCOMPLETE_TYPE', 'A function definition requires a complete object or void return type.', declarator.location);
           }
           if (declarator.oldStyle) {
             const byName = new Map(parameters.map((parameter, index) => [parameter.name, index]));
@@ -1712,11 +1712,11 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
             while (isDeclarationStart() && peek().text !== '{') {
               const declarationAt = peek();
               if (['static', 'extern', 'typedef', 'inline', '_Noreturn'].includes(peek().text)) {
-                failure('SYNTAX_ERROR', 'Una declaración de parámetro K&R debe especificar solo su tipo y declarador.', declarationAt);
+                failure('SYNTAX_ERROR', 'A K&R parameter declaration must specify only its type and declarator.', declarationAt);
               }
               const parameterSpecifiers = newDeclarationSpecifiers();
               const parameterBase = parseTypeSpecifier((token) => {
-                if (token.text !== 'register') failure('TYPE_ERROR', 'register es la única clase de almacenamiento permitida en un parámetro K&R.', token);
+                if (token.text !== 'register') failure('TYPE_ERROR', 'register is the only storage class allowed for a K&R parameter.', token);
                 consumeDeclarationSpecifier(parameterSpecifiers, token);
               });
               const registerParameter = parameterSpecifiers.register;
@@ -1724,12 +1724,12 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
               do {
                 const parameterDeclarator = parseDeclarator(false);
                 const index = byName.get(parameterDeclarator.name);
-                if (index === undefined) failure('UNKNOWN_IDENTIFIER', `«${parameterDeclarator.name}» no aparece en la lista K&R de parámetros.`, parameterDeclarator.location);
-                if (declared.has(parameterDeclarator.name)) failure('REDECLARATION', `El parámetro K&R «${parameterDeclarator.name}» se declara más de una vez.`, parameterDeclarator.location);
-                if (peek().text === '=') failure('SYNTAX_ERROR', 'Un parámetro no admite inicializador.', peek());
+                if (index === undefined) failure('UNKNOWN_IDENTIFIER', `«${parameterDeclarator.name}» is not in the K&R parameter list.`, parameterDeclarator.location);
+                if (declared.has(parameterDeclarator.name)) failure('REDECLARATION', `K&R parameter «${parameterDeclarator.name}» is declared more than once.`, parameterDeclarator.location);
+                if (peek().text === '=') failure('SYNTAX_ERROR', 'A parameter cannot have an initializer.', peek());
                 let parameterType = declaredType(parameterDeclarator, parameterBase, parameterQualifiers);
                 if (isArray(parameterType) || isFunction(parameterType)) parameterType = decayType(parameterType);
-                if (parameterType === 'void' || !isComplete(parameterType, aggregates)) failure('TYPE_ERROR', 'Un parámetro K&R requiere un tipo completo de objeto.', parameterDeclarator.location);
+                if (parameterType === 'void' || !isComplete(parameterType, aggregates)) failure('TYPE_ERROR', 'A K&R parameter requires a complete object type.', parameterDeclarator.location);
                 parameters[index] = { name: parameterDeclarator.name, type: parameterType, isConst: isConstObjectType(parameterType), qualifiers: qualifiersOf(parameterType), register: registerParameter, location: parameterDeclarator.location };
                 declared.add(parameterDeclarator.name);
                 if (peek().text !== ',') break;
@@ -1738,11 +1738,11 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
               expect(';');
             }
           }
-          if (parameters.some(parameter => !parameter.name)) failure('SYNTAX_ERROR', 'Los parámetros de una definición necesitan un nombre.', fn.location);
-          if (!declarator.prototype && !declarator.oldStyle && parameters.length) failure('TYPE_ERROR', 'Una definición sin prototipo no puede tener parámetros tipados.', fn.location);
+          if (parameters.some(parameter => !parameter.name)) failure('SYNTAX_ERROR', 'Parameters in a definition must have names.', fn.location);
+          if (!declarator.prototype && !declarator.oldStyle && parameters.length) failure('TYPE_ERROR', 'A definition without a prototype cannot have typed parameters.', fn.location);
           if (parameters.some(parameter => !isComplete(parameter.type, aggregates))) {
             const incompleteParameter = parameters.find(parameter => !isComplete(parameter.type, aggregates))!;
-            failure('INCOMPLETE_TYPE', 'Un parámetro de una definición debe tener un tipo completo después de los ajustes.', incompleteParameter.location);
+            failure('INCOMPLETE_TYPE', 'A parameter in a definition must have a complete type after adjustments.', incompleteParameter.location);
           }
           fn.parameters = parameters;
           fn.body = parseBody(1, parameters);
@@ -1750,9 +1750,9 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         } else if (peek().text !== ',') expect(';');
         functions.push(fn);
       } else {
-        if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline y _Noreturn solo se aplican a funciones.', declarator.location);
+        if (isInline || isNoreturn) failure('TYPE_ERROR', 'inline and _Noreturn only apply to functions.', declarator.location);
         declareOrdinary(declarator.name, declarator.location, type);
-        if (unqualifiedType(type) === 'void' || isFunction(type) || !isComplete(type, aggregates) && !isArray(type)) failure('TYPE_ERROR', 'Un objeto global necesita un tipo de objeto válido.', declarator.location);
+        if (unqualifiedType(type) === 'void' || isFunction(type) || !isComplete(type, aggregates) && !isArray(type)) failure('TYPE_ERROR', 'A global object requires a valid object type.', declarator.location);
         let initializer: Initializer | undefined;
         if (peek().text === '=') {
           consume();
@@ -1764,24 +1764,24 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
         const inferredArray = arrayType(inferredType);
         const incompleteArray = !!inferredArray && inferredArray.length === null && isComplete(inferredArray.element, aggregates);
         const incompleteTentativeArray = incompleteArray && !initializer && !isExtern;
-        if (!isComplete(inferredType, aggregates) && !(incompleteArray && (isExtern || incompleteTentativeArray))) failure('INCOMPLETE_TYPE', 'El objeto global debe tener un tipo completo.', declarator.location);
-        if (inferredArray && containsFlexibleAggregate(inferredArray.element, aggregates)) failure('TYPE_ERROR', 'No se puede declarar un array de struct que contiene un miembro flexible.', declarator.location);
-        if (isThreadLocal && inferredArray?.length === null && !isExtern) failure('INCOMPLETE_TYPE', 'Un array thread-local necesita una longitud completa o una definición posterior.', declarator.location);
+        if (!isComplete(inferredType, aggregates) && !(incompleteArray && (isExtern || incompleteTentativeArray))) failure('INCOMPLETE_TYPE', 'The global object must have a complete type.', declarator.location);
+        if (inferredArray && containsFlexibleAggregate(inferredArray.element, aggregates)) failure('TYPE_ERROR', 'Cannot declare an array of a struct that contains a flexible member.', declarator.location);
+        if (isThreadLocal && inferredArray?.length === null && !isExtern) failure('INCOMPLETE_TYPE', 'A thread-local array requires a complete length or a later definition.', declarator.location);
         const requestedAlignment = alignments.filter((value) => value > 0);
         const naturalAlignment = alignOfType(inferredArray?.length === null ? inferredArray.element : inferredType, aggregates, declarator.location);
-        if (requestedAlignment.some((value) => value < naturalAlignment)) failure('TYPE_ERROR', '_Alignas no puede reducir la alineación natural del objeto.', declarator.location);
+        if (requestedAlignment.some((value) => value < naturalAlignment)) failure('TYPE_ERROR', '_Alignas cannot reduce the object’s natural alignment.', declarator.location);
         const effectiveAlignment = Math.max(naturalAlignment, ...requestedAlignment, 1);
         let linkage: 'internal' | 'external' = isStatic ? 'internal' : 'external';
         if (isExtern && fileLinkage.get(declarator.name) === 'internal') linkage = 'internal';
         const previousLinkage = fileLinkage.get(declarator.name);
-        if (previousLinkage && previousLinkage !== linkage) failure('CONFLICTING_LINKAGE', `El objeto «${declarator.name}» mezcla linkage interno y externo.`, declarator.location);
+        if (previousLinkage && previousLinkage !== linkage) failure('CONFLICTING_LINKAGE', `Object «${declarator.name}» mixes internal and external linkage.`, declarator.location);
         fileLinkage.set(declarator.name, linkage);
         const symbolKey = linkage === 'internal' ? `internal:${translationUnit}:${declarator.name}` : `external:${declarator.name}`;
         const prior = globals.find(global => global.symbolKey === symbolKey);
         if (prior) {
           const isConst = isConstObjectType(inferredType);
-          if (!!prior.isConst !== isConst || !!prior.threadLocal !== isThreadLocal || !compatibleType(prior.type, inferredType)) failure('CONFLICTING_TYPES', `Declaraciones incompatibles del objeto «${declarator.name}».`, declarator.location);
-          if (prior.initializer && initializer) failure('REDEFINITION', `El objeto global «${declarator.name}» ya tiene una definición.`, declarator.location);
+          if (!!prior.isConst !== isConst || !!prior.threadLocal !== isThreadLocal || !compatibleType(prior.type, inferredType)) failure('CONFLICTING_TYPES', `Incompatible declarations of object «${declarator.name}».`, declarator.location);
+          if (prior.initializer && initializer) failure('REDEFINITION', `Global object «${declarator.name}» already has a definition.`, declarator.location);
           if (!prior.initializer && initializer) prior.initializer = initializer;
           prior.tentative = prior.tentative || !isExtern && !initializer;
           prior.declarationOnly = prior.declarationOnly && isExtern && !initializer;
@@ -1801,11 +1801,11 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
       first = false;
       if (peek().text !== ',') break;
       consume();
-      if (functions.length && functions[functions.length - 1].location === at && functions[functions.length - 1].body) failure('SYNTAX_ERROR', 'Una definición de función no puede compartir declaradores.', at);
+      if (functions.length && functions[functions.length - 1].location === at && functions[functions.length - 1].body) failure('SYNTAX_ERROR', 'A function definition cannot share declarators.', at);
     }
     if (peek().text === ';') consume();
   }
-  if (cursor === 0) failure('SYNTAX_ERROR', 'El archivo no contiene declaraciones externas.', peek());
+  if (cursor === 0) failure('SYNTAX_ERROR', 'The file contains no external declarations.', peek());
   for (const global of globals) {
     const array = arrayType(global.type);
     if (global.tentative && array?.length === null && isComplete(array.element, aggregates)) global.type = arrayOf(array.element, 1);
@@ -1816,20 +1816,20 @@ export function parse(tokens: Token[], limits: PrepareLimits, translationUnit = 
 }
 
 const requireInteger = (type: CType, location: Location) => {
-  if (!isInteger(type)) failure('TYPE_ERROR', 'Este operador requiere operandos enteros.', location);
+  if (!isInteger(type)) failure('TYPE_ERROR', 'This operator requires integer operands.', location);
 };
 const requireArithmetic = (type: CType, location: Location) => {
-  if (!isArithmetic(type)) failure('TYPE_ERROR', 'Este operador requiere un tipo aritmético.', location);
+  if (!isArithmetic(type)) failure('TYPE_ERROR', 'This operator requires an arithmetic type.', location);
 };
 const requireScalar = (type: CType, location: Location) => {
-  if (!isScalar(type)) failure('TYPE_ERROR', 'Este operador requiere un operando escalar.', location);
+  if (!isScalar(type)) failure('TYPE_ERROR', 'This operator requires a scalar operand.', location);
 };
 
 function aggregateMemberPath(type: CType, name: string, aggregates: readonly AggregateDefinition[], at: Location): AggregateMember[] {
   const rootType = aggregateType(type);
-  if (!rootType) failure('TYPE_ERROR', 'El acceso a miembros requiere un struct o union.', at);
+  if (!rootType) failure('TYPE_ERROR', 'Member access requires a struct or union.', at);
   const root = aggregates.find(item => item.id === rootType.id);
-  if (!root || !root.complete) failure('INCOMPLETE_TYPE', 'No se puede acceder a miembros de un agregado incompleto.', at);
+  if (!root || !root.complete) failure('INCOMPLETE_TYPE', 'Cannot access members of an incomplete aggregate.', at);
   const matches: AggregateMember[][] = [];
   const pending: { definition: AggregateDefinition; path: AggregateMember[] }[] = [{ definition: root, path: [] }];
   while (pending.length) {
@@ -1845,8 +1845,8 @@ function aggregateMemberPath(type: CType, name: string, aggregates: readonly Agg
       }
     }
   }
-  if (!matches.length) failure('UNKNOWN_MEMBER', `El agregado no tiene un miembro «${name}».`, at);
-  if (matches.length > 1) failure('AMBIGUOUS_MEMBER', `El miembro «${name}» está promovido por más de un miembro anónimo.`, at);
+  if (!matches.length) failure('UNKNOWN_MEMBER', `The aggregate has no member «${name}».`, at);
+  if (matches.length > 1) failure('AMBIGUOUS_MEMBER', `Member «${name}» is promoted by more than one anonymous member.`, at);
   return matches[0];
 }
 
@@ -1880,7 +1880,7 @@ function constantExpression(
         case 'sizeof': types.set(node, 'unsigned long'); break;
         case 'generic': {
           const selected = resolveGeneric?.(node) ?? node.selected;
-          if (!selected || !types.get(selected)) failure('NON_CONSTANT_CASE', 'No se puede determinar la asociación seleccionada de _Generic.', node.location);
+          if (!selected || !types.get(selected)) failure('NON_CONSTANT_CASE', 'Cannot determine the selected _Generic association.', node.location);
           types.set(node, types.get(selected)!);
           break;
         }
@@ -1892,7 +1892,7 @@ function constantExpression(
               ? 'int' : node.operator === '<<' || node.operator === '>>' ? promote(types.get(node.left)!) : commonType(types.get(node.left)!, types.get(node.right)!));
           break;
         case 'conditional': types.set(node, commonType(types.get(node.then)!, types.get(node.else)!)); break;
-        default: failure('NON_CONSTANT_CASE', 'case requiere una expresión constante entera.', node.location);
+        default: failure('NON_CONSTANT_CASE', 'case requires an integer constant expression.', node.location);
       }
     }
     return types.get(root)!;
@@ -1906,12 +1906,12 @@ function constantExpression(
       if (node.kind === 'literal') { values.set(node, node.value); continue; }
       if (node.kind === 'sizeof') {
         const type = node.valueType ?? node.operand?.type;
-        if (!type) failure('NON_CONSTANT_CASE', 'sizeof requiere un tipo conocido en una expresión constante.', node.location);
+        if (!type) failure('NON_CONSTANT_CASE', 'sizeof requires a known type in a constant expression.', node.location);
         values.set(node, { type: 'unsigned long', value: BigInt(sizeOfType(type, aggregates, node.location)) }); continue;
       }
       if (node.kind === 'generic') {
         const selected = resolveGeneric?.(node) ?? node.selected;
-        if (!selected) failure('NON_CONSTANT_CASE', 'No se puede determinar la asociación seleccionada de _Generic.', node.location);
+        if (!selected) failure('NON_CONSTANT_CASE', 'Cannot determine the selected _Generic association.', node.location);
         values.set(node, constantExpression(selected, aggregates, resolveGeneric)); continue;
       }
       if (node.kind === 'cast' || node.kind === 'unary') {
@@ -1923,12 +1923,12 @@ function constantExpression(
       if (node.kind === 'conditional') {
         tasks.push({ kind: 'conditional', node }); tasks.push({ kind: 'evaluate', node: node.condition }); continue;
       }
-      failure('NON_CONSTANT_CASE', 'case requiere una expresión constante entera.', node.location);
+      failure('NON_CONSTANT_CASE', 'case requires an integer constant expression.', node.location);
     }
     if (task.kind === 'unary') {
       const operand = values.get(task.node.operand)!;
       if (task.node.kind === 'cast') {
-        if (!isInteger(task.node.targetType)) failure('NON_CONSTANT_CASE', 'Una constante sólo puede convertirse a un tipo entero.', task.node.location);
+        if (!isInteger(task.node.targetType)) failure('NON_CONSTANT_CASE', 'A constant can only be converted to an integer type.', task.node.location);
         values.set(task.node, convert(operand, task.node.targetType, task.node.location));
       } else if (task.node.operator === '!') values.set(task.node, { type: 'int', value: truth(operand) ? 0n : 1n });
       else values.set(task.node, unaryConstant(task.node.operator, operand, task.node.location));
@@ -1938,7 +1938,7 @@ function constantExpression(
       const left = values.get(task.node.left)!;
       if (task.node.operator === '&&' && !truth(left)) { values.set(task.node, { type: 'int', value: 0n }); continue; }
       if (task.node.operator === '||' && truth(left)) { values.set(task.node, { type: 'int', value: 1n }); continue; }
-      if (task.node.operator === ',') failure('NON_CONSTANT_CASE', 'La coma no forma parte de una expresión constante entera evaluada.', task.node.location);
+      if (task.node.operator === ',') failure('NON_CONSTANT_CASE', 'The comma operator is not part of an evaluated integer constant expression.', task.node.location);
       tasks.push({ kind: 'binary-right', node: task.node, left }); tasks.push({ kind: 'evaluate', node: task.node.right }); continue;
     }
     if (task.kind === 'binary-right') {
@@ -1957,7 +1957,7 @@ function constantExpression(
     }
   }
   const result = values.get(root)!;
-  if (!isInteger(result.type)) failure('NON_CONSTANT_CASE', 'case requiere una expresión constante entera.', root.location);
+  if (!isInteger(result.type)) failure('NON_CONSTANT_CASE', 'case requires an integer constant expression.', root.location);
   return result;
 }
 function unaryConstant(operator: string, value: CValue, at: Location): CValue {
@@ -1972,8 +1972,8 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
   for (const global of globals) {
     const prior = globalByName.get(global.name);
     if (prior) {
-      if (!compatibleType(prior.type, global.type)) failure('CONFLICTING_TYPES', `Declaraciones incompatibles de «${global.name}».`, global.location);
-      if (prior.initializer && global.initializer) failure('REDEFINITION', `El objeto global «${global.name}» ya está inicializado.`, global.location);
+      if (!compatibleType(prior.type, global.type)) failure('CONFLICTING_TYPES', `Incompatible declarations of «${global.name}».`, global.location);
+      if (prior.initializer && global.initializer) failure('REDEFINITION', `Global object «${global.name}» is already initialized.`, global.location);
       if (!prior.initializer && global.initializer) prior.initializer = global.initializer;
       continue;
     }
@@ -1982,10 +1982,10 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
   const functionIRType = (fn: FunctionIR): CType => functionOf(fn.returnType, fn.parameters.map(parameter => parameter.type), !!fn.variadic, fn.prototype !== false);
   for (let index = 0; index < functions.length; index++) {
     const fn = functions[index];
-    if (globalByName.has(fn.name)) failure('CONFLICTING_TYPES', `«${fn.name}» declara tanto un objeto como una función.`, fn.location);
+    if (globalByName.has(fn.name)) failure('CONFLICTING_TYPES', `«${fn.name}» is declared as both an object and a function.`, fn.location);
     const prior = signatures.get(fn.name);
-    if (prior && !compatibleType(functionIRType(prior.fn), functionIRType(fn))) failure('CONFLICTING_TYPES', `Declaraciones incompatibles de «${fn.name}».`, fn.location);
-    if (fn.body && prior?.definition !== undefined) failure('REDEFINITION', `La función «${fn.name}» ya tiene una definición.`, fn.location);
+    if (prior && !compatibleType(functionIRType(prior.fn), functionIRType(fn))) failure('CONFLICTING_TYPES', `Incompatible declarations of «${fn.name}».`, fn.location);
+    if (fn.body && prior?.definition !== undefined) failure('REDEFINITION', `Function «${fn.name}» already has a definition.`, fn.location);
     const signature = prior ?? { fn };
     if (fn.body) signature.definition = index;
     const builtin = BUILTINS[fn.name] || LIBRARY_FUNCTIONS.includes(fn.name) || fn.name.startsWith('__builtin_va_')
@@ -1994,7 +1994,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
     if (!fn.body && builtin) {
       if (!LIBRARY_FUNCTIONS.includes(fn.name) && !fn.name.startsWith('__builtin_va_') &&
           (!sameType(fn.returnType, builtin.returnType) || fn.parameters.length !== builtin.parameters.length || !fn.parameters.every((parameter, parameterIndex) => sameType(parameter.type, builtin.parameters[parameterIndex])))) {
-        failure('CONFLICTING_TYPES', `El prototipo de «${fn.name}» no coincide con su biblioteca.`, fn.location);
+        failure('CONFLICTING_TYPES', `Prototype for «${fn.name}» does not match its library declaration.`, fn.location);
       }
       signature.builtin = index;
     }
@@ -2004,14 +2004,14 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
   for (const signature of signatures.values()) if (signature.definition === undefined && signature.builtin !== undefined) functions[signature.builtin].builtin = true;
   const main = signatures.get('main');
   if (!options.allowMissingMain) {
-    if (!main || main.definition === undefined) failure('MISSING_MAIN', 'Se requiere una definición de main con linkage externo.', functions[0]?.location ?? globals[0]?.location ?? { file: program.translationUnit ?? 'main.c', line: 1, column: 1 });
+    if (!main || main.definition === undefined) failure('MISSING_MAIN', 'A definition of main with external linkage is required.', functions[0]?.location ?? globals[0]?.location ?? { file: program.translationUnit ?? 'main.c', line: 1, column: 1 });
     const argv = main.fn.parameters[1]?.type;
     const argvPointer = argv ? pointerType(argv) : undefined;
     const argvElementPointer = argvPointer ? pointerType(argvPointer.base) : undefined;
     if (unqualifiedType(main.fn.returnType) !== 'int' || main.fn.parameters.length &&
         !(main.fn.parameters.length === 2 && unqualifiedType(main.fn.parameters[0].type) === 'int' && argvPointer &&
           argvElementPointer && unqualifiedType(argvElementPointer.base) === 'char')) {
-      failure('UNSUPPORTED_FEATURE', 'P4 admite int main(void) o int main(int, char **).', main.fn.location);
+      failure('UNSUPPORTED_FEATURE', 'P4 supports int main(void) or int main(int, char **).', main.fn.location);
     }
   }
   const mainDefinition = main?.definition;
@@ -2037,7 +2037,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
     };
     const declare = (name: string, type: CType, location: Location, parameter = false, isConst = false, staticStorage = false) => {
       const scope = scopes[scopes.length - 1];
-      if (scope.names.has(name)) failure('REDECLARATION', `La variable «${name}» ya está declarada en este ámbito.`, location);
+      if (scope.names.has(name)) failure('REDECLARATION', `Variable «${name}» is already declared in this scope.`, location);
       const id = fn.bindings.length;
       const binding: Binding = {
         id, name, type, location, isConst: isConst || !!qualifiersOf(type).const,
@@ -2082,10 +2082,10 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       return node;
     };
     const findMemberPath = (type: CType, name: string, at: Location): AggregateMember[] => {
-      if (!isAggregate(type)) failure('TYPE_ERROR', 'El acceso a miembros requiere un struct o union.', at);
+      if (!isAggregate(type)) failure('TYPE_ERROR', 'Member access requires a struct or union.', at);
       const rootType = aggregateType(type)!;
       const root = aggregates.find(item => item.id === rootType.id);
-      if (!root || !root.complete) failure('INCOMPLETE_TYPE', 'No se puede acceder a miembros de un agregado incompleto.', at);
+      if (!root || !root.complete) failure('INCOMPLETE_TYPE', 'Cannot access members of an incomplete aggregate.', at);
       const matches: AggregateMember[][] = [];
       const pending: { definition: AggregateDefinition; path: AggregateMember[] }[] = [{ definition: root, path: [] }];
       while (pending.length) {
@@ -2102,8 +2102,8 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
           }
         }
       }
-      if (!matches.length) failure('UNKNOWN_MEMBER', `El agregado no tiene un miembro «${name}».`, at);
-      if (matches.length > 1) failure('AMBIGUOUS_MEMBER', `El miembro «${name}» está promovido por más de un miembro anónimo.`, at);
+      if (!matches.length) failure('UNKNOWN_MEMBER', `The aggregate has no member «${name}».`, at);
+      if (matches.length > 1) failure('AMBIGUOUS_MEMBER', `Member «${name}» is promoted by more than one anonymous member.`, at);
       return matches[0];
     };
 
@@ -2111,7 +2111,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       const source = node.type!;
       if (isArray(source) || isFunction(source)) {
         if (isArray(source) && node.register) {
-          failure('INVALID_LVALUE', 'No se puede convertir a puntero un array perteneciente a un objeto register.', node.location);
+          failure('INVALID_LVALUE', 'Cannot convert an array belonging to a register object to a pointer.', node.location);
         }
         return { kind: 'decay', operand: node, location: node.location, type: decayType(source) };
       }
@@ -2152,37 +2152,37 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
             const signature = visibleFunctions.get(node.name);
             if (signature) {
             const functionIndex = signature.definition ?? signature.builtin;
-            if (functionIndex === undefined && !options.allowUnresolved) failure('UNDEFINED_FUNCTION', `La función «${node.name}» no tiene definición en este programa.`, node.location);
+            if (functionIndex === undefined && !options.allowUnresolved) failure('UNDEFINED_FUNCTION', `Function «${node.name}» has no definition in this program.`, node.location);
               const replacement = node as unknown as Extract<Expression, { kind: 'function' }>;
             replacement.kind = 'function'; replacement.functionIndex = functionIndex; replacement.symbolKey = signature.fn.symbolKey; replacement.type = functionIRType(signature.fn); break;
             }
-            failure('UNKNOWN_IDENTIFIER', `La variable «${node.name}» no está declarada en este ámbito.`, node.location);
+            failure('UNKNOWN_IDENTIFIER', `Variable «${node.name}» is not declared in this scope.`, node.location);
           }
           case 'function': {
             const signature = visibleFunctions.get(node.name);
-            if (!signature) failure('UNKNOWN_FUNCTION', `La función «${node.name}» debe declararse antes de su uso.`, node.location);
+            if (!signature) failure('UNKNOWN_FUNCTION', `Function «${node.name}» must be declared before use.`, node.location);
             const functionIndex = signature.definition ?? signature.builtin;
-            if (functionIndex === undefined && !options.allowUnresolved) failure('UNDEFINED_FUNCTION', `La función «${node.name}» no tiene definición en este programa.`, node.location);
+            if (functionIndex === undefined && !options.allowUnresolved) failure('UNDEFINED_FUNCTION', `Function «${node.name}» has no definition in this program.`, node.location);
             node.functionIndex = functionIndex; node.symbolKey = signature.fn.symbolKey; node.type = functionIRType(signature.fn); break;
           }
           case 'unary': {
             if (node.operator === '&') {
               const operandType = node.operand.type!;
-              if (node.operand.bitField) failure('INVALID_LVALUE', 'No se puede tomar la dirección de un bit-field.', node.location);
-              if (!isLvalue(node.operand) && !isFunction(operandType)) failure('INVALID_LVALUE', 'El operador & requiere un objeto o función designador.', node.location);
+              if (node.operand.bitField) failure('INVALID_LVALUE', 'Cannot take the address of a bit-field.', node.location);
+              if (!isLvalue(node.operand) && !isFunction(operandType)) failure('INVALID_LVALUE', 'The & operator requires an object or function designator.', node.location);
               if (node.operand.register || node.operand.kind === 'variable' && node.operand.binding !== undefined && fn.bindings[node.operand.binding]?.register) {
-                failure('INVALID_LVALUE', 'No se puede tomar la dirección de un objeto register.', node.location);
+                failure('INVALID_LVALUE', 'Cannot take the address of a register object.', node.location);
               }
-              if (isArray(operandType) && !isComplete(operandType, aggregates)) failure('INCOMPLETE_TYPE', 'No se puede tomar la dirección de un array incompleto.', node.location);
+              if (isArray(operandType) && !isComplete(operandType, aggregates)) failure('INCOMPLETE_TYPE', 'Cannot take the address of an incomplete array.', node.location);
               node.type = pointerTo(qualifyType(operandType, qualifiersOf(operandType)), { baseConst: !!node.operand.isConst }); break;
             }
             node.operand = analyzedValue(node.operand);
             const operandType = node.operand.type!;
             if (node.operator === '*') {
-              if (!isPointer(operandType)) failure('TYPE_ERROR', 'El operador * requiere un puntero.', node.location);
+              if (!isPointer(operandType)) failure('TYPE_ERROR', 'The * operator requires a pointer.', node.location);
               const designated = pointedToType(operandType)!;
-              if (unqualifiedType(designated) === 'void') failure('INCOMPLETE_TYPE', 'No se puede desreferenciar void *. ', node.location);
-              if (!isComplete(designated, aggregates) && !isFunction(designated)) failure('INCOMPLETE_TYPE', 'No se puede desreferenciar un puntero a tipo incompleto.', node.location);
+              if (unqualifiedType(designated) === 'void') failure('INCOMPLETE_TYPE', 'Cannot dereference void *.', node.location);
+              if (!isComplete(designated, aggregates) && !isFunction(designated)) failure('INCOMPLETE_TYPE', 'Cannot dereference a pointer to an incomplete type.', node.location);
               node.type = designated; node.isConst = !!qualifiersOf(designated).const; break;
             }
             if (node.operator === '!') { requireScalar(operandType, node.location); node.type = 'int'; break; }
@@ -2203,7 +2203,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
               if (node.operator === '+' && isInteger(leftType) && isPointer(rightType)) { requirePointerArithmetic(rightType, aggregates, node.location); node.type = rightType; break; }
               if (node.operator === '-' && isPointer(leftType) && isInteger(rightType)) { requirePointerArithmetic(leftType, aggregates, node.location); node.type = leftType; break; }
               if (node.operator === '-' && isPointer(leftType) && isPointer(rightType) && compatibleType(leftType, rightType) && unqualifiedType(pointedToType(leftType)!) !== 'void') { node.type = 'long'; break; }
-              failure('TYPE_ERROR', `Operandos incompatibles para «${node.operator}».`, node.location);
+              failure('TYPE_ERROR', `Incompatible operands for «${node.operator}».`, node.location);
             }
             if (['*', '/', '%', '&', '|', '^', '<<', '>>'].includes(node.operator)) {
               if (node.operator === '%' || ['&', '|', '^', '<<', '>>'].includes(node.operator)) { requireInteger(leftType, node.location); requireInteger(rightType, node.location); }
@@ -2215,30 +2215,30 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
               if (isPointer(leftType) && isPointer(rightType) && (compatibleType(leftType, rightType) || canConvertPointerType(leftType, rightType))) { node.type = 'int'; break; }
               if ((node.operator === '==' || node.operator === '!=') && isPointer(leftType) && isInteger(rightType) && isNullPointerConstant(node.right, aggregates)) { node.type = 'int'; break; }
               if ((node.operator === '==' || node.operator === '!=') && isPointer(rightType) && isInteger(leftType) && isNullPointerConstant(node.left, aggregates)) { node.type = 'int'; break; }
-              failure('TYPE_ERROR', `Operandos incompatibles para «${node.operator}».`, node.location);
+              failure('TYPE_ERROR', `Incompatible operands for «${node.operator}».`, node.location);
             }
-            failure('UNSUPPORTED_FEATURE', `Operador binario no implementado: «${node.operator}».`, node.location);
+            failure('UNSUPPORTED_FEATURE', `Unimplemented binary operator: «${node.operator}».`, node.location);
           }
           case 'assignment': {
             const targetType = node.target.type!;
-            if (!isLvalue(node.target) || node.target.isConst || !isModifiableObject(targetType, aggregates)) failure('INVALID_LVALUE', 'La asignación necesita un lvalue modificable.', node.location);
+            if (!isLvalue(node.target) || node.target.isConst || !isModifiableObject(targetType, aggregates)) failure('INVALID_LVALUE', 'Assignment requires a modifiable lvalue.', node.location);
             node.value = analyzedValue(node.value);
             const valueType = node.value.type!;
             if (node.operator === '=') {
-              if (!canAssign(targetType, valueType, node.value)) failure('TYPE_ERROR', `No se puede asignar ${typeName(valueType, aggregates)} a ${typeName(targetType, aggregates)}.`, node.location);
+              if (!canAssign(targetType, valueType, node.value)) failure('TYPE_ERROR', `Cannot assign ${typeName(valueType, aggregates)} to ${typeName(targetType, aggregates)}.`, node.location);
             } else {
               const op = node.operator.slice(0, -1);
               if (isPointer(targetType) && (op === '+' || op === '-') && isInteger(valueType)) requirePointerArithmetic(targetType, aggregates, node.location);
-              else if (!isArithmetic(targetType) || !isArithmetic(valueType)) failure('TYPE_ERROR', `El operador «${node.operator}» requiere operandos aritméticos compatibles.`, node.location);
+              else if (!isArithmetic(targetType) || !isArithmetic(valueType)) failure('TYPE_ERROR', `Operator «${node.operator}» requires compatible arithmetic operands.`, node.location);
               else if (['%', '&', '|', '^', '<<', '>>'].includes(op)) { requireInteger(targetType, node.location); requireInteger(valueType, node.location); }
             }
             node.type = unqualifiedType(targetType); break;
           }
           case 'update': {
             const type = node.operand.type!;
-            if (!isLvalue(node.operand) || node.operand.isConst || !isModifiableObject(type, aggregates)) failure('INVALID_LVALUE', '++ y -- necesitan un lvalue modificable.', node.location);
+            if (!isLvalue(node.operand) || node.operand.isConst || !isModifiableObject(type, aggregates)) failure('INVALID_LVALUE', '++ and -- require a modifiable lvalue.', node.location);
             if (!isArithmetic(type)) {
-              if (!isPointer(type)) failure('TYPE_ERROR', '++ y -- requieren un tipo aritmético o puntero a objeto.', node.location);
+              if (!isPointer(type)) failure('TYPE_ERROR', '++ and -- require an arithmetic type or an object pointer.', node.location);
               requirePointerArithmetic(type, aggregates, node.location);
             }
             node.type = unqualifiedType(type); break;
@@ -2248,14 +2248,14 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
             const source = node.operand.type!;
             const target = node.targetType;
             if (target === 'void') { node.type = target; break; }
-            if (isArray(target) || isFunction(target) || isAggregate(target)) failure('TYPE_ERROR', 'Un cast debe producir void o un tipo escalar.', node.location);
+            if (isArray(target) || isFunction(target) || isAggregate(target)) failure('TYPE_ERROR', 'A cast must produce void or a scalar type.', node.location);
             if (isArithmetic(target) && isArithmetic(source) || isPointer(target) && (isPointer(source) || isInteger(source)) || isInteger(target) && isPointer(source)) { node.type = target; break; }
-            failure('TYPE_ERROR', 'Tipos incompatibles en el cast.', node.location);
+            failure('TYPE_ERROR', 'Incompatible types in cast.', node.location);
           }
           case 'sizeof': {
             const type = node.valueType ?? node.operand!.type!;
-            if (node.operand?.bitField) failure('TYPE_ERROR', 'sizeof no se aplica a un bit-field.', node.location);
-            if (!isComplete(type, aggregates) || isFunction(type)) failure('INCOMPLETE_TYPE', 'sizeof requiere un tipo de objeto completo.', node.location);
+            if (node.operand?.bitField) failure('TYPE_ERROR', 'sizeof does not apply to a bit-field.', node.location);
+            if (!isComplete(type, aggregates) || isFunction(type)) failure('INCOMPLETE_TYPE', 'sizeof requires a complete object type.', node.location);
             sizeOfType(type, aggregates, node.location); node.type = 'unsigned long'; break;
           }
           case 'conditional': {
@@ -2267,12 +2267,12 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
             else if (isAggregate(left) && compatibleType(left, right)) node.type = left;
             else if (isPointer(left) && isPointer(right)) {
               const composite = conditionalPointerCompositeType(left, right);
-              if (!composite) failure('TYPE_ERROR', 'Las ramas de ?: requieren punteros a tipos compatibles o un puntero a void.', node.location);
+              if (!composite) failure('TYPE_ERROR', 'The ?: branches require pointers to compatible types or a pointer to void.', node.location);
               node.type = composite;
             }
             else if (isPointer(left) && isInteger(right) && isNullPointerConstant(node.else, aggregates)) node.type = left;
             else if (isPointer(right) && isInteger(left) && isNullPointerConstant(node.then, aggregates)) node.type = right;
-            else failure('TYPE_ERROR', 'Las ramas de ?: deben tener tipos compatibles.', node.location);
+            else failure('TYPE_ERROR', 'The ?: branches must have compatible types.', node.location);
             break;
           }
           case 'index': {
@@ -2282,9 +2282,9 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
               [node.base, node.index] = [node.index, node.base];
               [baseType, indexType] = [indexType, baseType];
             }
-            if (!isPointer(baseType) || !isInteger(indexType)) failure('TYPE_ERROR', 'El subíndice requiere un puntero a objeto y un índice entero.', node.location);
+            if (!isPointer(baseType) || !isInteger(indexType)) failure('TYPE_ERROR', 'Subscript requires an object pointer and an integer index.', node.location);
             const designated = pointedToType(baseType);
-            if (!designated || unqualifiedType(designated) === 'void' || isFunction(designated) || !isComplete(designated, aggregates)) failure('INCOMPLETE_TYPE', 'El subíndice requiere un puntero a tipo completo de objeto.', node.location);
+            if (!designated || unqualifiedType(designated) === 'void' || isFunction(designated) || !isComplete(designated, aggregates)) failure('INCOMPLETE_TYPE', 'Subscript requires a pointer to a complete object type.', node.location);
             node.type = designated; node.isConst = !!qualifiersOf(designated).const; break;
           }
           case 'member': {
@@ -2295,7 +2295,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
               node.base = analyzedValue(node.base);
               const pointer = node.base.type!;
               const designated = pointedToType(pointer);
-              if (!designated || !isAggregate(designated)) failure('TYPE_ERROR', 'El operador -> requiere un puntero a struct o union.', node.location);
+              if (!designated || !isAggregate(designated)) failure('TYPE_ERROR', 'The -> operator requires a pointer to a struct or union.', node.location);
               aggregateType = designated;
               inheritedQualifiers = qualifiersOf(designated);
             } else {
@@ -2328,25 +2328,25 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
           }
           case 'decay': {
             const source = node.operand.type!;
-            if (!isArray(source) && !isFunction(source)) failure('TYPE_ERROR', 'Conversión array/function decay inválida.', node.location);
+            if (!isArray(source) && !isFunction(source)) failure('TYPE_ERROR', 'Invalid array/function decay conversion.', node.location);
             node.type = decayType(source); break;
           }
           case 'compoundLiteral': {
-            if (isFunction(node.objectType) || node.objectType === 'void' || !isComplete(node.objectType, aggregates)) failure('INCOMPLETE_TYPE', 'Un compound literal necesita un tipo de objeto completo.', node.location);
+            if (isFunction(node.objectType) || node.objectType === 'void' || !isComplete(node.objectType, aggregates)) failure('INCOMPLETE_TYPE', 'A compound literal requires a complete object type.', node.location);
             node.initializer = analyzeInitializer(node.objectType, node.initializer, false);
             node.type = node.objectType; break;
           }
           case 'vaArg': {
             node.ap = analyzedValue(node.ap);
-            if (!isPointer(node.ap.type!) || unqualifiedType(pointedToType(node.ap.type!)!) !== 'void') failure('TYPE_ERROR', 'va_arg requiere una va_list activa.', node.location);
+            if (!isPointer(node.ap.type!) || unqualifiedType(pointedToType(node.ap.type!)!) !== 'void') failure('TYPE_ERROR', 'va_arg requires an active va_list.', node.location);
             if (!isScalar(node.valueType) && !isAggregate(node.valueType) || !isComplete(node.valueType, aggregates)) {
-              failure('TYPE_ERROR', 'El tipo de va_arg debe ser un tipo completo de objeto.', node.location);
+              failure('TYPE_ERROR', 'The va_arg type must be a complete object type.', node.location);
             }
             node.type = node.valueType;
             break;
           }
           case 'call': {
-            if (!node.callee) failure('ENGINE_INTERNAL_ERROR', 'La llamada no tiene callee.', node.location);
+            if (!node.callee) failure('ENGINE_INTERNAL_ERROR', 'Call has no callee.', node.location);
             const calleeType = node.callee.type!;
             let signatureType: CType;
             if (isFunction(calleeType)) {
@@ -2363,16 +2363,16 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
               const valueCallee = analyzedValue(node.callee);
               node.callee = valueCallee;
               const designated = pointedToType(valueCallee.type!);
-              if (!designated || !isFunction(designated)) failure('NOT_CALLABLE', 'La expresión llamada no es una función ni un puntero a función.', node.location);
+              if (!designated || !isFunction(designated)) failure('NOT_CALLABLE', 'The called expression is neither a function nor a function pointer.', node.location);
               signatureType = designated;
             }
             const signature = functionType(signatureType)!;
             const returnType = unqualifiedType(signature.returnType);
             if (returnType !== 'void' && !isComplete(signature.returnType, aggregates)) {
-              failure('INCOMPLETE_TYPE', 'La función llamada debe devolver void o un tipo de objeto completo.', node.location);
+              failure('INCOMPLETE_TYPE', 'The called function must return void or a complete object type.', node.location);
             }
             if (signature.prototype !== false && (node.args.length < signature.parameters.length || !signature.variadic && node.args.length !== signature.parameters.length)) {
-              failure('TYPE_ERROR', `La llamada requiere ${signature.variadic ? 'al menos ' : ''}${signature.parameters.length} argumentos.`, node.location);
+              failure('TYPE_ERROR', `Call requires ${signature.variadic ? 'at least ' : ''}${signature.parameters.length} arguments.`, node.location);
             }
             if (signature.prototype === false && !options.allowUnresolved && node.args.length !== signature.parameters.length && signature.parameters.length > 0) {
               // A no-prototype call is checked against the definition at link time.
@@ -2382,14 +2382,14 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
               const actual = node.args[index].type!;
               if (index < signature.parameters.length && signature.prototype !== false) {
                 const expected = signature.parameters[index];
-                if (!canAssign(expected, actual, node.args[index])) failure('TYPE_ERROR', `El argumento ${index + 1} no es compatible con ${typeName(expected, aggregates)}.`, node.args[index].location);
+                if (!canAssign(expected, actual, node.args[index])) failure('TYPE_ERROR', `Argument ${index + 1} is not compatible with ${typeName(expected, aggregates)}.`, node.args[index].location);
               } else if (!signature.prototype || signature.variadic) {
-                if (!(isScalar(actual) || isAggregate(actual) && isComplete(actual, aggregates))) failure('TYPE_ERROR', 'Un argumento variádico requiere un tipo completo permitido.', node.args[index].location);
+                if (!(isScalar(actual) || isAggregate(actual) && isComplete(actual, aggregates))) failure('TYPE_ERROR', 'A variadic argument requires a permitted complete type.', node.args[index].location);
               }
             }
             if (node.name && node.builtin && floatingClassifications.has(node.name) && node.args[0] &&
                 node.args[0].type !== 'float' && node.args[0].type !== 'double' && node.args[0].type !== 'long double') {
-              failure('TYPE_ERROR', `«${node.name}» requiere un argumento flotante.`, node.args[0].location);
+              failure('TYPE_ERROR', `«${node.name}» requires a floating-point argument.`, node.args[0].location);
             }
             node.type = signature.returnType; break;
           }
@@ -2483,7 +2483,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         const current = pending[pending.length - 1];
         if (isArray(current.type)) {
           const array = arrayType(current.type)!;
-          if (array.length === null) failure('INCOMPLETE_TYPE', 'Un array incompleto no admite inicialización por subobjetos.', fn.location);
+          if (array.length === null) failure('INCOMPLETE_TYPE', 'An incomplete array cannot be initialized by subobjects.', fn.location);
           if (current.next >= array.length) { pending.pop(); continue; }
           current.next++;
           pending.push({ type: array.element, next: 0, count: 0 });
@@ -2503,19 +2503,19 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       }
     }
     const analyzeInitializer = (type: CType, initializer: Initializer, fileDuration: boolean): Initializer => {
-      if (!isComplete(type, aggregates)) failure('INCOMPLETE_TYPE', 'El inicializador requiere un objeto completo.', initializer.location);
+      if (!isComplete(type, aggregates)) failure('INCOMPLETE_TYPE', 'Initializer requires a complete object.', initializer.location);
       if (initializer.kind === 'expression') {
         const original = initializer.value;
         const sourceType = analyzeExpression(original);
         const targetArray = arrayType(type);
         if (targetArray && targetArray.element === 'char' && original.kind === 'string') {
           const textLength = original.bytes.length - 1;
-          if (targetArray.length! < textLength) failure('INITIALIZER_TOO_LARGE', 'La cadena no cabe en el array de caracteres.', original.location);
+          if (targetArray.length! < textLength) failure('INITIALIZER_TOO_LARGE', 'The string does not fit in the character array.', original.location);
         } else {
           initializer.value = convertedValue(original);
-          if (!canAssign(type, initializer.value.type!, initializer.value)) failure('TYPE_ERROR', `No se puede inicializar ${typeName(type, aggregates)} con ${typeName(sourceType, aggregates)}.`, original.location);
+          if (!canAssign(type, initializer.value.type!, initializer.value)) failure('TYPE_ERROR', `Cannot initialize ${typeName(type, aggregates)} with ${typeName(sourceType, aggregates)}.`, original.location);
         }
-        if (fileDuration && !isStaticInitializer(initializer)) failure('NON_CONSTANT_INITIALIZER', 'Un objeto de duración estática requiere un inicializador constante.', initializer.location);
+        if (fileDuration && !isStaticInitializer(initializer)) failure('NON_CONSTANT_INITIALIZER', 'An object with static storage duration requires a constant initializer.', initializer.location);
         return initializer;
       }
 
@@ -2529,10 +2529,10 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         const slots = scalarInitializerTypes(type);
         for (const item of initializer.items) {
           const slot = slots.next();
-          if (slot.done) failure('INITIALIZER_TOO_LARGE', 'Hay más valores que subobjetos escalares en el inicializador.', item.location);
+          if (slot.done) failure('INITIALIZER_TOO_LARGE', 'The initializer has more values than scalar subobjects.', item.location);
           analyzeInitializer(slot.value, item.initializer, fileDuration);
         }
-        if (fileDuration && !isStaticInitializer(initializer)) failure('NON_CONSTANT_INITIALIZER', 'Un objeto de duración estática requiere un inicializador constante.', initializer.location);
+        if (fileDuration && !isStaticInitializer(initializer)) failure('NON_CONSTANT_INITIALIZER', 'An object with static storage duration requires a constant initializer.', initializer.location);
         return initializer;
       }
       let nextIndex = 0;
@@ -2544,14 +2544,14 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
           let childType: CType = array.element;
           if (item.designators.length) {
             const first = item.designators[0];
-            if (first.kind !== 'index') failure('INVALID_DESIGNATOR', 'Un array requiere un designador de índice.', first.location);
-            if (first.index > BigInt(Number.MAX_SAFE_INTEGER)) failure('INVALID_DESIGNATOR', 'El índice designado excede el rango representable.', first.location);
+            if (first.kind !== 'index') failure('INVALID_DESIGNATOR', 'An array requires an index designator.', first.location);
+            if (first.index > BigInt(Number.MAX_SAFE_INTEGER)) failure('INVALID_DESIGNATOR', 'The designated index exceeds the representable range.', first.location);
             selected = Number(first.index);
-            if (array.length !== null && selected >= array.length) failure('INVALID_DESIGNATOR', 'El índice designado excede el array.', first.location);
+            if (array.length !== null && selected >= array.length) failure('INVALID_DESIGNATOR', 'The designated index exceeds the array bounds.', first.location);
             nextIndex = selected + 1;
             childType = followDesignators(type, item.designators);
           } else {
-            if (array.length !== null && selected >= array.length) failure('INITIALIZER_TOO_LARGE', 'Hay más elementos que posiciones en el array.', item.location);
+            if (array.length !== null && selected >= array.length) failure('INITIALIZER_TOO_LARGE', 'There are more elements than array slots.', item.location);
             nextIndex++; childType = followDesignators(childType, []);
           }
           analyzeInitializer(childType, item.initializer, fileDuration); count++; continue;
@@ -2559,28 +2559,28 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         if (isAggregate(type)) {
           const aggregate = aggregateType(type)!;
           const definition = aggregates.find(value => value.id === aggregate.id)!;
-          if (definition.kind === 'union' && count > 0) failure('INITIALIZER_TOO_LARGE', 'Un union sólo puede inicializar un miembro.', item.location);
+          if (definition.kind === 'union' && count > 0) failure('INITIALIZER_TOO_LARGE', 'A union can only initialize one member.', item.location);
           let member: AggregateMember;
           if (item.designators.length) {
             const first = item.designators[0];
-            if (first.kind !== 'member') failure('INVALID_DESIGNATOR', 'Un struct o union requiere un designador de miembro.', first.location);
+            if (first.kind !== 'member') failure('INVALID_DESIGNATOR', 'A struct or union requires a member designator.', first.location);
             const nestedType = followDesignators(type, item.designators);
             const selected = item.designators[0];
-            if (selected.kind !== 'member') failure('ENGINE_INTERNAL_ERROR', 'La ruta de miembro perdió su designador inicial.', item.location);
+            if (selected.kind !== 'member') failure('ENGINE_INTERNAL_ERROR', 'The member path lost its initial designator.', item.location);
             member = definition.members[selected.memberIndex ?? definition.members.findIndex(value => value.name === selected.name)];
-            if (!member) failure('UNKNOWN_MEMBER', `El agregado no tiene un miembro «${first.name}».`, first.location);
+            if (!member) failure('UNKNOWN_MEMBER', `The aggregate has no member «${first.name}».`, first.location);
             nextIndex = member.index + 1;
             analyzeInitializer(nestedType, item.initializer, fileDuration); count++; continue;
           }
-          if (nextIndex >= definition.members.length) failure('INITIALIZER_TOO_LARGE', 'Hay más inicializadores que miembros en el agregado.', item.location);
+          if (nextIndex >= definition.members.length) failure('INITIALIZER_TOO_LARGE', 'There are more initializers than aggregate members.', item.location);
           member = definition.members[nextIndex++];
           analyzeInitializer(member.type, item.initializer, fileDuration); count++; continue;
         }
-        if (item.designators.length) failure('INVALID_DESIGNATOR', 'Un escalar no admite designadores.', item.designators[0].location);
-        if (count > 0) failure('INITIALIZER_TOO_LARGE', 'Un escalar sólo admite un elemento de inicialización.', item.location);
+        if (item.designators.length) failure('INVALID_DESIGNATOR', 'A scalar cannot use designators.', item.designators[0].location);
+        if (count > 0) failure('INITIALIZER_TOO_LARGE', 'A scalar can only have one initializer.', item.location);
         analyzeInitializer(type, item.initializer, fileDuration); count++;
       }
-      if (fileDuration && !isStaticInitializer(initializer)) failure('NON_CONSTANT_INITIALIZER', 'Un objeto de duración estática requiere un inicializador constante.', initializer.location);
+      if (fileDuration && !isStaticInitializer(initializer)) failure('NON_CONSTANT_INITIALIZER', 'An object with static storage duration requires a constant initializer.', initializer.location);
       return initializer;
     };
     const followDesignators = (initial: CType, designators: InitializerDesignator[]): CType => {
@@ -2588,13 +2588,13 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       const expanded: InitializerDesignator[] = [];
       for (const designator of designators) {
         if (designator.kind === 'member') {
-          if (!isAggregate(type)) failure('INVALID_DESIGNATOR', 'Un designador de miembro requiere un struct o union.', designator.location);
+          if (!isAggregate(type)) failure('INVALID_DESIGNATOR', 'A member designator requires a struct or union.', designator.location);
           const aggregate = aggregateType(type)!;
           const definition = aggregates.find(value => value.id === aggregate.id)!;
           let path: AggregateMember[];
           if (designator.memberIndex !== undefined) {
             const member = definition.members[designator.memberIndex];
-            if (!member || member.name !== designator.name) failure('INVALID_DESIGNATOR', 'El índice del miembro designado no coincide con el agregado.', designator.location);
+            if (!member || member.name !== designator.name) failure('INVALID_DESIGNATOR', 'The designated member index does not match the aggregate.', designator.location);
             path = [member];
           } else path = findMemberPath(aggregate, designator.name, designator.location);
           for (const member of path) {
@@ -2603,8 +2603,8 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
           }
         } else {
           const array = arrayType(type);
-          if (!array) failure('INVALID_DESIGNATOR', 'Un designador de índice requiere un array.', designator.location);
-          if (designator.index > BigInt(Number.MAX_SAFE_INTEGER) || array.length !== null && designator.index >= BigInt(array.length)) failure('INVALID_DESIGNATOR', 'El índice designado excede el array.', designator.location);
+          if (!array) failure('INVALID_DESIGNATOR', 'An index designator requires an array.', designator.location);
+          if (designator.index > BigInt(Number.MAX_SAFE_INTEGER) || array.length !== null && designator.index >= BigInt(array.length)) failure('INVALID_DESIGNATOR', 'The designated index exceeds the array bounds.', designator.location);
           expanded.push(designator);
           type = array.element;
         }
@@ -2619,7 +2619,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         requireInteger(analyzeExpression(assertion.condition), assertion.location);
         requireIntegerConstantExpression(assertion.condition, '_Static_assert', aggregates);
         const value = constantExpression(assertion.condition, aggregates);
-        if (!truth(value)) failure('STATIC_ASSERT_FAILED', assertion.message || 'La expresión de _Static_assert es falsa.', assertion.location);
+        if (!truth(value)) failure('STATIC_ASSERT_FAILED', assertion.message || '_Static_assert expression is false.', assertion.location);
       }
       const priorVisible = new Map(globalVisible);
       const priorFunctions = new Map(visibleFunctions);
@@ -2641,7 +2641,7 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
       for (const [name, declaration] of priorFunctions) visibleFunctions.set(name, declaration);
     }
     for (const parameter of fn.parameters) {
-      if (!parameter.name) failure('SYNTAX_ERROR', 'Los parámetros de una definición necesitan un nombre.', parameter.location);
+      if (!parameter.name) failure('SYNTAX_ERROR', 'Parameters in a definition must have names.', parameter.location);
       parameter.binding = declare(parameter.name, parameter.type, parameter.location, true, parameter.isConst);
       fn.bindings[parameter.binding].register = !!parameter.register;
     }
@@ -2679,12 +2679,12 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         case 'declaration': {
           if (node.extern) {
             const globalIndex = globals.findIndex((global) => global.symbolKey === node.symbolKey);
-            if (globalIndex < 0) failure('ENGINE_INTERNAL_ERROR', `No existe el símbolo global de extern «${node.name}».`, node.location);
+            if (globalIndex < 0) failure('ENGINE_INTERNAL_ERROR', `No global extern symbol exists for «${node.name}».`, node.location);
             const global = globals[globalIndex];
             if (!compatibleType(global.type, node.type) || !!global.threadLocal !== !!node.threadLocal) {
-              failure('CONFLICTING_TYPES', `Declaraciones incompatibles del objeto «${node.name}».`, node.location);
+            failure('CONFLICTING_TYPES', `Incompatible declarations of object «${node.name}».`, node.location);
             }
-            if (scopes[scopes.length - 1].names.has(node.name)) failure('REDECLARATION', `La variable «${node.name}» ya está declarada en este ámbito.`, node.location);
+            if (scopes[scopes.length - 1].names.has(node.name)) failure('REDECLARATION', `Variable «${node.name}» is already declared in this scope.`, node.location);
             const binding: Binding = {
               id: -1, name: node.name, type: node.type, location: node.location,
               isConst: !!node.const, qualifiers: qualifiersOf(node.type), linkage: global.linkage ?? 'external', symbolKey: node.symbolKey,
@@ -2708,16 +2708,16 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
           requireInteger(analyzeExpression(node.condition), node.location);
           requireIntegerConstantExpression(node.condition, '_Static_assert', aggregates);
           const value = constantExpression(node.condition, aggregates);
-          if (!truth(value)) failure('STATIC_ASSERT_FAILED', node.message || 'La expresión de _Static_assert es falsa.', node.location);
+          if (!truth(value)) failure('STATIC_ASSERT_FAILED', node.message || '_Static_assert expression is false.', node.location);
           break;
         }
         case 'return': {
           if (fn.returnType === 'void') {
-            if (node.value) failure('TYPE_ERROR', 'Una función void no puede devolver una expresión.', node.location);
+            if (node.value) failure('TYPE_ERROR', 'A void function cannot return an expression.', node.location);
           } else {
-            if (!node.value) failure('SYNTAX_ERROR', 'Una función no void requiere un valor de retorno.', node.location);
+            if (!node.value) failure('SYNTAX_ERROR', 'A non-void function requires a return value.', node.location);
             node.value = convertedValue(node.value);
-            if (!canAssign(fn.returnType, node.value.type!, node.value)) failure('TYPE_ERROR', `No se puede devolver ${typeName(node.value.type!, aggregates)} desde una función que retorna ${typeName(fn.returnType, aggregates)}.`, node.location);
+            if (!canAssign(fn.returnType, node.value.type!, node.value)) failure('TYPE_ERROR', `Cannot return ${typeName(node.value.type!, aggregates)} from a function returning ${typeName(fn.returnType, aggregates)}.`, node.location);
           }
           break;
         }
@@ -2749,32 +2749,32 @@ export function analyze(program: ParsedProgram, options: { allowMissingMain?: bo
         }
         case 'case': {
           const context = switches[switches.length - 1];
-          if (!context) failure('INVALID_CASE', 'case y default necesitan un switch envolvente.', node.location);
+          if (!context) failure('INVALID_CASE', 'case and default require an enclosing switch.', node.location);
           if (node.value) {
             requireInteger(analyzeExpression(node.value), node.value.location);
             requireIntegerConstantExpression(node.value, 'case', aggregates);
             const constant = convert(constantExpression(node.value, aggregates), context.type, node.location);
             const key = String(constant.value);
-            if (context.cases.has(key)) failure('DUPLICATE_CASE', 'El switch contiene dos case con el mismo valor.', node.location);
+            if (context.cases.has(key)) failure('DUPLICATE_CASE', 'The switch contains two case labels with the same value.', node.location);
             context.cases.add(key); node.constant = constant;
           } else {
-            if (context.hasDefault) failure('DUPLICATE_DEFAULT', 'El switch contiene más de un default.', node.location);
+            if (context.hasDefault) failure('DUPLICATE_DEFAULT', 'The switch contains more than one default.', node.location);
             context.hasDefault = true;
           }
           pendingStatements.push({ node: node.statement, loops, switches });
           break;
         }
         case 'label':
-          if (labels.has(node.name)) failure('DUPLICATE_LABEL', `La etiqueta «${node.name}» ya existe en esta función.`, node.location);
+          if (labels.has(node.name)) failure('DUPLICATE_LABEL', `Label «${node.name}» already exists in this function.`, node.location);
           labels.set(node.name, node.location); pendingStatements.push({ node: node.statement, loops, switches });
           break;
         case 'goto': gotos.push(node); break;
-        case 'break': if (!loops && !switches.length) failure('INVALID_BREAK', 'break necesita un bucle o switch envolvente.', node.location); break;
-        case 'continue': if (!loops) failure('INVALID_CONTINUE', 'continue necesita un bucle envolvente.', node.location); break;
+        case 'break': if (!loops && !switches.length) failure('INVALID_BREAK', 'break requires an enclosing loop or switch.', node.location); break;
+        case 'continue': if (!loops) failure('INVALID_CONTINUE', 'continue requires an enclosing loop.', node.location); break;
         case 'empty': break;
       }
     }
-    for (const node of gotos) if (!labels.has(node.target)) failure('UNKNOWN_LABEL', `La etiqueta «${node.target}» no existe en esta función.`, node.location);
+    for (const node of gotos) if (!labels.has(node.target)) failure('UNKNOWN_LABEL', `Label «${node.target}» does not exist in this function.`, node.location);
   }
   return mainDefinition;
 }
@@ -2785,7 +2785,7 @@ function comesBefore(left: Location, right: Location): boolean {
 function requirePointerArithmetic(type: CType, aggregates: readonly AggregateDefinition[], at: Location): void {
   const base = pointedToType(type);
   if (!base || unqualifiedType(base) === 'void' || isFunction(base) || !isObject(base) || !isComplete(base, aggregates)) {
-    failure('INCOMPLETE_TYPE', 'La aritmética de punteros requiere un tipo completo de objeto distinto de void.', at);
+    failure('INCOMPLETE_TYPE', 'Pointer arithmetic requires a complete object type other than void.', at);
   }
   sizeOfType(base, aggregates, at);
 }

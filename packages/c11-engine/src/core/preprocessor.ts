@@ -55,16 +55,16 @@ function preprocessError(message: string, at: Location, code = 'PREPROCESSOR_ERR
 }
 
 function normalizeVirtualPath(path: string, at: Location): string {
-  if (!path || path.startsWith('/') || path.includes('\\') || path.includes('\0')) preprocessError(`Nombre virtual no válido: «${path}».`, at, 'INVALID_PROJECT');
+  if (!path || path.startsWith('/') || path.includes('\\') || path.includes('\0')) preprocessError(`Invalid virtual name: «${path}».`, at, 'INVALID_PROJECT');
   const components: string[] = [];
   for (const component of path.split('/')) {
     if (!component || component === '.') continue;
     if (component === '..') {
-      if (!components.length) preprocessError(`La ruta virtual «${path}» sale de la raíz del proyecto.`, at, 'INVALID_PROJECT');
+      if (!components.length) preprocessError(`Virtual path «${path}» escapes the project root.`, at, 'INVALID_PROJECT');
       components.pop();
     } else components.push(component);
   }
-  if (!components.length) preprocessError(`Nombre virtual no válido: «${path}».`, at, 'INVALID_PROJECT');
+  if (!components.length) preprocessError(`Invalid virtual name: «${path}».`, at, 'INVALID_PROJECT');
   return components.join('/');
 }
 
@@ -156,7 +156,7 @@ function universalValue(spelling: string, at: Location): number | undefined {
   const match = /^\\u([0-9a-fA-F]{4})$/.exec(spelling) ?? /^\\U([0-9a-fA-F]{8})$/.exec(spelling);
   if (!match) return undefined;
   const value = Number.parseInt(match[1], 16);
-  if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) preprocessError(`Nombre universal de carácter no válido: «${spelling}».`, at, 'INVALID_UNIVERSAL_CHARACTER_NAME');
+  if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) preprocessError(`Invalid universal character name: «${spelling}».`, at, 'INVALID_UNIVERSAL_CHARACTER_NAME');
   return value;
 }
 
@@ -181,7 +181,7 @@ function translateLiteralUCNs(text: string, at: Location): string {
     const match = /^\\u[0-9a-fA-F]{4}|^\\U[0-9a-fA-F]{8}/.exec(body.slice(index));
     if (!match) { translated += body[index++]; continue; }
     const codePoint = universalValue(match[0], at)!;
-    if (quote === "'" && codePoint > 0x7f) preprocessError('El perfil de char de 8 bits no representa un UCN no ASCII en una constante de carácter.', at, 'UNSUPPORTED_FEATURE');
+    if (quote === "'" && codePoint > 0x7f) preprocessError('The 8-bit char profile cannot represent a non-ASCII UCN in a character constant.', at, 'UNSUPPORTED_FEATURE');
     translated += utf8Bytes(codePoint).map((byte) => `\\x${byte.toString(16).toUpperCase()}`).join('');
     index += match[0].length;
   }
@@ -230,7 +230,7 @@ function tokenizeSource(name: string, source: string): { lines: PPLine[]; eof: L
     if (syntax.kind === 'whitespace' || syntax.kind === 'line-comment' || syntax.kind === 'block-comment') {
       if (syntax.kind === 'block-comment' && syntax.closed === false) {
         const location = syntaxTokenAt(syntax, mapped, source, name, positions);
-        failure('UNTERMINATED_COMMENT', 'Comentario de bloque sin cierre */.', location);
+        failure('UNTERMINATED_COMMENT', 'Unterminated block comment */.', location);
       }
       leadingSpace = true;
       continue;
@@ -262,7 +262,7 @@ function tokenizeSource(name: string, source: string): { lines: PPLine[]; eof: L
     let text = spelling;
     if (syntax.kind === 'identifier') text = decodeIdentifier(spelling, physical);
     else if (syntax.kind === 'string' || syntax.kind === 'character') {
-      if (syntax.closed === false) failure(syntax.kind === 'string' ? 'UNTERMINATED_STRING' : 'UNTERMINATED_CHARACTER', syntax.kind === 'string' ? 'Literal de cadena sin cierre.' : 'Literal de carácter sin cierre.', physical);
+      if (syntax.closed === false) failure(syntax.kind === 'string' ? 'UNTERMINATED_STRING' : 'UNTERMINATED_CHARACTER', syntax.kind === 'string' ? 'Unterminated string literal.' : 'Unterminated character literal.', physical);
       if (spelling.startsWith('<') && spelling.endsWith('>')) kind = 'header';
       else text = translateLiteralUCNs(spelling, physical);
     }
@@ -301,14 +301,14 @@ function tokenText(tokens: readonly PPToken[]): string {
 }
 
 function decodeCQuotedString(token: PPToken): string {
-  if (token.kind !== 'string' || !token.text.startsWith('"') || !token.text.endsWith('"')) preprocessError('Se esperaba una cadena C entre comillas.', token.at);
+  if (token.kind !== 'string' || !token.text.startsWith('"') || !token.text.endsWith('"')) preprocessError('Expected a quoted C string.', token.at);
   const body = token.text.slice(1, -1);
   let result = '';
   for (let index = 0; index < body.length; index++) {
     const character = body[index];
     if (character !== '\\') { result += character; continue; }
     const escaped = body[++index];
-    if (escaped === undefined) preprocessError('Escape incompleto en cadena del preprocesador.', token.at);
+    if (escaped === undefined) preprocessError('Incomplete escape in preprocessor string.', token.at);
     const simple: Record<string, string> = { '"': '"', "'": "'", '?': '?', '\\': '\\', a: '\x07', b: '\x08', f: '\x0c', n: '\n', r: '\r', t: '\t', v: '\x0b' };
     if (Object.hasOwn(simple, escaped)) result += simple[escaped];
     else if (/[0-7]/.test(escaped)) {
@@ -318,9 +318,9 @@ function decodeCQuotedString(token: PPToken): string {
     } else if (escaped === 'x') {
       let digits = '';
       while (/[0-9a-fA-F]/.test(body[index + 1] ?? '')) digits += body[++index];
-      if (!digits) preprocessError('Escape hexadecimal sin dígitos en cadena del preprocesador.', token.at);
+      if (!digits) preprocessError('Hexadecimal escape has no digits in a preprocessor string.', token.at);
       result += String.fromCharCode(Number.parseInt(digits, 16) & 0xff);
-    } else preprocessError(`Escape no válido en cadena del preprocesador: \\${escaped}.`, token.at);
+    } else preprocessError(`Invalid escape in preprocessor string: \\${escaped}.`, token.at);
   }
   return result;
 }
@@ -366,7 +366,7 @@ function parseMacroArguments(tokens: readonly PPToken[], openIndex: number, at: 
     } else if (token.text === ',' && nesting === 0) { separators.push(token); args.push([]); hasTokens = true; }
     else { args.at(-1)!.push(token); hasTokens = true; }
   }
-  preprocessError('Invocación de macro sin paréntesis de cierre.', at);
+  preprocessError('Macro invocation is missing its closing parenthesis.', at);
 }
 
 function stringifyArgument(tokens: readonly PPToken[], at: Location, leadingSpace: boolean, hideSet?: ReadonlySet<string>): PPToken {
@@ -385,7 +385,7 @@ function pastedToken(left: PPToken, right: PPToken, at: Location, hideSet: Reado
   const text = left.text + right.text;
   const scanned = [...scanC(text)].filter((token) => token.kind !== 'whitespace');
   if (scanned.length !== 1 || scanned[0].start !== 0 || scanned[0].end !== text.length || scanned[0].closed === false || ['invalid', 'line-comment', 'block-comment', 'preprocessor'].includes(scanned[0].kind)) {
-    preprocessError(`El pegado de tokens «${left.text} ## ${right.text}» no forma un token C.`, at, 'INVALID_TOKEN_PASTE');
+    preprocessError(`Token paste «${left.text} ## ${right.text}» does not form a C token.`, at, 'INVALID_TOKEN_PASTE');
   }
   const syntax = scanned[0];
   let kind: PPToken['kind'] = syntax.kind;
@@ -410,7 +410,7 @@ class TranslationPreprocessor {
   }
 
   private checkDepth(depth: number, at: Location): void {
-    if (depth > MAX_INTERNAL_DEPTH) throw new EngineFailure('LIMIT_EXCEEDED', `Se superó el límite interno de profundidad del preprocesador (${MAX_INTERNAL_DEPTH}).`, at, 'maxDepth', MAX_INTERNAL_DEPTH);
+    if (depth > MAX_INTERNAL_DEPTH) throw new EngineFailure('LIMIT_EXCEEDED', `Preprocessor internal depth limit exceeded (${MAX_INTERNAL_DEPTH}).`, at, 'maxDepth', MAX_INTERNAL_DEPTH);
     enforceLimit('maxDepth', depth, this.context.limits.maxDepth, at);
   }
 
@@ -446,7 +446,7 @@ class TranslationPreprocessor {
       const fixedCount = macro.parameters.length;
       const rawArguments = invocation.arguments;
       if ((!macro.variadic && rawArguments.length !== fixedCount) || (macro.variadic && rawArguments.length < fixedCount)) {
-        preprocessError(`La macro «${macro.name}» recibió ${rawArguments.length} argumentos; esperaba ${macro.variadic ? `al menos ${fixedCount}` : fixedCount}.`, token.at);
+        preprocessError(`Macro «${macro.name}» received ${rawArguments.length} arguments; expected ${macro.variadic ? `at least ${fixedCount}` : fixedCount}.`, token.at);
       }
       const argumentMap = new Map<string, PPToken[]>();
       for (let argument = 0; argument < fixedCount; argument++) argumentMap.set(macro.parameters[argument], rawArguments[argument] ?? []);
@@ -486,7 +486,7 @@ class TranslationPreprocessor {
       }
       for (let itemIndex = 0; itemIndex < replacementItems.length;) {
         if (replacementItems[itemIndex] !== 'paste') { itemIndex++; continue; }
-        if (itemIndex === 0 || itemIndex === replacementItems.length - 1) preprocessError(`La macro «${macro.name}» tiene ## en un extremo de su reemplazo.`, token.at);
+        if (itemIndex === 0 || itemIndex === replacementItems.length - 1) preprocessError(`Macro «${macro.name}» has ## at an edge of its replacement list.`, token.at);
         const left = replacementItems[itemIndex - 1] as PPToken[];
         const right = replacementItems[itemIndex + 1] as PPToken[];
         let combined: PPToken[];
@@ -513,11 +513,11 @@ class TranslationPreprocessor {
       let end = index;
       if (tokens[index + 1]?.text === '(') {
         name = tokens[index + 2];
-        if (!name || name.kind !== 'identifier' || tokens[index + 3]?.text !== ')') preprocessError('El operador defined requiere un identificador opcionalmente entre paréntesis.', token.at);
+        if (!name || name.kind !== 'identifier' || tokens[index + 3]?.text !== ')') preprocessError('The defined operator requires an identifier, optionally enclosed in parentheses.', token.at);
         end = index + 3;
       } else {
         name = tokens[index + 1];
-        if (!name || name.kind !== 'identifier') preprocessError('El operador defined requiere un identificador.', token.at);
+        if (!name || name.kind !== 'identifier') preprocessError('The defined operator requires an identifier.', token.at);
         end = index + 1;
       }
       protectedTokens.push(syntheticToken('number', this.context.macros.has(name.text) ? '1' : '0', token.at, token.leadingSpace));
@@ -528,7 +528,7 @@ class TranslationPreprocessor {
   }
 
   private evaluateIf(tokens: readonly PPToken[], at: Location): boolean {
-    if (!tokens.length) preprocessError('La directiva #if requiere una expresión.', at);
+    if (!tokens.length) preprocessError('The #if directive requires an expression.', at);
     const expanded = this.stringifyCondition(tokens);
     return evaluatePreprocessorExpression(expanded, this.context.limits);
   }
@@ -545,7 +545,7 @@ class TranslationPreprocessor {
     for (let index = 0; index < tokens.length; index++) {
       const token = tokens[index];
       if (token.kind !== 'identifier' || token.text !== '_Pragma') { result.push(token); continue; }
-      if (tokens[index + 1]?.text !== '(' || tokens[index + 2]?.kind !== 'string' || tokens[index + 3]?.text !== ')') preprocessError('_Pragma requiere una cadena entre paréntesis.', token.at);
+      if (tokens[index + 1]?.text !== '(' || tokens[index + 2]?.kind !== 'string' || tokens[index + 3]?.text !== ')') preprocessError('_Pragma requires a string in parentheses.', token.at);
       this.parsePragma(decodeCQuotedString(tokens[index + 2]), token.at, currentFile);
       index += 3;
     }
@@ -562,25 +562,25 @@ class TranslationPreprocessor {
     }
     const standard = getStandardHeader(requested);
     if (standard !== undefined) return { name: requested, source: standard };
-    preprocessError(`No se encontró el header virtual «${requested}».`, at, 'INCLUDE_NOT_FOUND');
+    preprocessError(`Virtual header «${requested}» was not found.`, at, 'INCLUDE_NOT_FOUND');
   }
 
   private parseInclude(tokens: readonly PPToken[], includingFile: string, at: Location, depth: number): PPToken[] {
     const expanded = this.expand(tokens);
-    if (!expanded.length) preprocessError('#include requiere el nombre de un header.', at);
+    if (!expanded.length) preprocessError('#include requires a header name.', at);
     let requested: string;
     let angled = false;
     const first = expanded[0];
-    if (first.kind === 'header') { requested = first.text.slice(1, -1); angled = true; if (expanded.length !== 1) preprocessError('Tokens sobrantes después del nombre del header.', expanded[1].at); }
-    else if (first.kind === 'string') { requested = decodeCQuotedString(first); if (expanded.length !== 1) preprocessError('Tokens sobrantes después del nombre del header.', expanded[1].at); }
+    if (first.kind === 'header') { requested = first.text.slice(1, -1); angled = true; if (expanded.length !== 1) preprocessError('Extra tokens after the header name.', expanded[1].at); }
+    else if (first.kind === 'string') { requested = decodeCQuotedString(first); if (expanded.length !== 1) preprocessError('Extra tokens after the header name.', expanded[1].at); }
     else if (first.text === '<') {
       const close = expanded.findIndex((token, index) => index > 0 && token.text === '>');
-      if (close < 0) preprocessError('Header angular sin «>».', first.at);
+      if (close < 0) preprocessError('The angled header is missing «>».', first.at);
       requested = expanded.slice(1, close).map((token) => token.text).join('');
       angled = true;
-      if (expanded.length !== close + 1) preprocessError('Tokens sobrantes después del nombre del header.', expanded[close + 1].at);
-    } else preprocessError('#include requiere una cadena o un header entre «<» y «>».', first.at);
-    if (!requested || requested.includes('\0')) preprocessError('El nombre del header está vacío o contiene NUL.', first.at);
+      if (expanded.length !== close + 1) preprocessError('Extra tokens after the header name.', expanded[close + 1].at);
+    } else preprocessError('#include requires a string or a header enclosed by «<» and «>».', first.at);
+    if (!requested || requested.includes('\0')) preprocessError('The header name is empty or contains NUL.', first.at);
     this.countExpansionWork(1, at);
     const target = this.includeFile(requested, angled, includingFile, at);
     return this.processFile(target.name, target.source, depth + 1, at).tokens;
@@ -588,7 +588,7 @@ class TranslationPreprocessor {
 
   private defineMacro(tokens: readonly PPToken[], at: Location): void {
     const nameToken = tokens[0];
-    if (!nameToken || nameToken.kind !== 'identifier') preprocessError('#define requiere un nombre de macro.', at);
+    if (!nameToken || nameToken.kind !== 'identifier') preprocessError('#define requires a macro name.', at);
     const name = nameToken.text;
     let cursor = 1;
     let parameters: string[] | undefined;
@@ -598,32 +598,32 @@ class TranslationPreprocessor {
       cursor++;
       if (tokens[cursor]?.text !== ')') {
         while (cursor < tokens.length) {
-          if (tokens[cursor].text === '...') { variadic = true; cursor++; if (tokens[cursor]?.text !== ')') preprocessError('... debe ser el último parámetro de una macro variádica.', tokens[cursor]?.at ?? at); break; }
+          if (tokens[cursor].text === '...') { variadic = true; cursor++; if (tokens[cursor]?.text !== ')') preprocessError('... must be the last parameter of a variadic macro.', tokens[cursor]?.at ?? at); break; }
           const parameter = tokens[cursor];
-          if (parameter.kind !== 'identifier' || parameter.text === '__VA_ARGS__') preprocessError('Se esperaba el nombre de un parámetro de macro.', parameter.at);
-          if (parameters.includes(parameter.text)) preprocessError(`Parámetro de macro duplicado: «${parameter.text}».`, parameter.at);
+          if (parameter.kind !== 'identifier' || parameter.text === '__VA_ARGS__') preprocessError('Expected a macro parameter name.', parameter.at);
+          if (parameters.includes(parameter.text)) preprocessError(`Duplicate macro parameter: «${parameter.text}».`, parameter.at);
           parameters.push(parameter.text);
           cursor++;
           if (tokens[cursor]?.text === ')') break;
-          if (tokens[cursor]?.text === '...') { variadic = true; cursor++; if (tokens[cursor]?.text !== ')') preprocessError('... debe ser el último parámetro de una macro variádica.', tokens[cursor]?.at ?? at); break; }
-          if (tokens[cursor]?.text !== ',') preprocessError('Se esperaba «,» o «)» en los parámetros de macro.', tokens[cursor]?.at ?? at);
+          if (tokens[cursor]?.text === '...') { variadic = true; cursor++; if (tokens[cursor]?.text !== ')') preprocessError('... must be the last parameter of a variadic macro.', tokens[cursor]?.at ?? at); break; }
+          if (tokens[cursor]?.text !== ',') preprocessError('Expected «,» or «)» in the macro parameter list.', tokens[cursor]?.at ?? at);
           cursor++;
         }
       }
-      if (tokens[cursor]?.text !== ')') preprocessError('Lista de parámetros de macro sin «)».', tokens[cursor]?.at ?? at);
+      if (tokens[cursor]?.text !== ')') preprocessError('Macro parameter list is missing «)».', tokens[cursor]?.at ?? at);
       cursor++;
     }
     const replacement = tokens.slice(cursor);
     for (let index = 0; index < replacement.length; index++) {
-      if (replacement[index].text === '##' && (index === 0 || index === replacement.length - 1)) preprocessError('## no puede aparecer al inicio ni al final del reemplazo de macro.', replacement[index].at);
+      if (replacement[index].text === '##' && (index === 0 || index === replacement.length - 1)) preprocessError('## cannot appear at the start or end of a macro replacement list.', replacement[index].at);
       if (replacement[index].text === '#' && parameters !== undefined) {
         const next = replacement[index + 1];
-        if (!next || next.kind !== 'identifier' || !(parameters.includes(next.text) || (variadic && next.text === '__VA_ARGS__'))) preprocessError('# debe preceder un parámetro de la macro.', replacement[index].at);
+        if (!next || next.kind !== 'identifier' || !(parameters.includes(next.text) || (variadic && next.text === '__VA_ARGS__'))) preprocessError('# must precede a macro parameter.', replacement[index].at);
       }
     }
     const macro: Macro = { name, ...(parameters === undefined ? {} : { parameters }), variadic, replacement, at: nameToken.at };
     const previous = this.context.macros.get(name);
-    if (previous && !sameMacro(previous, macro)) preprocessError(`Redefinición incompatible de la macro «${name}».`, nameToken.at);
+    if (previous && !sameMacro(previous, macro)) preprocessError(`Incompatible redefinition of macro «${name}».`, nameToken.at);
     this.context.macros.set(name, macro);
   }
 
@@ -637,7 +637,7 @@ class TranslationPreprocessor {
       if (parentActive) {
         if (directive === 'if') condition = this.evaluateIf(rest, at);
         else {
-          if (!rest[0] || rest[0].kind !== 'identifier' || rest.length !== 1) preprocessError(`#${directive} requiere un único nombre de macro.`, at);
+          if (!rest[0] || rest[0].kind !== 'identifier' || rest.length !== 1) preprocessError(`#${directive} requires a single macro name.`, at);
           condition = this.context.macros.has(rest[0].text);
           if (directive === 'ifndef') condition = !condition;
         }
@@ -647,8 +647,8 @@ class TranslationPreprocessor {
     }
     if (directive === 'elif') {
       const frame = conditionalStack.at(-1);
-      if (!frame) preprocessError('#elif sin #if correspondiente.', at);
-      if (frame.sawElse) preprocessError('#elif después de #else.', at);
+      if (!frame) preprocessError('#elif has no matching #if.', at);
+      if (frame.sawElse) preprocessError('#elif after #else.', at);
       const condition = frame.parentActive && !frame.branchTaken ? this.evaluateIf(rest, at) : false;
       frame.active = frame.parentActive && !frame.branchTaken && condition;
       frame.branchTaken ||= condition;
@@ -656,24 +656,24 @@ class TranslationPreprocessor {
     }
     if (directive === 'else') {
       const frame = conditionalStack.at(-1);
-      if (!frame) preprocessError('#else sin #if correspondiente.', at);
-      if (frame.sawElse) preprocessError('Más de un #else para la misma condición.', at);
-      if (rest.length) preprocessError('Tokens sobrantes después de #else.', rest[0].at);
+      if (!frame) preprocessError('#else has no matching #if.', at);
+      if (frame.sawElse) preprocessError('More than one #else for the same condition.', at);
+      if (rest.length) preprocessError('Extra tokens after #else.', rest[0].at);
       frame.sawElse = true;
       frame.active = frame.parentActive && !frame.branchTaken;
       frame.branchTaken = true;
       return { output };
     }
     if (directive === 'endif') {
-      if (!conditionalStack.length) preprocessError('#endif sin #if correspondiente.', at);
-      if (rest.length) preprocessError('Tokens sobrantes después de #endif.', rest[0].at);
+      if (!conditionalStack.length) preprocessError('#endif has no matching #if.', at);
+      if (rest.length) preprocessError('Extra tokens after #endif.', rest[0].at);
       conditionalStack.pop();
       return { output };
     }
     if (!activeBefore) return { output };
     if (directive === 'define') { this.defineMacro(rest, at); return { output }; }
     if (directive === 'undef') {
-      if (rest.length !== 1 || rest[0].kind !== 'identifier') preprocessError('#undef requiere un único nombre de macro.', at);
+      if (rest.length !== 1 || rest[0].kind !== 'identifier') preprocessError('#undef requires a single macro name.', at);
       this.context.macros.delete(rest[0].text);
       return { output };
     }
@@ -685,19 +685,19 @@ class TranslationPreprocessor {
     if (directive === 'line') {
       const expanded = this.expand(rest);
       const number = expanded[0];
-      if (!number || number.kind !== 'number' || !/^(?:0|[1-9][0-9]*)$/.test(number.text) || expanded.length > 2) preprocessError('#line requiere un número decimal positivo y un nombre de archivo opcional.', number?.at ?? at);
+      if (!number || number.kind !== 'number' || !/^(?:0|[1-9][0-9]*)$/.test(number.text) || expanded.length > 2) preprocessError('#line requires a positive decimal number and an optional file name.', number?.at ?? at);
       const requested = BigInt(number.text);
-      if (requested < 1n || requested > 2147483647n) preprocessError('#line debe estar entre 1 y 2147483647.', number.at);
+      if (requested < 1n || requested > 2147483647n) preprocessError('#line must be between 1 and 2147483647.', number.at);
       let logicalFile = at.file;
       if (expanded[1]) {
-        if (expanded[1].kind !== 'string' || expanded.length !== 2) preprocessError('#line admite un nombre de archivo opcional entre comillas.', expanded[1].at);
+        if (expanded[1].kind !== 'string' || expanded.length !== 2) preprocessError('#line allows an optional quoted file name.', expanded[1].at);
         logicalFile = decodeCQuotedString(expanded[1]);
       }
       const physicalEnd = Math.max(...rest.map((token) => token.physicalLine));
       return { output, lineOverride: { line: Number(requested), file: logicalFile, nextPhysicalLine: physicalEnd + 1 } };
     }
     if (directive === 'pragma') { this.parsePragma(tokenText(rest), at, file); return { output }; }
-    preprocessError(`Directiva de preprocesador no implementada: #${directive}.`, at, 'UNSUPPORTED_FEATURE');
+    preprocessError(`Unimplemented preprocessor directive: #${directive}.`, at, 'UNSUPPORTED_FEATURE');
   }
 
   private active(conditionalStack: readonly Conditional[]): boolean {
@@ -731,7 +731,7 @@ class TranslationPreprocessor {
       flush();
       const head = tokens[1];
       if (head && head.kind !== 'identifier') {
-        if (this.active(conditionalStack)) preprocessError('Se esperaba el nombre de una directiva después de «#».', head.at);
+        if (this.active(conditionalStack)) preprocessError('Expected a directive name after «#».', head.at);
         continue;
       }
       const directive = head?.kind === 'identifier' ? head.text : '';
@@ -745,7 +745,7 @@ class TranslationPreprocessor {
       }
     }
     flush();
-    if (conditionalStack.length) preprocessError('Falta #endif para una condición iniciada aquí.', conditionalStack.at(-1)!.at);
+    if (conditionalStack.length) preprocessError('Missing #endif for the condition started here.', conditionalStack.at(-1)!.at);
     const eof: Location = { file: logicalFile, line: scanned.eof.physicalLine + logicalOffset, column: scanned.eof.physicalColumn };
     return { tokens: output, eof };
   }
@@ -786,18 +786,18 @@ class PreprocessorExpressionParser {
   }
   private expect(text: string): PPToken {
     const token = this.take(text);
-    if (!token) preprocessError(`Se esperaba «${text}» en la expresión de #if.`, this.peek()?.at ?? this.tokens.at(-1)?.at ?? { file: 'main.c', line: 1, column: 1 });
+    if (!token) preprocessError(`Expected «${text}» in the #if expression.`, this.peek()?.at ?? this.tokens.at(-1)?.at ?? { file: 'main.c', line: 1, column: 1 });
     return token;
   }
   private checkDepth(depth: number, at: Location): void {
-    if (depth > MAX_INTERNAL_DEPTH) preprocessError('La expresión de #if excede la profundidad interna admitida.', at, 'LIMIT_EXCEEDED');
+    if (depth > MAX_INTERNAL_DEPTH) preprocessError('The #if expression exceeds the supported internal depth.', at, 'LIMIT_EXCEEDED');
     enforceLimit('maxDepth', depth, this.limits.maxDepth, at);
   }
 
   parse(): PPExpression {
-    if (!this.tokens.length) preprocessError('Expresión #if vacía.', { file: 'main.c', line: 1, column: 1 });
+    if (!this.tokens.length) preprocessError('Empty #if expression.', { file: 'main.c', line: 1, column: 1 });
     const expression = this.parseConditional(0);
-    if (this.peek()) preprocessError(`Token no válido «${this.peek()!.text}» en la expresión de #if.`, this.peek()!.at);
+    if (this.peek()) preprocessError(`Invalid token «${this.peek()!.text}» in the #if expression.`, this.peek()!.at);
     return expression;
   }
 
@@ -839,16 +839,16 @@ class PreprocessorExpressionParser {
 
   private parsePrimary(depth: number): PPExpression {
     const token = this.take();
-    if (!token) preprocessError('Falta un operando en la expresión de #if.', this.tokens.at(-1)?.at ?? { file: 'main.c', line: 1, column: 1 });
+    if (!token) preprocessError('Missing operand in the #if expression.', this.tokens.at(-1)?.at ?? { file: 'main.c', line: 1, column: 1 });
     if (token.text === '(') {
       this.checkDepth(depth + 1, token.at);
       const nested = this.parseConditional(depth + 1);
       this.expect(')');
       return nested;
     }
-    if (token.kind !== 'number' && token.kind !== 'character') preprocessError(`Se esperaba una constante entera en #if; se encontró «${token.text}».`, token.at);
+    if (token.kind !== 'number' && token.kind !== 'character') preprocessError(`Expected an integer constant in #if; found «${token.text}».`, token.at);
     const literal = parseLiteral(token.text, token.at);
-    if (typeof literal.value !== 'bigint') preprocessError('La expresión #if solo admite constantes enteras.', token.at);
+    if (typeof literal.value !== 'bigint') preprocessError('The #if expression only accepts integer constants.', token.at);
     return { kind: 'value', value: { value: literal.value, unsigned: String(literal.type).startsWith('unsigned') } };
   }
 }
@@ -871,7 +871,7 @@ function ppUsual(left: PPValue, right: PPValue): { left: bigint; right: bigint; 
 }
 function ppResult(value: bigint, unsigned: boolean, at: Location): PPValue {
   if (unsigned) return { value: BigInt.asUintN(64, value), unsigned: true };
-  if (value < ppSignedMin || value > ppSignedMax) preprocessError('Desbordamiento signed en una expresión constante de #if.', at, 'INVALID_PREPROCESSOR_EXPRESSION');
+  if (value < ppSignedMin || value > ppSignedMax) preprocessError('Signed overflow in a #if constant expression.', at, 'INVALID_PREPROCESSOR_EXPRESSION');
   return { value, unsigned: false };
 }
 
@@ -886,7 +886,7 @@ function evaluatePreprocessorExpression(tokens: readonly PPToken[], limits: Prep
       if (expression.operator === '+') return operand;
       if (expression.operator === '-') return ppResult(-operand.value, operand.unsigned, expression.at);
       if (expression.operator === '~') return ppResult(~operand.value, operand.unsigned, expression.at);
-      return preprocessError(`Operador unario no admitido en #if: ${expression.operator}.`, expression.at);
+      return preprocessError(`Unsupported unary operator in #if: ${expression.operator}.`, expression.at);
     }
     if (expression.kind === 'conditional') {
       const condition = evaluate(expression.condition);
@@ -904,17 +904,17 @@ function evaluatePreprocessorExpression(tokens: readonly PPToken[], limits: Prep
       case '-': return ppResult(a - b, unsigned, expression.at);
       case '*': return ppResult(a * b, unsigned, expression.at);
       case '/':
-        if (b === 0n) preprocessError('División por cero en una expresión #if.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
-        if (!unsigned && a === ppSignedMin && b === -1n) preprocessError('Desbordamiento en división de una expresión #if.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
+        if (b === 0n) preprocessError('Division by zero in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
+        if (!unsigned && a === ppSignedMin && b === -1n) preprocessError('Division overflow in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
         return ppResult(a / b, unsigned, expression.at);
       case '%':
-        if (b === 0n) preprocessError('Resto por cero en una expresión #if.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
+        if (b === 0n) preprocessError('Remainder by zero in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
         return ppResult(a % b, unsigned, expression.at);
       case '<<': case '>>': {
-        if (right.value < 0n || right.value >= 64n) preprocessError('Desplazamiento fuera de rango en una expresión #if.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
+        if (right.value < 0n || right.value >= 64n) preprocessError('Shift count out of range in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
         const shift = Number(right.value);
         if (expression.operator === '>>') return ppResult((unsigned ? BigInt.asUintN(64, a) : a) >> BigInt(shift), unsigned, expression.at);
-        if (!unsigned && (a < 0n || (a << BigInt(shift)) > ppSignedMax)) preprocessError('Desplazamiento signed fuera de rango en una expresión #if.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
+        if (!unsigned && (a < 0n || (a << BigInt(shift)) > ppSignedMax)) preprocessError('Signed shift out of range in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
         return ppResult(a << BigInt(shift), unsigned, expression.at);
       }
       case '&': return ppResult(a & b, unsigned, expression.at);
@@ -926,7 +926,7 @@ function evaluatePreprocessorExpression(tokens: readonly PPToken[], limits: Prep
       case '<=': return { value: a <= b ? 1n : 0n, unsigned: false };
       case '>': return { value: a > b ? 1n : 0n, unsigned: false };
       case '>=': return { value: a >= b ? 1n : 0n, unsigned: false };
-      default: return preprocessError(`Operador binario no admitido en #if: ${expression.operator}.`, expression.at);
+      default: return preprocessError(`Unsupported binary operator in #if: ${expression.operator}.`, expression.at);
     }
   };
   return ppTruthy(evaluate(tree));
@@ -936,23 +936,23 @@ export function preprocessProject(project: SourceProject, limits: PrepareLimits,
   const fallback = typeof project?.entry === 'string' && project.entry ? project.entry : 'main.c';
   const location: Location = { file: fallback, line: 1, column: 1 };
   if (!project || typeof project !== 'object' || typeof project.entry !== 'string' || !project.entry || !Array.isArray(project.files)) {
-    preprocessError('Se requiere un proyecto con entry y una lista de fuentes.', location, 'INVALID_PROJECT');
+    preprocessError('A project with entry and a list of sources is required.', location, 'INVALID_PROJECT');
   }
   const files = new Map<string, string>();
   let sourceChars = 0;
   for (const file of project.files) {
-    if (!file || typeof file.name !== 'string' || !file.name || typeof file.source !== 'string') preprocessError('Cada fuente debe tener name y source de tipo string.', location, 'INVALID_PROJECT');
+    if (!file || typeof file.name !== 'string' || !file.name || typeof file.source !== 'string') preprocessError('Each source must have name and a string source.', location, 'INVALID_PROJECT');
     const name = normalizeVirtualPath(file.name, location);
-    if (files.has(name)) preprocessError(`Nombre de fuente duplicado: «${name}».`, { file: name, line: 1, column: 1 }, 'INVALID_PROJECT');
+    if (files.has(name)) preprocessError(`Duplicate source name: «${name}».`, { file: name, line: 1, column: 1 }, 'INVALID_PROJECT');
     files.set(name, file.source);
     sourceChars += file.source.length;
   }
   const entry = normalizeVirtualPath(project.entry, location);
-  if (!files.has(entry)) preprocessError(`El archivo de entrada «${entry}» no existe entre las fuentes.`, location, 'INVALID_PROJECT');
+  if (!files.has(entry)) preprocessError(`Entry file «${entry}» is not among the sources.`, location, 'INVALID_PROJECT');
   metrics.sourceChars = sourceChars;
   enforceLimit('maxSourceChars', sourceChars, limits.maxSourceChars, { file: entry, line: 1, column: 1 });
   const requestedUnits = (project as SourceProject & { translationUnits?: readonly string[] }).translationUnits;
-  if (requestedUnits !== undefined && (!Array.isArray(requestedUnits) || requestedUnits.length === 0)) preprocessError('translationUnits debe ser una lista no vacía de nombres de fuentes.', location, 'INVALID_PROJECT');
+  if (requestedUnits !== undefined && (!Array.isArray(requestedUnits) || requestedUnits.length === 0)) preprocessError('translationUnits must be a nonempty list of source names.', location, 'INVALID_PROJECT');
   const unitNames = requestedUnits ?? [entry];
   const date = new Date();
   const dateText = `${monthNames[date.getMonth()]} ${date.getDate() < 10 ? ` ${date.getDate()}` : date.getDate()} ${date.getFullYear()}`;
@@ -961,7 +961,7 @@ export function preprocessProject(project: SourceProject, limits: PrepareLimits,
   for (const requestedName of unitNames) {
     const name = normalizeVirtualPath(requestedName, location);
     const source = files.get(name);
-    if (source === undefined) preprocessError(`La unidad de traducción «${name}» no existe entre las fuentes.`, location, 'INVALID_PROJECT');
+    if (source === undefined) preprocessError(`Translation unit «${name}» is not among the source files.`, location, 'INVALID_PROJECT');
     const start: Location = { file: name, line: 1, column: 1 };
     const context: PPContext = {
       macros: predefinedMacros(start, dateText, timeText), files, onceFiles: new Set(), limits, metrics,
@@ -971,7 +971,7 @@ export function preprocessProject(project: SourceProject, limits: PrepareLimits,
     const result = preprocessor.run(name, source);
     const tokens: Token[] = [];
     for (const token of result.tokens) {
-      if (token.kind === 'header') preprocessError('Un nombre de header quedó fuera de una directiva #include.', token.at);
+      if (token.kind === 'header') preprocessError('A header name appeared outside an #include directive.', token.at);
       const parsed = lexPreprocessingToken(token.kind, token.text, token.at);
       metrics.tokenCount++;
       enforceLimit('maxTokens', metrics.tokenCount, limits.maxTokens, token.at);
