@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CAPABILITIES } from '@playground/c11-engine/core';
 import { C_KEYWORDS, C_TYPE_KEYWORDS } from '@playground/c11-engine/syntax';
+import { evaluateEditorTextReplacement } from '../src/editor/operations.ts';
 import { getCompletionSuggestions } from '../src/editor/completionProvider.ts';
 
 const completion = (source, cursorOffset, trigger = 'manual') =>
@@ -58,6 +59,23 @@ test('the catalog contains supported engine functions and excludes user-defined 
   assert.ok(standard.options.every((name) => supportedFunctions.has(name) || C_KEYWORDS.includes(name)));
 });
 
+test('an incomplete include directive completes from the hash while preserving its spacing', () => {
+  for (const source of ['#inc', '# inc', '# /*comment*/ inc']) {
+    const cursorOffset = source.length;
+    const result = completion(source, cursorOffset, 'automatic');
+    assert.ok(result, source);
+    assert.deepEqual(result.options, ['include ']);
+    assert.equal(source.slice(result.replaceStart, result.replaceEnd), source.slice(source.indexOf('inc')));
+    assert.equal(
+      source.slice(0, result.replaceStart) + result.options[0] + source.slice(result.replaceEnd),
+      source.replace(/inc$/, 'include '),
+    );
+  }
+
+  const source = '#include';
+  assert.equal(completion(source, source.length, 'automatic'), null);
+});
+
 test('header completion replaces the whole angled name while retaining both delimiters', () => {
   const source = '#include <stdTAIL.h>';
   const cursorOffset = source.indexOf('std') + 3;
@@ -86,6 +104,75 @@ test('quoted and incomplete headers use only virtual header names', () => {
   assert.equal(incompleteResult.replaceStart, '#include <'.length);
   assert.equal(incompleteResult.replaceEnd, incompleteSource.length);
   assert.ok(incompleteResult.options.includes('stdio.h'));
+});
+
+test('spaced include directives complete real headers and retain an existing closer', () => {
+  const source = '# include <stTAIL.h>';
+  const cursorOffset = source.indexOf('st') + 2;
+  const result = completion(source, cursorOffset, 'manual');
+  assert.ok(result);
+  assert.equal(source.slice(result.replaceStart, result.replaceEnd), 'stTAIL.h');
+  assert.equal(source[result.replaceStart - 1], '<');
+  assert.equal(source[result.replaceEnd], '>');
+  assert.ok(result.options.includes('stdio.h'));
+  assert.ok(result.options.every((name) => CAPABILITIES.virtualHeaders.includes(name)));
+});
+
+test('accepting an include directive inserts one trailing space and places the caret after it', () => {
+  const directiveSource = '#incl';
+  const directiveCursor = directiveSource.length;
+  const directive = completion(directiveSource, directiveCursor, 'automatic');
+  assert.ok(directive);
+  assert.deepEqual(directive.options, ['include ']);
+  const completedDirective = evaluateEditorTextReplacement({
+    text: directiveSource,
+    selection: { start: directiveCursor, end: directiveCursor, direction: 'none' },
+    pairs: [],
+  }, directive.replaceStart, directive.replaceEnd, directive.options[0]);
+  assert.equal(completedDirective?.snapshot.text, '#include ');
+  assert.equal(completedDirective?.snapshot.selection.start, '#include '.length);
+
+  const spacedSource = '#incl <stdio.h>';
+  const spacedCursor = spacedSource.indexOf('incl') + 'incl'.length;
+  const spacedDirective = completion(spacedSource, spacedCursor, 'automatic');
+  assert.ok(spacedDirective);
+  assert.deepEqual(spacedDirective.options, ['include ']);
+  const completedSpacedDirective = evaluateEditorTextReplacement({
+    text: spacedSource,
+    selection: { start: spacedCursor, end: spacedCursor, direction: 'none' },
+    pairs: [],
+  }, spacedDirective.replaceStart, spacedDirective.replaceEnd, spacedDirective.options[0]);
+  assert.equal(completedSpacedDirective?.snapshot.text, '#include <stdio.h>');
+  assert.equal(completedSpacedDirective?.snapshot.selection.start, '#include '.length);
+
+  const adjacentSource = '#incl<stdio.h>';
+  const adjacentCursor = adjacentSource.indexOf('incl') + 'incl'.length;
+  const adjacentDirective = completion(adjacentSource, adjacentCursor, 'automatic');
+  assert.ok(adjacentDirective);
+  assert.deepEqual(adjacentDirective.options, ['include']);
+  const completedAdjacentDirective = evaluateEditorTextReplacement({
+    text: adjacentSource,
+    selection: { start: adjacentCursor, end: adjacentCursor, direction: 'none' },
+    pairs: [],
+  }, adjacentDirective.replaceStart, adjacentDirective.replaceEnd, adjacentDirective.options[0]);
+  assert.equal(completedAdjacentDirective?.snapshot.text, '#include<stdio.h>');
+  assert.equal(completedAdjacentDirective?.snapshot.selection.start, '#include'.length);
+});
+
+test('accepting header suggestions keeps delimiters and places the caret after inserted text', () => {
+  const headerSource = '#include "mathTAIL.h"';
+  const headerCursor = headerSource.indexOf('math') + 4;
+  const header = completion(headerSource, headerCursor, 'manual');
+  assert.ok(header);
+  assert.ok(header.options.includes('math.h'));
+  const completedHeader = evaluateEditorTextReplacement({
+    text: headerSource,
+    selection: { start: headerCursor, end: headerCursor, direction: 'none' },
+    pairs: [],
+  }, header.replaceStart, header.replaceEnd, 'math.h');
+  assert.equal(completedHeader?.snapshot.text, '#include "math.h"');
+  assert.equal(completedHeader?.snapshot.selection.start, headerSource.indexOf('math') + 'math.h'.length);
+  assert.equal(completedHeader?.snapshot.text[completedHeader.snapshot.selection.start], '"');
 });
 
 test('a comment between # and include still completes quoted and angled virtual headers', () => {

@@ -3,7 +3,6 @@ export type CompletionKeyAction = 'accept' | 'dismiss' | 'move-next' | 'move-pre
 export function getCompletionKeyAction(
   key: string,
   menuOpen: boolean,
-  selectedByUser: boolean,
   modified: boolean,
   shiftKey: boolean,
 ): CompletionKeyAction {
@@ -15,7 +14,7 @@ export function getCompletionKeyAction(
   if (key === 'ArrowUp') return 'move-previous';
   if (key === 'Escape') return 'dismiss';
   if (key === 'Tab' && !shiftKey) return 'accept';
-  if (key === 'Enter' && selectedByUser) return 'accept';
+  if (key === 'Enter') return 'accept';
   return 'pass-through';
 }
 

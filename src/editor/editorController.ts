@@ -255,7 +255,6 @@ export function useCodeEditor(
       const completionAction = getCompletionKeyAction(
         event.key,
         activeCompletion !== null,
-        activeCompletion?.selectedByUser ?? false,
         modified,
         event.shiftKey,
       );

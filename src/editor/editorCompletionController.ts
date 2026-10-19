@@ -15,7 +15,6 @@ export interface EditorCompletionState {
   readonly replaceEnd: number;
   readonly options: readonly string[];
   readonly selectedIndex: number;
-  readonly selectedByUser: boolean;
 }
 
 export interface ActiveEditorCompletion extends EditorCompletionState {
@@ -102,7 +101,6 @@ export function createEditorCompletionController({
       cursorOffset,
       ...result,
       selectedIndex: sameContext ? previous.selectedIndex : 0,
-      selectedByUser: sameContext && previous.selectedByUser,
       contextKey,
       manual: effectiveTrigger === 'manual',
     });
@@ -165,7 +163,7 @@ export function createEditorCompletionController({
     const current = completionRef.current;
     if (!current || current.options.length === 0) return false;
     const selectedIndex = (current.selectedIndex + direction + current.options.length) % current.options.length;
-    updateCompletion({ ...current, selectedIndex, selectedByUser: true });
+    updateCompletion({ ...current, selectedIndex });
     return true;
   }
 

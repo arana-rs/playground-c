@@ -36,9 +36,16 @@ const C_COMPLETION_NAMES = Object.freeze([...new Set([
   ...STANDARD_FUNCTION_NAMES,
 ])].sort());
 
+const PREPROCESSOR_COMPLETION_NAMES = Object.freeze(['include']);
 const HEADER_COMPLETION_NAMES = Object.freeze([...CAPABILITIES.virtualHeaders].sort());
 
 interface HeaderContext {
+  readonly start: number;
+  readonly end: number;
+  readonly prefix: string;
+}
+
+interface WordContext {
   readonly start: number;
   readonly end: number;
   readonly prefix: string;
@@ -63,6 +70,33 @@ function hasUnsplicedNewline(source: string, start: number, end: number): boolea
     if (source[index] === '\n' || source[index] === '\r') return true;
   }
   return false;
+}
+
+function findDirectiveContext(
+  source: string,
+  tokens: readonly SyntaxToken[],
+  cursorOffset: number,
+): WordContext | null {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    let start: number;
+    if (token.kind === 'preprocessor') {
+      const spelling = source.slice(token.start, token.end);
+      const match = /^#[\t\v\f ]*([\p{ID_Start}_][\p{ID_Continue}_]*)$/u.exec(spelling);
+      if (!match) continue;
+      start = token.end - match[1].length;
+    } else if (token.kind === 'identifier') {
+      const hashIndex = previousSignificantToken(tokens, index);
+      if (hashIndex < 0 || hasUnsplicedNewline(source, tokens[hashIndex].end, token.start)) continue;
+      const hash = tokens[hashIndex];
+      if (hash.kind !== 'preprocessor' || !/^#[\t\v\f ]*$/.test(source.slice(hash.start, hash.end))) continue;
+      start = token.start;
+    } else continue;
+
+    if (cursorOffset < start || cursorOffset > token.end) continue;
+    return { start, end: token.end, prefix: source.slice(start, cursorOffset) };
+  }
+  return null;
 }
 
 function isIncludeDirectiveBefore(
@@ -152,6 +186,26 @@ export function getCompletionSuggestions(request: CompletionRequest): Completion
   if (header) {
     if (trigger === 'automatic' && header.prefix.length < AUTOMATIC_PREFIX_LENGTH) return null;
     return makeResult(header.start, header.end, suggestionsFor(HEADER_COMPLETION_NAMES, header.prefix));
+  }
+
+  const directive = findDirectiveContext(source, tokens, cursorOffset);
+  if (directive) {
+    if (directive.prefix === 'include'
+      || (trigger === 'automatic' && directive.prefix.length < AUTOMATIC_PREFIX_LENGTH)) return null;
+    const options = suggestionsFor(PREPROCESSOR_COMPLETION_NAMES, directive.prefix);
+    const existingSpacing = /^[\t\v\f ]*/u.exec(source.slice(directive.end))?.[0] ?? '';
+    if (existingSpacing.length > 0) {
+      return makeResult(
+        directive.start,
+        directive.end + existingSpacing.length,
+        options.map((option) => option + existingSpacing),
+      );
+    }
+    return makeResult(
+      directive.start,
+      directive.end,
+      options.map((option) => option + (directive.end === source.length ? ' ' : '')),
+    );
   }
 
   if (tokens.some((token) => isCursorInsideNonCodeToken(token, cursorOffset))) return null;
