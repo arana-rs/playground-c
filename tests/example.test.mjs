@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { analyzeSyntax, createDebugSession, prepare, VIRTUAL_HEAP_LAYOUT } from '@playground/c11-engine/core';
@@ -6,6 +7,14 @@ import { runFile } from '@playground/c11-engine/browser';
 import { RUN_CONFIGURATION } from '../src/execution/useRunner.ts';
 
 const initialExampleSource = readFileSync(new URL('../src/examples/main.c', import.meta.url), 'utf8');
+const invalidSyntaxSource = [
+  'int main(void) {',
+  '    int first = ;',
+  '    int second = ;',
+  '    int third = ;',
+  '    return 0;',
+  '}',
+].join('\n');
 const terminalDemoSource = [
   '#include <stdio.h>',
   'int main(void) {',
@@ -51,32 +60,62 @@ const expectedTerminalDemo = [
   'Clean replacement after CSI 2K.\n',
 ].join('');
 
-test('the initial example reports three independent syntax errors and refuses execution', async () => {
+test('syntax analysis reports independent errors and execution stops at the first', async () => {
+  const project = {
+    entry: 'main.c',
+    files: [{ name: 'main.c', source: invalidSyntaxSource }],
+  };
+  const analysis = analyzeSyntax(project, RUN_CONFIGURATION.options.prepare);
+  assert.equal(analysis.kind, 'error', JSON.stringify(analysis));
+  assert.deepEqual(analysis.diagnostics.map(({ code, file, line, column }) => [code, file, line, column]), [
+    ['SYNTAX_ERROR', 'main.c', 2, 17],
+    ['SYNTAX_ERROR', 'main.c', 3, 18],
+    ['SYNTAX_ERROR', 'main.c', 4, 17],
+  ]);
+  assert.deepEqual(analysis.diagnostics.map(diagnostic =>
+    invalidSyntaxSource.split('\n')[diagnostic.line - 1][diagnostic.column - 1]), [';', ';', ';']);
+
+  const prepared = prepare(project, RUN_CONFIGURATION.options.prepare);
+  assert.equal(prepared.kind, 'prepare-error', JSON.stringify(prepared));
+  assert.deepEqual(prepared.diagnostics.map(({ code, file, line, column }) => [code, file, line, column]), [
+    ['SYNTAX_ERROR', 'main.c', 2, 17],
+  ]);
+
+  const file = new File([invalidSyntaxSource], 'main.c', { type: 'text/x-c' });
+  const result = await runFile(file, RUN_CONFIGURATION.options);
+  assert.equal(result.kind, 'prepare-error', JSON.stringify(result));
+  assert.deepEqual(result.diagnostics.map(({ line, column }) => [line, column]), [[2, 17]]);
+  assert.equal(result.metrics.executeMs, 0, 'execution does not start after syntax errors');
+});
+
+test('the default IOCCC example prepares and emits its expected no-argument output', async () => {
   const project = {
     entry: 'main.c',
     files: [{ name: 'main.c', source: initialExampleSource }],
   };
   const analysis = analyzeSyntax(project, RUN_CONFIGURATION.options.prepare);
-  assert.equal(analysis.kind, 'error', JSON.stringify(analysis));
-  assert.deepEqual(analysis.diagnostics.map(({ code, file, line, column }) => [code, file, line, column]), [
-    ['SYNTAX_ERROR', 'main.c', 2, 31],
-    ['SYNTAX_ERROR', 'main.c', 3, 31],
-    ['SYNTAX_ERROR', 'main.c', 4, 30],
-  ]);
-  assert.deepEqual(analysis.diagnostics.map(diagnostic =>
-    initialExampleSource.split('\n')[diagnostic.line - 1][diagnostic.column - 1]), [';', ';', '4']);
+  assert.equal(analysis.kind, 'ok', JSON.stringify(analysis));
+  assert.deepEqual(analysis.diagnostics, []);
 
   const prepared = prepare(project, RUN_CONFIGURATION.options.prepare);
-  assert.equal(prepared.kind, 'prepare-error', JSON.stringify(prepared));
-  assert.deepEqual(prepared.diagnostics.map(({ code, file, line, column }) => [code, file, line, column]), [
-    ['SYNTAX_ERROR', 'main.c', 2, 31],
-  ]);
+  assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));
 
   const file = new File([initialExampleSource], 'main.c', { type: 'text/x-c' });
   const result = await runFile(file, RUN_CONFIGURATION.options);
-  assert.equal(result.kind, 'prepare-error', JSON.stringify(result));
-  assert.deepEqual(result.diagnostics.map(({ line, column }) => [line, column]), [[2, 31]]);
-  assert.equal(result.metrics.executeMs, 0, 'execution does not start after syntax errors');
+  assert.equal(result.kind, 'terminated', JSON.stringify(result));
+  assert.equal(result.mainReturn, 0);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.stderr, new Uint8Array());
+
+  const output = new TextDecoder().decode(result.stdout);
+  assert.ok(output.startsWith('#include<stdio.h>/*Spigot_Quine*/'));
+  assert.ok(output.includes('/*_IOCCC2012_*/'));
+  assert.ok(output.endsWith('\n'));
+  // The generated source differs from main.c; this pins the no-argument output checked against GCC.
+  assert.equal(
+    createHash('sha256').update(result.stdout).digest('hex'),
+    'c3ad626735251f0f95387aef9888e74987b76cde2156e2ef0706aede3c220442',
+  );
 });
 
 test('a separate terminal demonstration preserves raw output bytes and debug snapshots', async () => {

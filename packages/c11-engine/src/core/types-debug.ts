@@ -1,0 +1,329 @@
+import type { Diagnostic, EngineMetrics, ExecutionOutput, ExecuteResult } from './types-api.ts';
+
+export interface DebugLimitResult extends ExecutionOutput {
+  readonly kind: 'debug-limit';
+  readonly resource: 'maxDebugEvents';
+  readonly limit: number;
+  readonly diagnostics: readonly Diagnostic[];
+  readonly metrics: EngineMetrics;
+}
+export interface DebugPausedResult extends ExecutionOutput {
+  readonly kind: 'paused';
+  /** Source line of the next instruction visit, before it executes. */
+  readonly location: DebugSourceLocation;
+  readonly metrics: EngineMetrics;
+}
+export interface DebugInputNeededResult extends ExecutionOutput {
+  /** Source instruction currently suspended while waiting for stdin. */
+  readonly kind: 'input-needed';
+  readonly location: DebugSourceLocation;
+  readonly metrics: EngineMetrics;
+}
+export type DebugProgress = DebugPausedResult | DebugInputNeededResult | ExecuteResult | DebugLimitResult;
+
+export interface DebugSourceLocation { readonly file: string; readonly line: number; readonly column: number }
+export type DebugObjectDuration = 'automatic' | 'static' | 'thread-local' | 'heap' | 'compound-literal';
+export type DebugObjectOrigin = 'variable' | 'parameter' | 'compound-literal' | 'heap' | 'string-literal';
+interface DebugEventBase {
+  readonly sequence: number;
+  readonly location: DebugSourceLocation;
+  readonly frameId: number | null;
+  readonly scopeId: number | null;
+}
+export type DebugEvent =
+  | (DebugEventBase & { readonly kind: 'frame-enter' | 'frame-exit'; readonly functionName: string })
+  | (DebugEventBase & { readonly kind: 'scope-enter' | 'scope-exit'; readonly functionName: string; readonly scopeName: string })
+  | (DebugEventBase & {
+    readonly kind: 'object-create' | 'object-delete';
+    readonly objectId: number;
+    readonly allocationId: number;
+    readonly duration: DebugObjectDuration;
+    readonly origin: DebugObjectOrigin;
+    readonly name?: string;
+    readonly typeSummary: string;
+    readonly addressVirtual: bigint;
+    readonly size: number;
+  });
+/** Read-only value snapshot for a live automatic arithmetic scalar in a debug session. */
+export interface DebugScalarSnapshot {
+  /** Same allocation identity emitted by the object's `object-create` event. */
+  readonly id: number;
+  readonly scopeId: number;
+  readonly frameId: number;
+  readonly name: string;
+  /** Storage origin shared with the corresponding object lifecycle event. */
+  readonly origin: DebugObjectOrigin;
+  /** C arithmetic type name, retaining qualifiers; enum objects use their int-compatible representation. */
+  readonly type: string;
+  /** Exact virtual address in hexadecimal, without conversion through Number. */
+  readonly address: string;
+  readonly size: number;
+  readonly initialized: boolean;
+  /** Full engine-formatted value, or `?` for an uninitialized object. */
+  readonly displayValue: string;
+}
+/** Lifetime/representation state for a pointer value visible to a debug snapshot. */
+export type DebugPointerStatus = 'uninitialized' | 'null' | 'live' | 'one-past' | 'dangling' | 'unmapped' | 'function';
+/** Identity metadata for an object pointer; this never includes the pointed-to value. */
+export interface DebugPointerTargetSnapshot {
+  /** Allocation identity from the target's real object-create event. */
+  readonly allocationId: number;
+  /** Byte offset within that allocation. */
+  readonly byteOffset: number;
+  /** C type designated by the pointer expression. */
+  readonly type: string;
+  /** Root binding name, included only when identity and type match at byte offset zero. */
+  readonly name?: string;
+}
+/** Read-only snapshot of a live automatic or observed static pointer object. */
+export interface DebugPointerSnapshot {
+  /** Allocation identity of the pointer variable itself. */
+  readonly id: number;
+  readonly scopeId: number | null;
+  readonly frameId: number | null;
+  readonly name: string;
+  readonly origin: Extract<DebugObjectOrigin, 'variable' | 'parameter'>;
+  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static' | 'thread-local'>;
+  readonly region: 'stack' | 'static';
+  readonly type: string;
+  /** Address of the pointer variable's own storage. */
+  readonly address: string;
+  readonly size: number;
+  readonly initialized: boolean;
+  /** Exact stored pointer representation in hexadecimal, or `?` when indeterminate. */
+  readonly displayValue: string;
+  readonly status: DebugPointerStatus;
+  /** Object identity metadata only; never follows or reads the destination. */
+  readonly target?: DebugPointerTargetSnapshot;
+}
+/** Read-only values for static-duration arithmetic objects and string literals observed in a debug session. */
+export interface DebugStaticObjectSnapshot {
+  /** Same allocation identity emitted by the object's `object-create` event. */
+  readonly id: number;
+  /** C identifier for variables; string literals have no identifier. */
+  readonly name?: string;
+  /** Existing lifecycle origin; this inspection publishes only variables and string literals. */
+  readonly origin: Extract<DebugObjectOrigin, 'variable' | 'string-literal'>;
+  /** Thread-local objects are represented in the session's static region without simulating other threads. */
+  readonly duration: Extract<DebugObjectDuration, 'static' | 'thread-local'>;
+  /** Arithmetic C type, or `char[N]` for the contents of a string literal. */
+  readonly type: string;
+  /** Exact virtual address in hexadecimal, without conversion through Number. */
+  readonly address: string;
+  readonly size: number;
+  readonly initialized: boolean;
+  /** Full engine-formatted scalar or C-escaped string literal, or `?` if indeterminate. */
+  readonly displayValue: string;
+}
+/** Controls which observed static objects are included by the legacy static inspector. */
+export interface DebugStaticObjectInspectionOptions {
+  /** Include full C-escaped string-literal previews; defaults to true for compatibility. */
+  readonly includeStringLiterals?: boolean;
+}
+/** Shared data for one cell in a bounded one-dimensional array inspection. */
+interface DebugArrayElementSnapshotBase {
+  /** Stable within the allocation; `${rootId}:${index}`. */
+  readonly key: string;
+  readonly index: number;
+  /** Exact virtual address in hexadecimal, without conversion through Number. */
+  readonly address: string;
+  readonly type: string;
+  readonly initialized: boolean;
+  /** Engine-formatted scalar or pointer value, or `?` when the element is indeterminate. */
+  readonly displayValue: string;
+  /** True when an arithmetic value was shortened by `maxValueChars`; pointer addresses are never truncated. */
+  readonly valueTruncated: boolean;
+}
+/** One arithmetic cell or pointer value in a bounded one-dimensional array inspection. */
+export type DebugArrayElementSnapshot = DebugArrayElementSnapshotBase & (
+  | {
+    /** Omitted on arithmetic cells to preserve their existing serialized shape. */
+    readonly kind?: undefined;
+    readonly pointerStatus?: undefined;
+    readonly target?: undefined;
+  }
+  | {
+    readonly kind: 'pointer';
+    /** Pointer state and destination identity reuse the scalar pointer inspector's semantics. */
+    readonly pointerStatus: DebugPointerStatus;
+    /** Direct destination identity only; the inspector never follows or reads it. */
+    readonly target?: DebugPointerTargetSnapshot;
+  }
+);
+export type DebugArrayStatus = 'available' | 'too-many-elements' | 'multidimensional' | 'unsupported-element-type';
+/** One observed declared array or string literal; descriptors remain visible when cells are unsupported. */
+export interface DebugArraySnapshot {
+  /** The real root allocation ID emitted by `object-create`. */
+  readonly rootId: number;
+  /** C identifier for declared arrays; string literals have no identifier. */
+  readonly name?: string;
+  readonly origin: Extract<DebugObjectOrigin, 'variable' | 'string-literal'>;
+  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static' | 'thread-local'>;
+  readonly region: 'stack' | 'static';
+  readonly frameId: number | null;
+  readonly scopeId: number | null;
+  readonly type: string;
+  readonly elementType: string;
+  /** Exact virtual root address in hexadecimal. */
+  readonly address: string;
+  readonly size: number;
+  readonly length: number;
+  readonly readOnly: boolean;
+  readonly status: DebugArrayStatus;
+  readonly elements: readonly DebugArrayElementSnapshot[];
+}
+/** Bounded array inspection result; `omittedObjects` counts only roots omitted by `maxObjects`. */
+export interface DebugArrayInspection {
+  readonly arrays: readonly DebugArraySnapshot[];
+  readonly omittedObjects: number;
+}
+/** Why a direct struct member is represented as a bounded placeholder. */
+export type DebugAggregateMemberUnsupportedReason = 'array' | 'aggregate' | 'flexible-array';
+/** The value form published for one supported direct struct member. */
+export type DebugAggregateMemberKind = 'arithmetic' | 'pointer' | 'unsupported';
+/** Direct-member inspection state for a live observed struct/union root. */
+export type DebugAggregateStatus = 'available' | 'unsupported-union' | 'too-many-members';
+/** One exact byte range of padding in a struct object. */
+export interface DebugAggregatePaddingSnapshot {
+  /** Stable within the root allocation; `${rootId}:padding:${offset}`. */
+  readonly key: string;
+  readonly offset: number;
+  readonly size: number;
+}
+/** One direct member of a struct root, or a local placeholder for an unsupported member type. */
+export interface DebugAggregateMemberSnapshot {
+  /** Stable within the root allocation; `${rootId}:${index}`. */
+  readonly key: string;
+  readonly index: number;
+  /** Empty for an anonymous direct aggregate member. */
+  readonly name: string;
+  /** C type name, retaining qualifiers without exposing the internal compiler type. */
+  readonly type: string;
+  readonly kind: DebugAggregateMemberKind;
+  /** Member offset from the root, in bytes; for bit-fields this is the storage-unit offset. */
+  readonly offset: number;
+  /** Storage extent in bytes; for bit-fields this is the shared allocation unit. */
+  readonly size: number;
+  /** Present for a named bit-field; unnamed padding fields are not exposed. */
+  readonly bitWidth?: number;
+  /** Least-significant bit position within the storage unit. */
+  readonly bitOffset?: number;
+  /** Byte width of the storage unit shared by this bit-field. */
+  readonly storageUnitSize?: number;
+  /** Runtime extent of a flexible array member when the containing object provides one. */
+  readonly flexibleArray?: DebugFlexibleArraySnapshot;
+  /** Exact virtual address of this member. */
+  readonly address: string;
+  /** Null for a placeholder; false for an indeterminate arithmetic/pointer member. */
+  readonly initialized: boolean | null;
+  /** Full engine-formatted arithmetic value or pointer address; null for a placeholder. */
+  readonly displayValue: string | null;
+  readonly pointerStatus?: DebugPointerStatus;
+  /** Identity only; the inspector never reads or follows the target. */
+  readonly target?: DebugPointerTargetSnapshot;
+  readonly unsupportedReason?: DebugAggregateMemberUnsupportedReason;
+}
+/** Runtime extent for one flexible array member in an observed aggregate object. */
+export interface DebugFlexibleArraySnapshot {
+  readonly elementSize: number;
+  readonly capacityBytes: number;
+  readonly length: number;
+  /** Same bounded-cell result used by ordinary one-dimensional array inspection. */
+  readonly status: DebugArrayStatus;
+  readonly elements: readonly DebugArrayElementSnapshot[];
+  /** Number of elements beyond the published prefix. */
+  readonly omittedElements: number;
+}
+/** Read-only, bounded direct-member view of one observed aggregate allocation. */
+export interface DebugAggregateSnapshot {
+  /** Real root allocation identity emitted by `object-create`. */
+  readonly rootId: number;
+  /** Distinguishes typed subobject views that share one heap allocation; omitted when identical to `rootId`. */
+  readonly viewId?: number;
+  readonly name?: string;
+  readonly origin: Extract<DebugObjectOrigin, 'variable' | 'parameter' | 'heap'>;
+  readonly duration: Extract<DebugObjectDuration, 'automatic' | 'static' | 'thread-local' | 'heap'>;
+  readonly region: 'stack' | 'static' | 'heap';
+  readonly frameId: number | null;
+  readonly scopeId: number | null;
+  readonly type: string;
+  readonly kind: 'struct' | 'union';
+  readonly address: string;
+  readonly size: number;
+  readonly readOnly: boolean;
+  readonly memberCount: number;
+  readonly status: DebugAggregateStatus;
+  readonly members: readonly DebugAggregateMemberSnapshot[];
+  readonly padding: readonly DebugAggregatePaddingSnapshot[];
+}
+/** Bounded observed aggregate roots; omissions count only roots over `maxObjects`. */
+export interface DebugAggregateInspection {
+  readonly aggregates: readonly DebugAggregateSnapshot[];
+  readonly omittedObjects: number;
+}
+/** Hard cap for direct struct members published by the aggregate inspector. */
+export const DEFAULT_DEBUG_AGGREGATE_INSPECTION_LIMITS = Object.freeze({ maxMembers: 10 });
+/** Safe core fallbacks; hosts may pass their RUN_CONFIGURATION budgets explicitly. */
+export const DEFAULT_DEBUG_ARRAY_INSPECTION_LIMITS = Object.freeze({
+  maxObjects: 1_000,
+  maxElementsPerArray: 10,
+  maxValueChars: 256,
+});
+/** Reserved x86-64 LP64 virtual address ranges for session objects. Ends are exclusive. */
+export const VIRTUAL_MEMORY_LAYOUT = Object.freeze({
+  alignmentBytes: 16,
+  guardBytes: 16,
+  staticAddressRange: Object.freeze({ start: 0x0001_0000n, endExclusive: 0x0002_0000n }),
+  stackAddressRange: Object.freeze({ start: 0x0002_0000n, endExclusive: 0x0003_0000n }),
+  heapAddressRange: Object.freeze({ start: 0x0003_0000n, endExclusive: 0x0004_0000n }),
+});
+/** Backwards-compatible heap-only layout; values derive from the shared memory layout. */
+export const VIRTUAL_HEAP_LAYOUT = Object.freeze({
+  ...VIRTUAL_MEMORY_LAYOUT.heapAddressRange,
+  alignmentBytes: VIRTUAL_MEMORY_LAYOUT.alignmentBytes,
+});
+/** Live raw malloc blocks; opaque blocks have identity, address and extent only. */
+export interface DebugHeapObjectSnapshot {
+  /** Same allocation identity emitted by the object's `object-create` event. */
+  readonly id: number;
+  /** Exact virtual address in hexadecimal, without conversion through Number. */
+  readonly address: string;
+  readonly size: number;
+  readonly origin: 'heap';
+}
+export interface DebugSessionOptions {
+  /** Total number of lifecycle events the session may emit. Defaults to 100,000. */
+  readonly maxEvents?: number;
+  /** Reproducible non-cryptographic heap address placement for debug/testing. */
+  readonly heapAddressSeed?: number;
+  /** Maximum observed array or aggregate roots returned by each inspector; defaults to 1,000. */
+  readonly maxObjects?: number;
+  /** Maximum cells inspected per array; defaults to 10. Includes string terminators and zero-filled cells. */
+  readonly maxElementsPerArray?: number;
+  /** Maximum characters in each array cell's formatted value; defaults to 256. */
+  readonly maxValueChars?: number;
+}
+export interface DebugExecutionSession {
+  /** Run one source-line visit, or continue a suspended visit until its next pause. */
+  resume(): DebugProgress;
+  /** Append copied bytes after resume() returned input-needed. */
+  appendStdin(bytes: Uint8Array): void;
+  /** Close stdin; buffered bytes are consumed first and EOF remains sticky. */
+  endStdin(): void;
+  /** Location of the next source instruction visit, or null after termination/setup failure. */
+  currentLocation(): DebugSourceLocation | null;
+  /** Return events produced since the previous drain, in sequence order. */
+  drainEvents(): readonly DebugEvent[];
+  /** Inspect live automatic arithmetic scalars without reading or changing VM state. */
+  inspectScalars(): readonly DebugScalarSnapshot[];
+  /** Inspect live automatic, parameter, and observed static pointer objects without reading their destinations. */
+  inspectPointers(): readonly DebugPointerSnapshot[];
+  /** Inspect observed static arithmetic objects and string literals without reading or changing VM state. */
+  inspectStaticObjects(options?: DebugStaticObjectInspectionOptions): readonly DebugStaticObjectSnapshot[];
+  /** Inspect bounded one-dimensional arithmetic or pointer arrays and observed string-literal characters without changing VM state. */
+  inspectArrays(): DebugArrayInspection;
+  /** Inspect bounded direct struct members and opaque union roots without reading C values. */
+  inspectAggregates(): DebugAggregateInspection;
+  /** Inspect live opaque heap allocations in ascending virtual-address order. */
+  inspectHeapObjects(): readonly DebugHeapObjectSnapshot[];
+}

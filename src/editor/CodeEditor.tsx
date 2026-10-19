@@ -1,20 +1,25 @@
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import { getEditorLineCount, MAX_EDITOR_LINES } from './limits.ts';
 import type { EditorLimitMessage } from './limits.ts';
-import { highlightC } from './highlight.ts';
 import {
   createDiagnosticAnchorHitbox,
   findDiagnosticAnchorAtPoint,
   getDiagnosticPopoverVerticalPlacement,
-  splitHighlightTokensAtDiagnostics,
 } from './diagnosticRendering.ts';
 import type { DiagnosticAnchorHitbox } from './diagnosticRendering.ts';
 import type { EditorDiagnosticGroup } from './editorDiagnostics.ts';
 import type { EditorCompletionState } from './useCodeEditor.ts';
-import { getEditorCaretGeometry } from './caretGeometry.ts';
-import { isCompletionCaretVisible } from './completionInteractions.ts';
 import { useI18n } from '../i18n.tsx';
+import {
+  CodeEditorDiagnosticOverlay,
+  getDiagnosticPopoverTop,
+} from './CodeEditorDiagnosticOverlay.tsx';
+import { useCodeEditorCompletionOverlay } from './CodeEditorCompletionOverlay.tsx';
+import { CodeEditorInput } from './CodeEditorInput.tsx';
+import { CodeEditorLimitStatus } from './CodeEditorLimitStatus.tsx';
+import { CodeEditorGutterLayer, CodeEditorHighlightLayer } from './CodeEditorVisualLayers.tsx';
+import { getEditorDiagnosticAnchorRanges } from './editorDiagnosticAnchors.ts';
 
 interface CodeEditorProps {
   editorRef: RefObject<HTMLTextAreaElement | null>;
@@ -32,48 +37,6 @@ interface CodeEditorProps {
   onCompletionDismiss?: () => void;
 }
 
-const EditorLineNumber = memo(function EditorLineNumber({
-  line, current,
-}: {
-  line: number;
-  current: boolean;
-}) {
-  return (
-    <span className={current ? 'editor-line-number is-current' : 'editor-line-number'}>
-      {line}
-    </span>
-  );
-});
-
-function getDiagnosticPopoverTop(
-  editor: HTMLTextAreaElement,
-  popover: HTMLDivElement,
-  line: number,
-): number {
-  const style = getComputedStyle(editor);
-  const lineHeight = parseFloat(style.lineHeight) || 21;
-  const paddingTop = parseFloat(style.paddingTop) || 0;
-  const requestedTop = paddingTop + (line - 1) * lineHeight - editor.scrollTop - 2;
-  const maxTop = Math.max(4, editor.clientHeight - popover.offsetHeight - 4);
-  return Math.max(4, Math.min(requestedTop, maxTop));
-}
-
-function revealEditorLine(editor: HTMLTextAreaElement, line: number): void {
-  const style = getComputedStyle(editor);
-  const lineHeight = parseFloat(style.lineHeight) || 21;
-  const paddingTop = parseFloat(style.paddingTop) || 0;
-  const paddingBottom = parseFloat(style.paddingBottom) || 0;
-  const lineTop = paddingTop + (line - 1) * lineHeight;
-  const lineBottom = lineTop + lineHeight;
-  const visibleTop = editor.scrollTop + paddingTop;
-  const visibleBottom = editor.scrollTop + editor.clientHeight - paddingBottom;
-
-  if (lineTop < visibleTop) editor.scrollTop = Math.max(0, lineTop - paddingTop);
-  else if (lineBottom > visibleBottom) {
-    editor.scrollTop = Math.max(0, lineBottom - editor.clientHeight + paddingBottom);
-  }
-}
-
 export const CodeEditor = memo(function CodeEditor({
   editorRef, text, initialText = '', activeLine = 1, highlightLine,
   readOnly = false, showActiveLine = true, compactReadOnlyGutter = false,
@@ -88,9 +51,6 @@ export const CodeEditor = memo(function CodeEditor({
   const gutterRef = useRef<HTMLDivElement>(null);
   const diagnosticMarkersRef = useRef<HTMLDivElement>(null);
   const diagnosticPopoverRef = useRef<HTMLDivElement>(null);
-  const completionPopoverRef = useRef<HTMLDivElement>(null);
-  const completionRef = useRef(completion);
-  const caretMeasureRef = useRef<CanvasRenderingContext2D | null>(null);
   const activeDiagnosticLineRef = useRef<number | null>(null);
   const activeDiagnosticAnchorOffsetRef = useRef<number | null>(null);
   const diagnosticAnchorHitboxesRef = useRef<readonly DiagnosticAnchorHitbox[] | null>(null);
@@ -98,15 +58,11 @@ export const CodeEditor = memo(function CodeEditor({
   const isComposingRef = useRef(false);
   const diagnosticCloseTimerRef = useRef<number | null>(null);
   const diagnosticOverlayRef = useRef<HTMLDivElement>(null);
-  const diagnosticPopoverId = useId();
-  const completionPopoverId = useId();
-  completionRef.current = completion;
   const [hoveredDiagnosticLine, setHoveredDiagnosticLine] = useState<number | null>(null);
   const [hoveredDiagnosticAnchorOffset, setHoveredDiagnosticAnchorOffset] = useState<number | null>(null);
   const [focusedDiagnosticLine, setFocusedDiagnosticLine] = useState<number | null>(null);
   const [pinnedDiagnosticLine, setPinnedDiagnosticLine] = useState<number | null>(null);
   const [dismissedDiagnosticLine, setDismissedDiagnosticLine] = useState<number | null>(null);
-  const tokens = useMemo(() => highlightC(text), [text]);
   const diagnosticGroups = readOnly ? [] : diagnostics;
   const diagnosticGroupByLine = useMemo(
     () => new Map(diagnosticGroups.map(group => [group.line, group] as const)),
@@ -117,70 +73,10 @@ export const CodeEditor = memo(function CodeEditor({
     ? null : candidateDiagnosticLine;
   const activeDiagnosticGroup = activeDiagnosticLine === null
     ? undefined : diagnosticGroupByLine.get(activeDiagnosticLine);
-  const diagnosticLineStarts = useMemo(() => {
-    const lineStarts = [0];
-    for (let offset = 0; offset < text.length; offset++) {
-      if (text[offset] === '\r') {
-        if (text[offset + 1] === '\n') offset++;
-        lineStarts.push(offset + 1);
-      } else if (text[offset] === '\n') {
-        lineStarts.push(offset + 1);
-      }
-    }
-    return lineStarts;
-  }, [text]);
-  const diagnosticAnchorRanges = useMemo(() => {
-    const ranges: { start: number; length: number; kind: 'primary' | 'related'; diagnosticLine: number }[] = [];
-    for (const group of diagnosticGroups) {
-      for (const diagnostic of group.diagnostics) {
-        for (const anchor of diagnostic.anchors) {
-          if (anchor.line !== group.line || anchor.line < 1 || anchor.column < 1) continue;
-          const lineStart = diagnosticLineStarts[anchor.line - 1];
-          const lineEnd = diagnosticLineStarts[anchor.line] ?? text.length;
-          if (lineStart === undefined) continue;
-          const start = lineStart + anchor.column - 1;
-          if (start >= lineStart && start + anchor.length <= lineEnd) {
-            ranges.push({ start, length: anchor.length, kind: 'primary', diagnosticLine: group.line });
-          }
-        }
-        if (group.line === diagnostic.line) {
-          for (const related of diagnostic.relatedLocations) {
-            for (const anchor of related.anchors) {
-              if (anchor.line < 1 || anchor.column < 1) continue;
-              const lineStart = diagnosticLineStarts[anchor.line - 1];
-              const lineEnd = diagnosticLineStarts[anchor.line] ?? text.length;
-              if (lineStart === undefined) continue;
-              const start = lineStart + anchor.column - 1;
-              if (start >= lineStart && start + anchor.length <= lineEnd) {
-                ranges.push({ start, length: anchor.length, kind: 'related', diagnosticLine: diagnostic.line });
-              }
-            }
-          }
-        }
-      }
-    }
-    return ranges;
-  }, [diagnosticGroups, diagnosticLineStarts, text]);
-  const tokenSpans = useMemo(() => splitHighlightTokensAtDiagnostics(
-    text,
-    tokens,
-    diagnosticAnchorRanges,
-  ).map(segment => {
-    return (
-      <span
-        key={segment.start}
-        className={`syntax-${segment.kind}${segment.diagnostic
-          ? segment.related
-            ? ' editor-diagnostic-mark editor-diagnostic-related-anchor'
-            : ' editor-diagnostic-mark editor-diagnostic-anchor'
-          : ''}`}
-        data-diagnostic-line={segment.diagnosticLine}
-        data-diagnostic-offset={segment.diagnostic ? segment.start : undefined}
-      >
-        {text.slice(segment.start, segment.end)}
-      </span>
-    );
-  }), [diagnosticAnchorRanges, text, tokens]);
+  const diagnosticAnchorRanges = useMemo(
+    () => getEditorDiagnosticAnchorRanges(text, diagnosticGroups),
+    [diagnosticGroups, text],
+  );
 
   const clearDiagnosticCloseTimer = useCallback(() => {
     if (diagnosticCloseTimerRef.current === null) return;
@@ -221,11 +117,17 @@ export const CodeEditor = memo(function CodeEditor({
   const compactGutterClass = useCompactReadOnlyGutter
     ? ` is-compact-readonly-gutter${lineCount >= 100 ? ' has-three-digit-line-numbers' : ''}`
     : '';
-  const visibleLine = Math.max(1, Math.min(MAX_EDITOR_LINES, activeLine));
-  const lineNumberSpans = useMemo(() => Array.from({ length: lineCount }, (_, index) => {
-    const line = index + 1;
-    return <EditorLineNumber key={line} line={line} current={showActiveLine && line === visibleLine} />;
-  }), [lineCount, showActiveLine, visibleLine]);
+  const {
+    popoverId: completionPopoverId,
+    positionPopover: positionCompletionPopover,
+    dismissOffscreen: dismissOffscreenCompletion,
+    overlay: completionOverlay,
+  } = useCodeEditorCompletionOverlay({
+    editorRef,
+    completion,
+    onCompletionAccept,
+    onCompletionDismiss,
+  });
 
   const getDiagnosticAnchorHitboxes = useCallback(() => {
     if (diagnosticAnchorHitboxesRef.current) return diagnosticAnchorHitboxesRef.current;
@@ -244,53 +146,6 @@ export const CodeEditor = memo(function CodeEditor({
     diagnosticAnchorHitboxesRef.current = hitboxes;
     return hitboxes;
   }, []);
-
-  const positionCompletionPopover = useCallback(() => {
-    const editor = editorRef.current;
-    const popover = completionPopoverRef.current;
-    const completionState = completionRef.current;
-    const pane = editor?.parentElement;
-    if (!editor || !popover || !completionState || !pane) return;
-
-    if (!caretMeasureRef.current) caretMeasureRef.current = document.createElement('canvas').getContext('2d');
-    const caret = getEditorCaretGeometry(
-      editor,
-      editor.value,
-      completionState.cursorOffset,
-      caretMeasureRef.current,
-    );
-    const editorRect = editor.getBoundingClientRect();
-    const paneRect = pane.getBoundingClientRect();
-    const requestedLeft = editorRect.left - paneRect.left + editor.clientLeft
-      + caret.left - editor.scrollLeft;
-    const requestedTop = editorRect.top - paneRect.top + editor.clientTop
-      + caret.top + caret.lineHeight - editor.scrollTop;
-    const maxLeft = Math.max(4, pane.clientWidth - popover.offsetWidth - 4);
-    const maxTop = Math.max(4, pane.clientHeight - popover.offsetHeight - 4);
-    popover.style.left = `${Math.max(4, Math.min(requestedLeft, maxLeft))}px`;
-    popover.style.top = `${Math.max(4, Math.min(requestedTop, maxTop))}px`;
-  }, [editorRef]);
-
-  const dismissOffscreenCompletion = useCallback(() => {
-    const editor = editorRef.current;
-    const completionState = completionRef.current;
-    if (!editor || !completionState) return;
-    if (!caretMeasureRef.current) caretMeasureRef.current = document.createElement('canvas').getContext('2d');
-    const caret = getEditorCaretGeometry(
-      editor,
-      editor.value,
-      completionState.cursorOffset,
-      caretMeasureRef.current,
-    );
-    if (!isCompletionCaretVisible(caret, {
-      scrollTop: editor.scrollTop,
-      scrollLeft: editor.scrollLeft,
-      clientHeight: editor.clientHeight,
-      clientWidth: editor.clientWidth,
-    })) {
-      onCompletionDismiss?.();
-    }
-  }, [editorRef, onCompletionDismiss]);
 
   const syncScroll = useCallback(() => {
     const editor = editorRef.current;
@@ -484,34 +339,25 @@ export const CodeEditor = memo(function CodeEditor({
 
   return (
     <>
-      <div ref={viewportRef} className="editor-highlight-viewport" aria-hidden="true">
-        {readOnly && highlightLine !== undefined && highlightLine >= 1 && highlightLine <= lineCount && (
-          <div
-            ref={executionLineRef}
-            className="editor-execution-line"
-            style={{ top: `${8 + (highlightLine - 1) * 21}px` }}
-          />
-        )}
-        <pre ref={highlightRef} className={`editor-highlight${compactGutterClass}`}>
-          {tokenSpans}
-          <span className="editor-line-end">{'\u200b'}</span>
-        </pre>
-      </div>
-      <textarea
-        ref={editorRef}
-        className={`editor${readOnly ? ' is-readonly' : ''}${compactGutterClass}`}
-        aria-label={t('editor.codeAreaLabel', { file: 'main.c' })}
-        aria-autocomplete={completion ? 'list' : 'none'}
-        aria-controls={completion ? completionPopoverId : undefined}
-        aria-activedescendant={completion
-          ? `${completionPopoverId}-option-${completion.selectedIndex}` : undefined}
-        defaultValue={initialText}
+      <CodeEditorHighlightLayer
+        text={text}
+        lineCount={lineCount}
         readOnly={readOnly}
-        spellCheck={false}
-        autoCorrect="off"
-        autoCapitalize="off"
-        autoComplete="off"
-        wrap="off"
+        highlightLine={highlightLine}
+        compactGutterClass={compactGutterClass}
+        diagnosticAnchorRanges={diagnosticAnchorRanges}
+        viewportRef={viewportRef}
+        highlightRef={highlightRef}
+        executionLineRef={executionLineRef}
+      />
+      <CodeEditorInput
+        editorRef={editorRef}
+        className={`editor${readOnly ? ' is-readonly' : ''}${compactGutterClass}`}
+        accessibleLabel={t('editor.codeAreaLabel', { file: 'main.c' })}
+        initialText={initialText}
+        readOnly={readOnly}
+        completion={completion}
+        completionPopoverId={completionPopoverId}
         onPointerMove={handleDiagnosticPointerMove}
         onPointerLeave={scheduleDiagnosticClose}
         onCompositionStart={() => {
@@ -522,146 +368,49 @@ export const CodeEditor = memo(function CodeEditor({
         onInput={dismissDiagnosticPopover}
         onSelect={dismissDiagnosticPopover}
       />
-      <div ref={gutterViewportRef} className={`editor-gutter-viewport${compactGutterClass}`} aria-hidden="true">
-        <div ref={gutterRef} className="editor-gutter">
-          <div className="editor-line-numbers" aria-hidden="true">
-            {lineNumberSpans}
-          </div>
-          {!useCompactReadOnlyGutter && <div className="editor-diagnostic-space" aria-hidden="true" />}
-        </div>
-      </div>
-      {diagnosticGroups.length > 0 && (
-        <div ref={diagnosticOverlayRef} className="editor-diagnostic-overlay">
-          <div ref={diagnosticMarkersRef} className="editor-diagnostic-markers">
-            {diagnosticGroups.map(group => {
-              const label = t(
-                group.diagnostics.length === 1 ? 'editor.diagnosticMarker.one' : 'editor.diagnosticMarker.many',
-                { count: group.diagnostics.length, line: group.line },
-              );
-              return (
-                <button
-                  key={group.line}
-                  type="button"
-                  className="editor-diagnostic-marker"
-                  style={{ top: `${8 + (group.line - 1) * 21}px` }}
-                  aria-label={label}
-                  aria-expanded={activeDiagnosticLine === group.line}
-                  aria-describedby={activeDiagnosticLine === group.line ? diagnosticPopoverId : undefined}
-                  aria-controls={activeDiagnosticLine === group.line ? diagnosticPopoverId : undefined}
-                  onMouseDown={event => event.preventDefault()}
-                  onMouseEnter={() => {
-                    clearDiagnosticCloseTimer();
-                    clearHoveredDiagnosticAnchor();
-                    setPinnedDiagnosticLine(null);
-                    setDismissedDiagnosticLine(null);
-                    setHoveredDiagnosticLine(group.line);
-                  }}
-                  onMouseLeave={scheduleDiagnosticClose}
-                  onFocus={() => {
-                    clearDiagnosticCloseTimer();
-                    clearHoveredDiagnosticAnchor();
-                    const editor = editorRef.current;
-                    if (editor) revealEditorLine(editor, group.line);
-                    setPinnedDiagnosticLine(null);
-                    setDismissedDiagnosticLine(null);
-                    setFocusedDiagnosticLine(group.line);
-                  }}
-                  onBlur={() => setFocusedDiagnosticLine(current => current === group.line ? null : current)}
-                  onClick={() => {
-                    clearDiagnosticCloseTimer();
-                    clearHoveredDiagnosticAnchor();
-                    if (pinnedDiagnosticLine === group.line) {
-                      setPinnedDiagnosticLine(null);
-                      setDismissedDiagnosticLine(group.line);
-                    } else {
-                      setDismissedDiagnosticLine(null);
-                      setPinnedDiagnosticLine(group.line);
-                    }
-                  }}
-                >
-                  <span className="editor-diagnostic-marker-glyph" aria-hidden="true">!</span>
-                </button>
-              );
-            })}
-          </div>
-          {activeDiagnosticGroup && (
-            <div
-              ref={diagnosticPopoverRef}
-              id={diagnosticPopoverId}
-              className="editor-diagnostic-popover"
-              role="tooltip"
-              style={{ top: '8px' }}
-              onMouseEnter={clearDiagnosticCloseTimer}
-              onMouseLeave={scheduleDiagnosticClose}
-            >
-              <div className="editor-diagnostic-popover-title">
-                {t('editor.diagnosticsForLine', { line: activeDiagnosticGroup.line })}
-              </div>
-              <ul className="editor-diagnostic-messages">
-                {activeDiagnosticGroup.diagnostics.map(diagnostic => (
-                  <li key={diagnostic.id}>
-                    <div>{diagnostic.message}</div>
-                    {diagnostic.relatedLocations.length > 0 && (
-                      <>
-                        <div className="editor-diagnostic-related-title">{t('editor.relatedLocations')}</div>
-                        <ul className="editor-diagnostic-related-locations">
-                          {diagnostic.relatedLocations.map((related, index) => (
-                            <li key={`${diagnostic.id}:related:${index}`}>
-                              <span>{related.message}</span>
-                              <code>{t('editor.sourceLocation', {
-                                file: related.file,
-                                line: related.line,
-                                column: related.column,
-                              })}</code>
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-      {completion && (
-        <div className="editor-completion-overlay" aria-hidden="false">
-          <div
-            ref={completionPopoverRef}
-            id={completionPopoverId}
-            className="editor-completion-popover"
-            role="listbox"
-            aria-label={t('editor.completionListLabel')}
-          >
-            {completion.options.map((option, index) => (
-              <div
-                key={`${option}:${index}`}
-                id={`${completionPopoverId}-option-${index}`}
-                className={`editor-completion-option${completion.selectedIndex === index ? ' is-active' : ''}`}
-                role="option"
-                aria-selected={completion.selectedIndex === index}
-                onMouseDown={event => event.preventDefault()}
-                onClick={() => onCompletionAccept?.(index)}
-              >
-                {option}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      <div
-        className={limitMessage ? 'editor-limit-status is-visible' : 'editor-limit-status'}
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
-        {limitMessage?.kind === 'line-limit'
-          ? t('editor.lineLimit', { max: MAX_EDITOR_LINES })
-          : limitMessage?.kind === 'file-too-long'
-            ? t('editor.fileTooLong', { count: limitMessage.lineCount, max: MAX_EDITOR_LINES })
-            : ''}
-      </div>
+      <CodeEditorGutterLayer
+        lineCount={lineCount}
+        activeLine={activeLine}
+        showActiveLine={showActiveLine}
+        compactGutterClass={compactGutterClass}
+        useCompactReadOnlyGutter={useCompactReadOnlyGutter}
+        gutterViewportRef={gutterViewportRef}
+        gutterRef={gutterRef}
+      />
+      <CodeEditorDiagnosticOverlay
+        groups={diagnosticGroups}
+        activeLine={activeDiagnosticLine}
+        activeGroup={activeDiagnosticGroup}
+        editorRef={editorRef}
+        overlayRef={diagnosticOverlayRef}
+        markersRef={diagnosticMarkersRef}
+        popoverRef={diagnosticPopoverRef}
+        clearDiagnosticCloseTimer={clearDiagnosticCloseTimer}
+        clearHoveredDiagnosticAnchor={clearHoveredDiagnosticAnchor}
+        scheduleDiagnosticClose={scheduleDiagnosticClose}
+        onMarkerEnter={line => {
+          setPinnedDiagnosticLine(null);
+          setDismissedDiagnosticLine(null);
+          setHoveredDiagnosticLine(line);
+        }}
+        onMarkerFocus={line => {
+          setPinnedDiagnosticLine(null);
+          setDismissedDiagnosticLine(null);
+          setFocusedDiagnosticLine(line);
+        }}
+        onMarkerBlur={line => setFocusedDiagnosticLine(current => current === line ? null : current)}
+        onMarkerClick={line => {
+          if (pinnedDiagnosticLine === line) {
+            setPinnedDiagnosticLine(null);
+            setDismissedDiagnosticLine(line);
+          } else {
+            setDismissedDiagnosticLine(null);
+            setPinnedDiagnosticLine(line);
+          }
+        }}
+      />
+      {completionOverlay}
+      <CodeEditorLimitStatus limitMessage={limitMessage} />
     </>
   );
 });

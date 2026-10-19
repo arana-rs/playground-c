@@ -105,6 +105,26 @@ test('_Generic in an ICE uses the composite type of ?: for qualified pointers', 
   run('language-extension-conditional-inference.c');
 });
 
+test('_Generic supplies integer constant array bounds at file and block scope', () => {
+  const entry = 'language-extension-generic-array-bounds.c';
+  const source = `
+int global_values[_Generic(0, int: 3, default: 1)];
+_Static_assert(sizeof(int[_Generic(0, int: 3, default: 1)]) == 3 * sizeof(int), "global array bound");
+
+int main(void) {
+  int local_values[_Generic(0, int: 3, default: 1)];
+  _Static_assert(sizeof(int[_Generic(0, int: 3, default: 1)]) == 3 * sizeof(int), "local array bound");
+  return sizeof global_values / sizeof global_values[0] == 3 &&
+      sizeof local_values / sizeof local_values[0] == 3 ? 0 : 1;
+}
+`;
+  const prepared = prepare({ entry, files: [{ name: entry, source }] });
+  assert.equal(prepared.kind, 'prepared', JSON.stringify(prepared));
+  const result = execute(prepared.program);
+  assert.equal(result.kind, 'terminated', JSON.stringify(result));
+  assert.equal(result.exitCode, 0, JSON.stringify(result));
+});
+
 test('restrict tracks real aliases and permits disjoint chains, reads and subobjects', () => {
   run('language-extension-restrict.c');
   restrictFailure(`static void update(int * restrict left, int * restrict right) {

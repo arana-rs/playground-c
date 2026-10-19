@@ -1,578 +1,26 @@
-import { scanC, type SyntaxKind, type SyntaxToken } from '../syntax.ts';
 import { getStandardHeader } from './headers.ts';
-import { EngineFailure, failure, enforceLimit } from './internal.ts';
+import { enforceLimit } from './internal.ts';
 import type { Location, SourceSpan, Token } from './internal.ts';
 import { lexPreprocessingToken } from './lexer.ts';
 import type { EngineMetrics, PrepareLimits, SourceProject } from './types.ts';
-import { encodeUtf8Bytes, parseLiteral } from './numeric.ts';
+import { MacroExpander } from './preprocessor-expansion.ts';
+import { decodeCQuotedString, predefinedMacros, rejectVaArgsOutsideVariadicReplacement, tokenText } from './preprocessor-macros.ts';
+import { preprocessError } from './preprocessor-errors.ts';
+import { joinVirtualPath, normalizeVirtualPath, parentDirectory } from './preprocessor-source.ts';
+import { tokenizeSource } from './preprocessor-tokenize.ts';
+import type { Conditional, PPContext, PPToken, PreprocessedUnit } from './preprocessor-types.ts';
 
-export interface PreprocessedUnit {
-  readonly name: string;
-  readonly tokens: Token[];
-}
+export type { PreprocessedUnit } from './preprocessor-types.ts';
 
-interface PPToken {
-  kind: SyntaxKind | 'header';
-  text: string;
-  spelling: string;
-  at: Location;
-  /** Physical source span survives #line remapping and macro substitution. */
-  physicalFile?: string;
-  physicalOffset?: number;
-  physicalEndOffset?: number;
-  physicalEndLine?: number;
-  physicalEndColumn?: number;
-  endAt?: Location;
-  expansionSite?: Location;
-  physicalLine: number;
-  physicalColumn: number;
-  logicalStart: number;
-  logicalEnd: number;
-  leadingSpace: boolean;
-  hideSet?: ReadonlySet<string>;
-  placemarker?: boolean;
-}
-
-interface PPLine { readonly number: number; readonly tokens: PPToken[] }
-interface Macro { readonly name: string; readonly parameters?: readonly string[]; readonly variadic: boolean; readonly replacement: readonly PPToken[]; readonly at: Location }
-interface PPContext {
-  readonly macros: Map<string, Macro>;
-  readonly files: ReadonlyMap<string, string>;
-  readonly onceFiles: Set<string>;
-  readonly limits: PrepareLimits;
-  readonly metrics: EngineMetrics;
-  readonly captureSourceSpans: boolean;
-  readonly dateText: string;
-  readonly timeText: string;
-}
-interface Conditional { readonly parentActive: boolean; active: boolean; branchTaken: boolean; sawElse: boolean; readonly at: Location }
-
-const TRIGRAPHS: Readonly<Record<string, string>> = Object.freeze({
-  '??=': '#', '??/': '\\', "??'": '^', '??(': '[', '??)': ']', '??!': '|', '??<': '{', '??>': '}', '??-': '~',
-});
-// C11 permits only these UCN values below U+00A0.
-const BASIC_UCN_EXCEPTIONS = new Set([0x24, 0x40, 0x60]);
-const MAX_INTERNAL_DEPTH = 2048;
 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const quoteC = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-
-function preprocessError(message: string, at: Location, code = 'PREPROCESSOR_ERROR'): never {
-  return failure(code, message, at);
-}
-
-function normalizeVirtualPath(path: string, at: Location): string {
-  if (!path || path.startsWith('/') || path.includes('\\') || path.includes('\0')) preprocessError(`Invalid virtual name: «${path}».`, at, 'INVALID_PROJECT');
-  const components: string[] = [];
-  for (const component of path.split('/')) {
-    if (!component || component === '.') continue;
-    if (component === '..') {
-      if (!components.length) preprocessError(`Virtual path «${path}» escapes the project root.`, at, 'INVALID_PROJECT');
-      components.pop();
-    } else components.push(component);
-  }
-  if (!components.length) preprocessError(`Invalid virtual name: «${path}».`, at, 'INVALID_PROJECT');
-  return components.join('/');
-}
-
-function joinVirtualPath(directory: string, relative: string, at: Location): string {
-  return normalizeVirtualPath(directory ? `${directory}/${relative}` : relative, at);
-}
-
-function parentDirectory(path: string): string {
-  const slash = path.lastIndexOf('/');
-  return slash < 0 ? '' : path.slice(0, slash);
-}
-
-function sourcePositions(source: string): { lineAt(offset: number): number; columnAt(offset: number): number } {
-  const starts = [0];
-  for (let index = 0; index < source.length; index++) {
-    if (source[index] === '\r') {
-      if (source[index + 1] === '\n') index++;
-      starts.push(index + 1);
-    } else if (source[index] === '\n') starts.push(index + 1);
-  }
-  const lineStart = (offset: number): number => {
-    let low = 0, high = starts.length;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if (starts[middle] <= offset) low = middle + 1;
-      else high = middle;
-    }
-    return Math.max(0, low - 1);
-  };
-  return {
-    lineAt: (offset) => lineStart(offset) + 1,
-    columnAt: (offset) => offset - starts[lineStart(offset)] + 1,
-  };
-}
-
-interface MappedSource {
-  readonly text: string;
-  readonly physicalOffsets: readonly number[];
-  readonly physicalEnds: readonly number[];
-  readonly eofOffset: number;
-}
-
-/** Translation phases 1 and 2, retaining the physical start offset of every code unit. */
-function translatePhasesOneAndTwo(source: string): MappedSource {
-  let phaseOne = '';
-  const phaseOneOffsets: number[] = [];
-  const phaseOneEnds: number[] = [];
-  for (let index = 0; index < source.length;) {
-    const trigraph = source.slice(index, index + 3);
-    const replacement = TRIGRAPHS[trigraph];
-    if (replacement !== undefined) {
-      phaseOne += replacement;
-      phaseOneOffsets.push(index);
-      phaseOneEnds.push(index + 3);
-      index += 3;
-    } else {
-      phaseOne += source[index];
-      phaseOneOffsets.push(index);
-      phaseOneEnds.push(index + 1);
-      index++;
-    }
-  }
-  let text = '';
-  const physicalOffsets: number[] = [];
-  const physicalEnds: number[] = [];
-  for (let index = 0; index < phaseOne.length;) {
-    if (phaseOne[index] === '\\' && phaseOne[index + 1] === '\n') { index += 2; continue; }
-    if (phaseOne[index] === '\\' && phaseOne[index + 1] === '\r') {
-      index += phaseOne[index + 2] === '\n' ? 3 : 2;
-      continue;
-    }
-    text += phaseOne[index];
-    physicalOffsets.push(phaseOneOffsets[index]);
-    physicalEnds.push(phaseOneEnds[index]);
-    index++;
-  }
-  return { text, physicalOffsets, physicalEnds, eofOffset: source.length };
-}
-
-function physicalSpan(mapped: MappedSource, start: number, end: number): { start: number; end: number } {
-  const physicalStart = mapped.physicalOffsets[start] ?? mapped.eofOffset;
-  return {
-    start: physicalStart,
-    end: end > start ? mapped.physicalEnds[end - 1] ?? physicalStart : physicalStart,
-  };
-}
-
-function universalValue(spelling: string, at: Location): number | undefined {
-  const match = /^\\u([0-9a-fA-F]{4})$/.exec(spelling) ?? /^\\U([0-9a-fA-F]{8})$/.exec(spelling);
-  if (!match) return undefined;
-  const value = Number.parseInt(match[1], 16);
-  if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) || (value < 0xa0 && !BASIC_UCN_EXCEPTIONS.has(value))) {
-    preprocessError(`Invalid universal character name: «${spelling}».`, at, 'INVALID_UNIVERSAL_CHARACTER_NAME');
-  }
-  return value;
-}
-
-function decodeIdentifier(spelling: string, at: Location): string {
-  return spelling.replace(/\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8}/g, (match) => String.fromCodePoint(universalValue(match, at)!));
-}
-
-function translateLiteralUCNs(text: string, at: Location): string {
-  const prefix = /^(?:u8|[LuU])?/.exec(text)![0];
-  const quote = text[prefix.length];
-  if (quote !== '"' && quote !== "'") return text;
-  const body = text.slice(prefix.length + 1, -1);
-  let translated = '';
-  for (let index = 0; index < body.length;) {
-    // The second slash in an escaped backslash is not the start of a UCN.
-    if (body[index] === '\\' && body[index + 1] === '\\') {
-      translated += body.slice(index, index + 2);
-      index += 2;
-      continue;
-    }
-    const match = /^\\u[0-9a-fA-F]{4}|^\\U[0-9a-fA-F]{8}/.exec(body.slice(index));
-    if (!match) { translated += body[index++]; continue; }
-    const codePoint = universalValue(match[0], at)!;
-    if (quote === "'" && codePoint > 0x7f) preprocessError('The 8-bit char profile cannot represent a non-ASCII UCN in a character constant.', at, 'UNSUPPORTED_FEATURE');
-    // Fixed-width octal escapes keep the next source character from extending
-    // the byte value, as can happen with a variable-width hexadecimal escape.
-    translated += encodeUtf8Bytes(codePoint).map((byte) => `\\${byte.toString(8).padStart(3, '0')}`).join('');
-    index += match[0].length;
-  }
-  return `${prefix}${quote}${translated}${quote}`;
-}
-
-function physicalLocation(file: string, source: string, offsets: ReturnType<typeof sourcePositions>, physicalOffset: number): Location & { physicalLine: number; physicalColumn: number } {
-  const safeOffset = Math.min(physicalOffset, source.length);
-  return { file, line: offsets.lineAt(safeOffset), column: offsets.columnAt(safeOffset), physicalLine: offsets.lineAt(safeOffset), physicalColumn: offsets.columnAt(safeOffset) };
-}
-
-function syntaxTokenAt(token: SyntaxToken, mapped: MappedSource, source: string, file: string, positions: ReturnType<typeof sourcePositions>): Location & { physicalLine: number; physicalColumn: number } {
-  const physicalOffset = mapped.physicalOffsets[token.start] ?? mapped.eofOffset;
-  return physicalLocation(file, source, positions, physicalOffset);
-}
-
-function addLineToken(lines: Map<number, PPToken[]>, line: number, token: PPToken): void {
-  const existing = lines.get(line);
-  if (existing) existing.push(token);
-  else lines.set(line, [token]);
-}
-
-function normalizeDigraphs(lines: Map<number, PPToken[]>): void {
-  for (const tokens of lines.values()) {
-    for (let index = 0; index < tokens.length;) {
-      for (const [spelling, text] of [['%:%:', '##'], ['<:', '['], [':>', ']'], ['<%', '{'], ['%>', '}'], ['%:', '#']] as const) {
-        const parts = spelling.length > 2 ? [...spelling] : [spelling.slice(0, 1), spelling.slice(1)];
-        const selected = tokens.slice(index, index + parts.length);
-        if (selected.length !== parts.length || selected.some((token, part) => token.text !== parts[part] || (part > 0 && (token.leadingSpace || selected[part - 1].logicalEnd !== token.logicalStart)))) continue;
-        const first = selected[0], last = selected.at(-1)!;
-        tokens.splice(index, parts.length, { ...first, kind: 'symbol', text, spelling, logicalEnd: last.logicalEnd });
-        break;
-      }
-      index++;
-    }
-  }
-}
-
-function tokenizeSource(name: string, source: string, captureSourceSpans: boolean): { lines: PPLine[]; eof: Location & { physicalLine: number; physicalColumn: number } } {
-  const mapped = translatePhasesOneAndTwo(source);
-  const positions = sourcePositions(source);
-  const lines = new Map<number, PPToken[]>();
-  let leadingSpace = true;
-  for (const syntax of scanC(mapped.text)) {
-    const spelling = mapped.text.slice(syntax.start, syntax.end);
-    if (syntax.kind === 'whitespace' || syntax.kind === 'line-comment' || syntax.kind === 'block-comment') {
-      if (syntax.kind === 'block-comment' && syntax.closed === false) {
-        const location = syntaxTokenAt(syntax, mapped, source, name, positions);
-        failure('UNTERMINATED_COMMENT', 'Unterminated block comment */.', location);
-      }
-      leadingSpace = true;
-      continue;
-    }
-    const physical = syntaxTokenAt(syntax, mapped, source, name, positions);
-    const make = (kind: PPToken['kind'], text: string, original: string, logicalStart: number, logicalEnd: number, separated = leadingSpace): PPToken => {
-      const span = physicalSpan(mapped, logicalStart, logicalEnd);
-      const start = physicalLocation(name, source, positions, span.start);
-      const end = captureSourceSpans ? physicalLocation(name, source, positions, span.end) : undefined;
-      return {
-        kind, text, spelling: original, at: { file: name, line: start.line, column: start.column }, physicalFile: name,
-        physicalOffset: span.start,
-        ...(captureSourceSpans ? { physicalEndOffset: span.end } : {}),
-        physicalLine: start.physicalLine,
-        physicalColumn: start.physicalColumn,
-        ...(end ? { physicalEndLine: end.physicalLine, physicalEndColumn: end.physicalColumn } : {}),
-        logicalStart, logicalEnd, leadingSpace: separated,
-      };
-    };
-    if (syntax.kind === 'preprocessor') {
-      const directive = /^#[\t \v\f]*([A-Za-z_][A-Za-z_0-9]*)/.exec(spelling);
-      const hash = make('symbol', '#', '#', syntax.start, syntax.start + 1);
-      addLineToken(lines, syntax.line, hash);
-      if (directive) {
-        const wordIndex = spelling.indexOf(directive[1], 1);
-        const wordOffset = syntax.start + wordIndex;
-        const keyword = make('identifier', directive[1], directive[1], wordOffset, wordOffset + directive[1].length, wordOffset > syntax.start + 1);
-        addLineToken(lines, syntax.line, keyword);
-      }
-      leadingSpace = true;
-      continue;
-    }
-    let kind: PPToken['kind'] = syntax.kind;
-    let text = spelling;
-    if (syntax.kind === 'identifier') text = decodeIdentifier(spelling, physical);
-    else if (syntax.kind === 'string' || syntax.kind === 'character') {
-      if (syntax.closed === false) failure(syntax.kind === 'string' ? 'UNTERMINATED_STRING' : 'UNTERMINATED_CHARACTER', syntax.kind === 'string' ? 'Unterminated string literal.' : 'Unterminated character literal.', physical);
-      if (spelling.startsWith('<') && spelling.endsWith('>')) kind = 'header';
-      else text = translateLiteralUCNs(spelling, physical);
-    }
-    const token = make(kind, text, spelling, syntax.start, syntax.end);
-    addLineToken(lines, syntax.line, token);
-    leadingSpace = false;
-  }
-  normalizeDigraphs(lines);
-  const result = [...lines.entries()].sort(([left], [right]) => left - right).map(([number, tokens]) => ({ number, tokens }));
-  const eof = physicalLocation(name, source, positions, source.length);
-  return { lines: result, eof };
-}
-
-function cloneAt(token: PPToken, at: Location, options: { hideSet?: ReadonlySet<string>; leadingSpace?: boolean; text?: string; kind?: PPToken['kind']; spelling?: string } = {}): PPToken {
-  return {
-    ...token, at, physicalLine: token.physicalLine, physicalColumn: token.physicalColumn,
-    expansionSite: token.expansionSite ?? at,
-    hideSet: options.hideSet ?? token.hideSet, leadingSpace: options.leadingSpace ?? token.leadingSpace,
-    text: options.text ?? token.text, spelling: options.spelling ?? token.spelling, kind: options.kind ?? token.kind,
-  };
-}
-
-function mergedHideSet(...sets: (ReadonlySet<string> | undefined)[]): ReadonlySet<string> | undefined {
-  const merged = new Set<string>();
-  for (const set of sets) if (set) for (const name of set) merged.add(name);
-  return merged.size ? merged : undefined;
-}
-
-function tokenText(tokens: readonly PPToken[]): string {
-  let result = '';
-  for (const token of tokens) {
-    if (result && token.leadingSpace) result += ' ';
-    result += token.text;
-  }
-  return result;
-}
-
-function decodeCQuotedString(token: PPToken): string {
-  if (token.kind !== 'string' || !token.text.startsWith('"') || !token.text.endsWith('"')) preprocessError('Expected a quoted C string.', token.at);
-  const body = token.text.slice(1, -1);
-  let result = '';
-  for (let index = 0; index < body.length; index++) {
-    const character = body[index];
-    if (character !== '\\') { result += character; continue; }
-    const escaped = body[++index];
-    if (escaped === undefined) preprocessError('Incomplete escape in preprocessor string.', token.at);
-    const simple: Record<string, string> = { '"': '"', "'": "'", '?': '?', '\\': '\\', a: '\x07', b: '\x08', f: '\x0c', n: '\n', r: '\r', t: '\t', v: '\x0b' };
-    if (Object.hasOwn(simple, escaped)) result += simple[escaped];
-    else if (/[0-7]/.test(escaped)) {
-      let digits = escaped;
-      while (digits.length < 3 && /[0-7]/.test(body[index + 1] ?? '')) digits += body[++index];
-      result += String.fromCharCode(Number.parseInt(digits, 8) & 0xff);
-    } else if (escaped === 'x') {
-      let digits = '';
-      while (/[0-9a-fA-F]/.test(body[index + 1] ?? '')) digits += body[++index];
-      if (!digits) preprocessError('Hexadecimal escape has no digits in a preprocessor string.', token.at);
-      result += String.fromCharCode(Number.parseInt(digits, 16) & 0xff);
-    } else preprocessError(`Invalid escape in preprocessor string: \\${escaped}.`, token.at);
-  }
-  return result;
-}
-
-function predefinedMacros(at: Location, dateText: string, timeText: string): Map<string, Macro> {
-  const macros = new Map<string, Macro>();
-  const fixed: Record<string, string> = {
-    __STDC__: '1', __STDC_VERSION__: '201112L', __STDC_HOSTED__: '1',
-    __STDC_NO_COMPLEX__: '1', __STDC_NO_ATOMICS__: '1', __STDC_NO_THREADS__: '1',
-    __DATE__: quoteC(dateText), __TIME__: quoteC(timeText),
-  };
-  for (const [name, value] of Object.entries(fixed)) {
-    const token: PPToken = { kind: name === '__DATE__' || name === '__TIME__' ? 'string' : 'number', text: value, spelling: value, at, physicalLine: at.line, physicalColumn: at.column, logicalStart: 0, logicalEnd: value.length, leadingSpace: false };
-    macros.set(name, { name, variadic: false, replacement: [token], at });
-  }
-  for (const name of ['__FILE__', '__LINE__']) macros.set(name, { name, variadic: false, replacement: [], at });
-  return macros;
-}
-
-function syntheticToken(kind: PPToken['kind'], text: string, at: Location, leadingSpace = false, hideSet?: ReadonlySet<string>): PPToken {
-  return { kind, text, spelling: text, at, physicalLine: at.line, physicalColumn: at.column, logicalStart: 0, logicalEnd: text.length, leadingSpace, ...(hideSet ? { hideSet } : {}) };
-}
-
-function sameMacro(left: Macro, right: Macro): boolean {
-  if (left.variadic !== right.variadic || left.parameters?.length !== right.parameters?.length || left.parameters?.some((name, index) => name !== right.parameters?.[index])) return false;
-  return left.replacement.length === right.replacement.length && left.replacement.every((token, index) => token.kind === right.replacement[index].kind && token.text === right.replacement[index].text);
-}
-
-function parseMacroArguments(tokens: readonly PPToken[], openIndex: number, at: Location, parameters: readonly string[] | undefined): { arguments: PPToken[][]; separators: PPToken[]; end: number } {
-  const args: PPToken[][] = [[]];
-  const separators: PPToken[] = [];
-  let nesting = 0;
-  let hasTokens = false;
-  for (let index = openIndex + 1; index < tokens.length; index++) {
-    const token = tokens[index];
-    if (token.text === '(') { nesting++; args.at(-1)!.push(token); hasTokens = true; }
-    else if (token.text === ')') {
-      if (nesting === 0) {
-        const actual = !hasTokens && args.length === 1 && args[0].length === 0 && parameters?.length === 0 ? [] : args;
-        return { arguments: actual, separators, end: index };
-      }
-      nesting--; args.at(-1)!.push(token); hasTokens = true;
-    } else if (token.text === ',' && nesting === 0) { separators.push(token); args.push([]); hasTokens = true; }
-    else { args.at(-1)!.push(token); hasTokens = true; }
-  }
-  preprocessError('Macro invocation is missing its closing parenthesis.', at);
-}
-
-function stringifyArgument(tokens: readonly PPToken[], at: Location, leadingSpace: boolean, hideSet?: ReadonlySet<string>): PPToken {
-  let contents = '';
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index];
-    if (index && token.leadingSpace) contents += ' ';
-    contents += token.spelling;
-  }
-  const escaped = contents.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const text = `"${escaped}"`;
-  return syntheticToken('string', text, at, leadingSpace, hideSet);
-}
-
-function pastedToken(left: PPToken, right: PPToken, at: Location, hideSet: ReadonlySet<string> | undefined): PPToken {
-  const text = left.text + right.text;
-  const scanned = [...scanC(text)].filter((token) => token.kind !== 'whitespace');
-  if (scanned.length !== 1 || scanned[0].start !== 0 || scanned[0].end !== text.length || scanned[0].closed === false || ['invalid', 'line-comment', 'block-comment', 'preprocessor'].includes(scanned[0].kind)) {
-    preprocessError(`Token paste «${left.text} ## ${right.text}» does not form a C token.`, at, 'INVALID_TOKEN_PASTE');
-  }
-  const syntax = scanned[0];
-  let kind: PPToken['kind'] = syntax.kind;
-  let normalized = text;
-  if (syntax.kind === 'identifier') normalized = decodeIdentifier(text, at);
-  else if (syntax.kind === 'string' || syntax.kind === 'character') normalized = translateLiteralUCNs(text, at);
-  return { ...left, kind, text: normalized, spelling: text, at, logicalStart: left.logicalStart, logicalEnd: right.logicalEnd, hideSet, leadingSpace: left.leadingSpace };
-}
-
-function stringifyPragmaText(text: string): string[] {
-  return text.trim().split(/[\t \v\f\r\n]+/).filter(Boolean);
-}
-
-function rejectVaArgsOutsideVariadicReplacement(tokens: readonly PPToken[]): void {
-  const occurrence = tokens.find((token) => token.kind === 'identifier' && token.text === '__VA_ARGS__');
-  if (occurrence) {
-    preprocessError('__VA_ARGS__ may only appear in the replacement list of a variadic function-like macro.', occurrence.at);
-  }
-}
 
 class TranslationPreprocessor {
   readonly context: PPContext;
+  readonly expander: MacroExpander;
 
-  constructor(context: PPContext) { this.context = context; }
-
-  private countExpansionWork(amount: number, at: Location): void {
-    this.context.metrics.preprocessSteps += amount;
-    enforceLimit('maxPreprocessSteps', this.context.metrics.preprocessSteps, this.context.limits.maxPreprocessSteps, at);
-  }
-
-  private checkDepth(depth: number, at: Location): void {
-    if (depth > MAX_INTERNAL_DEPTH) throw new EngineFailure('LIMIT_EXCEEDED', `Preprocessor internal depth limit exceeded (${MAX_INTERNAL_DEPTH}).`, at, 'maxDepth', MAX_INTERNAL_DEPTH);
-    enforceLimit('maxDepth', depth, this.context.limits.maxDepth, at);
-  }
-
-  private expand(tokens: readonly PPToken[], depth = 0): PPToken[] {
-    const output: PPToken[] = [];
-    let index = 0;
-    while (index < tokens.length) {
-      const token = tokens[index];
-      this.countExpansionWork(1, token.at);
-      if (token.kind !== 'identifier' || token.hideSet?.has(token.text)) { output.push(token); index++; continue; }
-      const macro = this.context.macros.get(token.text);
-      if (!macro) { output.push(token); index++; continue; }
-      this.checkDepth(depth + 1, token.at);
-      if (macro.name === '__LINE__') {
-        output.push(syntheticToken('number', String(token.at.line), token.at, token.leadingSpace, token.hideSet));
-        index++;
-        continue;
-      }
-      if (macro.name === '__FILE__') {
-        output.push(syntheticToken('string', quoteC(token.at.file), token.at, token.leadingSpace, token.hideSet));
-        index++;
-        continue;
-      }
-      if (macro.parameters === undefined) {
-        const hideSet = mergedHideSet(token.hideSet, new Set([macro.name]));
-        const replacement = macro.replacement.map((part, partIndex) => cloneAt(part, token.at, { hideSet, leadingSpace: partIndex === 0 ? token.leadingSpace : part.leadingSpace }));
-        this.countExpansionWork(replacement.length + 1, token.at);
-        output.push(...this.expand([...replacement, ...tokens.slice(index + 1)], depth + 1));
-        return output;
-      }
-      if (tokens[index + 1]?.text !== '(') { output.push(token); index++; continue; }
-      const invocation = parseMacroArguments(tokens, index + 1, token.at, macro.parameters);
-      const fixedCount = macro.parameters.length;
-      const rawArguments = invocation.arguments;
-      if ((!macro.variadic && rawArguments.length !== fixedCount) || (macro.variadic && rawArguments.length < fixedCount)) {
-        preprocessError(`Macro «${macro.name}» received ${rawArguments.length} arguments; expected ${macro.variadic ? `at least ${fixedCount}` : fixedCount}.`, token.at);
-      }
-      const argumentMap = new Map<string, PPToken[]>();
-      for (let argument = 0; argument < fixedCount; argument++) argumentMap.set(macro.parameters[argument], rawArguments[argument] ?? []);
-      if (macro.variadic) {
-        const variadic: PPToken[] = [];
-        for (let argument = fixedCount; argument < rawArguments.length; argument++) {
-          if (argument > fixedCount) variadic.push(invocation.separators[argument - 1] ?? syntheticToken('symbol', ',', token.at));
-          variadic.push(...rawArguments[argument]);
-        }
-        argumentMap.set('__VA_ARGS__', variadic);
-      }
-      const expandedArguments = new Map<string, PPToken[]>();
-      for (const [name, argument] of argumentMap) {
-        const usedWithoutStringizeOrPaste = macro.replacement.some((part, partIndex) => part.kind === 'identifier' && part.text === name
-          && macro.replacement[partIndex - 1]?.text !== '#' && macro.replacement[partIndex - 1]?.text !== '##' && macro.replacement[partIndex + 1]?.text !== '##');
-        if (usedWithoutStringizeOrPaste) expandedArguments.set(name, this.expand(argument, depth + 1));
-      }
-      const hideSet = mergedHideSet(token.hideSet, new Set([macro.name]));
-      const replacementItems: (PPToken[] | 'paste')[] = [];
-      for (let partIndex = 0; partIndex < macro.replacement.length; partIndex++) {
-        const part = macro.replacement[partIndex];
-        if (part.text === '#' && macro.replacement[partIndex + 1]?.kind === 'identifier') {
-          const parameter = macro.replacement[partIndex + 1].text;
-          const raw = argumentMap.get(parameter);
-          if (raw) {
-            replacementItems.push([stringifyArgument(raw, token.at, partIndex === 0 ? token.leadingSpace : part.leadingSpace, hideSet)]);
-            partIndex++;
-            continue;
-          }
-        }
-        if (part.text === '##') { replacementItems.push('paste'); continue; }
-        if (part.kind === 'identifier' && argumentMap.has(part.text)) {
-          const adjacentPaste = macro.replacement[partIndex - 1]?.text === '##' || macro.replacement[partIndex + 1]?.text === '##';
-          const selected = adjacentPaste ? argumentMap.get(part.text)! : expandedArguments.get(part.text)!;
-          replacementItems.push(selected.map((value, selectedIndex) => cloneAt(value, token.at, { hideSet: mergedHideSet(value.hideSet, hideSet), leadingSpace: partIndex === 0 && selectedIndex === 0 ? token.leadingSpace : value.leadingSpace })));
-        } else replacementItems.push([cloneAt(part, token.at, { hideSet, leadingSpace: partIndex === 0 ? token.leadingSpace : part.leadingSpace })]);
-      }
-      for (let itemIndex = 0; itemIndex < replacementItems.length;) {
-        if (replacementItems[itemIndex] !== 'paste') { itemIndex++; continue; }
-        if (itemIndex === 0 || itemIndex === replacementItems.length - 1) preprocessError(`Macro «${macro.name}» has ## at an edge of its replacement list.`, token.at);
-        const left = replacementItems[itemIndex - 1] as PPToken[];
-        const right = replacementItems[itemIndex + 1] as PPToken[];
-        let combined: PPToken[];
-        if (!left.length) combined = right;
-        else if (!right.length) combined = left;
-        else combined = [...left.slice(0, -1), pastedToken(left.at(-1)!, right[0], token.at, hideSet), ...right.slice(1)];
-        replacementItems.splice(itemIndex - 1, 3, combined);
-        itemIndex = Math.max(0, itemIndex - 1);
-      }
-      const replacement = replacementItems.flatMap((item) => item === 'paste' ? [] : item);
-      this.countExpansionWork(replacement.length + rawArguments.reduce((total, argument) => total + argument.length, 0) + 1, token.at);
-      output.push(...this.expand([...replacement, ...tokens.slice(invocation.end + 1)], depth + 1));
-      return output;
-    }
-    return output;
-  }
-
-  private stringifyCondition(tokens: readonly PPToken[]): PPToken[] {
-    const protectedTokens: PPToken[] = [];
-    for (let index = 0; index < tokens.length; index++) {
-      const token = tokens[index];
-      if (token.kind !== 'identifier' || token.text !== 'defined') { protectedTokens.push(token); continue; }
-      let name: PPToken | undefined;
-      let end = index;
-      if (tokens[index + 1]?.text === '(') {
-        name = tokens[index + 2];
-        if (!name || name.kind !== 'identifier' || tokens[index + 3]?.text !== ')') preprocessError('The defined operator requires an identifier, optionally enclosed in parentheses.', token.at);
-        end = index + 3;
-      } else {
-        name = tokens[index + 1];
-        if (!name || name.kind !== 'identifier') preprocessError('The defined operator requires an identifier.', token.at);
-        end = index + 1;
-      }
-      protectedTokens.push(syntheticToken('number', this.context.macros.has(name.text) ? '1' : '0', token.at, token.leadingSpace));
-      index = end;
-    }
-    const expanded = this.expand(protectedTokens);
-    return expanded.map((token) => token.kind === 'identifier' ? cloneAt(token, token.at, { kind: 'number', text: '0', spelling: '0' }) : token);
-  }
-
-  private evaluateIf(tokens: readonly PPToken[], at: Location): boolean {
-    if (!tokens.length) preprocessError('The #if directive requires an expression.', at);
-    rejectVaArgsOutsideVariadicReplacement(tokens);
-    const expanded = this.stringifyCondition(tokens);
-    return evaluatePreprocessorExpression(expanded, this.context.limits);
-  }
-
-  private parsePragma(text: string, at: Location, currentFile: string): void {
-    const words = stringifyPragmaText(text);
-    if (words.length === 1 && words[0] === 'once') { this.context.onceFiles.add(currentFile); return; }
-    if (words.length === 3 && words[0] === 'STDC' && ['FP_CONTRACT', 'FENV_ACCESS', 'CX_LIMITED_RANGE'].includes(words[1]) && ['ON', 'OFF', 'DEFAULT'].includes(words[2])) return;
-    if (words[0] !== 'STDC') return;
-    preprocessError(`Pragma no implementado: «${text.trim()}».`, at, 'UNSUPPORTED_FEATURE');
-  }
-
-  private applyPragmaOperator(tokens: readonly PPToken[], currentFile: string): PPToken[] {
-    const result: PPToken[] = [];
-    for (let index = 0; index < tokens.length; index++) {
-      const token = tokens[index];
-      if (token.kind !== 'identifier' || token.text !== '_Pragma') { result.push(token); continue; }
-      if (tokens[index + 1]?.text !== '(' || tokens[index + 2]?.kind !== 'string' || tokens[index + 3]?.text !== ')') preprocessError('_Pragma requires a string in parentheses.', token.at);
-      this.parsePragma(decodeCQuotedString(tokens[index + 2]), token.at, currentFile);
-      index += 3;
-    }
-    return result;
+  constructor(context: PPContext) {
+    this.context = context;
+    this.expander = new MacroExpander(context);
   }
 
   private includeFile(requested: string, angled: boolean, includingFile: string, at: Location): { name: string; source: string } {
@@ -589,7 +37,7 @@ class TranslationPreprocessor {
   }
 
   private parseInclude(tokens: readonly PPToken[], includingFile: string, at: Location, depth: number): PPToken[] {
-    const expanded = this.expand(tokens);
+    const expanded = this.expander.expand(tokens);
     if (!expanded.length) preprocessError('#include requires a header name.', at);
     let requested: string;
     let angled = false;
@@ -604,64 +52,20 @@ class TranslationPreprocessor {
       if (expanded.length !== close + 1) preprocessError('Extra tokens after the header name.', expanded[close + 1].at);
     } else preprocessError('#include requires a string or a header enclosed by «<» and «>».', first.at);
     if (!requested || requested.includes('\0')) preprocessError('The header name is empty or contains NUL.', first.at);
-    this.countExpansionWork(1, at);
+    this.expander.countExpansionWork(1, at);
     const target = this.includeFile(requested, angled, includingFile, at);
     return this.processFile(target.name, target.source, depth + 1, at).tokens;
-  }
-
-  private defineMacro(tokens: readonly PPToken[], at: Location): void {
-    const nameToken = tokens[0];
-    if (!nameToken || nameToken.kind !== 'identifier') preprocessError('#define requires a macro name.', at);
-    if (nameToken.text === '__VA_ARGS__') rejectVaArgsOutsideVariadicReplacement([nameToken]);
-    const name = nameToken.text;
-    let cursor = 1;
-    let parameters: string[] | undefined;
-    let variadic = false;
-    if (tokens[cursor]?.text === '(' && !tokens[cursor].leadingSpace) {
-      parameters = [];
-      cursor++;
-      if (tokens[cursor]?.text !== ')') {
-        while (cursor < tokens.length) {
-          if (tokens[cursor].text === '...') { variadic = true; cursor++; if (tokens[cursor]?.text !== ')') preprocessError('... must be the last parameter of a variadic macro.', tokens[cursor]?.at ?? at); break; }
-          const parameter = tokens[cursor];
-          if (parameter.kind !== 'identifier') preprocessError('Expected a macro parameter name.', parameter.at);
-          if (parameter.text === '__VA_ARGS__') rejectVaArgsOutsideVariadicReplacement([parameter]);
-          if (parameters.includes(parameter.text)) preprocessError(`Duplicate macro parameter: «${parameter.text}».`, parameter.at);
-          parameters.push(parameter.text);
-          cursor++;
-          if (tokens[cursor]?.text === ')') break;
-          if (tokens[cursor]?.text === '...') { variadic = true; cursor++; if (tokens[cursor]?.text !== ')') preprocessError('... must be the last parameter of a variadic macro.', tokens[cursor]?.at ?? at); break; }
-          if (tokens[cursor]?.text !== ',') preprocessError('Expected «,» or «)» in the macro parameter list.', tokens[cursor]?.at ?? at);
-          cursor++;
-        }
-      }
-      if (tokens[cursor]?.text !== ')') preprocessError('Macro parameter list is missing «)».', tokens[cursor]?.at ?? at);
-      cursor++;
-    }
-    const replacement = tokens.slice(cursor);
-    if (parameters === undefined || !variadic) rejectVaArgsOutsideVariadicReplacement(replacement);
-    for (let index = 0; index < replacement.length; index++) {
-      if (replacement[index].text === '##' && (index === 0 || index === replacement.length - 1)) preprocessError('## cannot appear at the start or end of a macro replacement list.', replacement[index].at);
-      if (replacement[index].text === '#' && parameters !== undefined) {
-        const next = replacement[index + 1];
-        if (!next || next.kind !== 'identifier' || !(parameters.includes(next.text) || (variadic && next.text === '__VA_ARGS__'))) preprocessError('# must precede a macro parameter.', replacement[index].at);
-      }
-    }
-    const macro: Macro = { name, ...(parameters === undefined ? {} : { parameters }), variadic, replacement, at: nameToken.at };
-    const previous = this.context.macros.get(name);
-    if (previous && !sameMacro(previous, macro)) preprocessError(`Incompatible redefinition of macro «${name}».`, nameToken.at);
-    this.context.macros.set(name, macro);
   }
 
   private handleDirective(directive: string, rest: readonly PPToken[], file: string, at: Location, depth: number, conditionalStack: Conditional[], activeBefore: boolean): { output: PPToken[]; lineOverride?: { line: number; file: string; nextPhysicalLine: number } } {
     const output: PPToken[] = [];
     if (!directive) return { output };
     if (directive === 'if' || directive === 'ifdef' || directive === 'ifndef') {
-      this.checkDepth(conditionalStack.length + 1, at);
+      this.expander.checkDepth(conditionalStack.length + 1, at);
       const parentActive = activeBefore;
       let condition = false;
       if (parentActive) {
-        if (directive === 'if') condition = this.evaluateIf(rest, at);
+        if (directive === 'if') condition = this.expander.evaluateIf(rest, at);
         else {
           rejectVaArgsOutsideVariadicReplacement(rest);
           if (!rest[0] || rest[0].kind !== 'identifier' || rest.length !== 1) preprocessError(`#${directive} requires a single macro name.`, at);
@@ -676,7 +80,7 @@ class TranslationPreprocessor {
       const frame = conditionalStack.at(-1);
       if (!frame) preprocessError('#elif has no matching #if.', at);
       if (frame.sawElse) preprocessError('#elif after #else.', at);
-      const condition = frame.parentActive && !frame.branchTaken ? this.evaluateIf(rest, at) : false;
+      const condition = frame.parentActive && !frame.branchTaken ? this.expander.evaluateIf(rest, at) : false;
       frame.active = frame.parentActive && !frame.branchTaken && condition;
       frame.branchTaken ||= condition;
       return { output };
@@ -698,7 +102,7 @@ class TranslationPreprocessor {
       return { output };
     }
     if (!activeBefore) return { output };
-    if (directive === 'define') { this.defineMacro(rest, at); return { output }; }
+    if (directive === 'define') { this.expander.defineMacro(rest, at); return { output }; }
     rejectVaArgsOutsideVariadicReplacement(rest);
     if (directive === 'undef') {
       if (rest.length !== 1 || rest[0].kind !== 'identifier') preprocessError('#undef requires a single macro name.', at);
@@ -707,11 +111,11 @@ class TranslationPreprocessor {
     }
     if (directive === 'include') return { output: this.parseInclude(rest, file, at, depth) };
     if (directive === 'error') {
-      const expanded = this.expand(rest);
+      const expanded = this.expander.expand(rest);
       preprocessError(tokenText(expanded) || '#error', at, 'PREPROCESSOR_ERROR');
     }
     if (directive === 'line') {
-      const expanded = this.expand(rest);
+      const expanded = this.expander.expand(rest);
       const number = expanded[0];
       if (!number || number.kind !== 'number' || !/^[0-9]+$/.test(number.text) || expanded.length > 2) preprocessError('#line requires a positive decimal number and an optional file name.', number?.at ?? at);
       const requested = BigInt(number.text);
@@ -724,7 +128,7 @@ class TranslationPreprocessor {
       const physicalEnd = Math.max(...rest.map((token) => token.physicalLine));
       return { output, lineOverride: { line: Number(requested), file: logicalFile, nextPhysicalLine: physicalEnd + 1 } };
     }
-    if (directive === 'pragma') { this.parsePragma(tokenText(rest), at, file); return { output }; }
+    if (directive === 'pragma') { this.expander.parsePragma(tokenText(rest), at, file); return { output }; }
     preprocessError(`Unimplemented preprocessor directive: #${directive}.`, at, 'UNSUPPORTED_FEATURE');
   }
 
@@ -733,8 +137,8 @@ class TranslationPreprocessor {
   }
 
   private processFile(file: string, source: string, depth: number, includeAt: Location): { tokens: PPToken[]; eof: Location } {
-    this.checkDepth(depth, includeAt);
-    this.countExpansionWork(1, includeAt);
+    this.expander.checkDepth(depth, includeAt);
+    this.expander.countExpansionWork(1, includeAt);
     if (this.context.onceFiles.has(file)) return { tokens: [], eof: { file, line: 1, column: 1 } };
     const scanned = tokenizeSource(file, source, this.context.captureSourceSpans);
     let logicalFile = file;
@@ -745,8 +149,8 @@ class TranslationPreprocessor {
     const flush = (): void => {
       if (!pending.length) return;
       rejectVaArgsOutsideVariadicReplacement(pending);
-      const expanded = this.expand(pending);
-      output.push(...this.applyPragmaOperator(expanded, file));
+      const expanded = this.expander.expand(pending);
+      output.push(...this.expander.applyPragmaOperator(expanded, file));
       pending = [];
     };
     for (const line of scanned.lines) {
@@ -760,7 +164,7 @@ class TranslationPreprocessor {
           } : {}),
         };
       });
-      this.countExpansionWork(Math.max(1, tokens.length), tokens[0]?.at ?? includeAt);
+      this.expander.countExpansionWork(Math.max(1, tokens.length), tokens[0]?.at ?? includeAt);
       const isDirective = tokens[0]?.text === '#';
       if (!isDirective) {
         if (this.active(conditionalStack)) pending.push(...tokens);
@@ -800,185 +204,7 @@ class TranslationPreprocessor {
 
   run(name: string, source: string): { tokens: PPToken[]; eof: Location } {
     return this.processFile(name, source, 0, { file: name, line: 1, column: 1 });
-  }
-}
-
-interface PPValue { readonly value: bigint; readonly unsigned: boolean }
-type PPExpression =
-  | { readonly kind: 'value'; readonly value: PPValue }
-  | { readonly kind: 'unary'; readonly operator: string; readonly operand: PPExpression; readonly at: Location }
-  | { readonly kind: 'binary'; readonly operator: string; readonly left: PPExpression; readonly right: PPExpression; readonly at: Location }
-  | { readonly kind: 'conditional'; readonly condition: PPExpression; readonly then: PPExpression; readonly otherwise: PPExpression; readonly at: Location };
-
-const ppPrecedence: Readonly<Record<string, number>> = Object.freeze({
-  '||': 1, '&&': 2, '|': 3, '^': 4, '&': 5, '==': 6, '!=': 6,
-  '<': 7, '<=': 7, '>': 7, '>=': 7, '<<': 8, '>>': 8,
-  '+': 9, '-': 9, '*': 10, '/': 10, '%': 10,
-});
-const ppSignedMin = -(1n << 63n);
-const ppSignedMax = (1n << 63n) - 1n;
-
-class PreprocessorExpressionParser {
-  private readonly tokens: readonly PPToken[];
-  private readonly limits: PrepareLimits;
-  private cursor = 0;
-
-  constructor(tokens: readonly PPToken[], limits: PrepareLimits) { this.tokens = tokens; this.limits = limits; }
-
-  private peek(): PPToken | undefined { return this.tokens[this.cursor]; }
-  private take(text?: string): PPToken | undefined {
-    const token = this.peek();
-    if (!token || (text !== undefined && token.text !== text)) return undefined;
-    this.cursor++;
-    return token;
-  }
-  private expect(text: string): PPToken {
-    const token = this.take(text);
-    if (!token) preprocessError(`Expected «${text}» in the #if expression.`, this.peek()?.at ?? this.tokens.at(-1)?.at ?? { file: 'main.c', line: 1, column: 1 });
-    return token;
-  }
-  private checkDepth(depth: number, at: Location): void {
-    if (depth > MAX_INTERNAL_DEPTH) preprocessError('The #if expression exceeds the supported internal depth.', at, 'LIMIT_EXCEEDED');
-    enforceLimit('maxDepth', depth, this.limits.maxDepth, at);
-  }
-
-  parse(): PPExpression {
-    if (!this.tokens.length) preprocessError('Empty #if expression.', { file: 'main.c', line: 1, column: 1 });
-    const expression = this.parseConditional(0);
-    if (this.peek()) preprocessError(`Invalid token «${this.peek()!.text}» in the #if expression.`, this.peek()!.at);
-    return expression;
-  }
-
-  private parseConditional(depth: number): PPExpression {
-    const at = this.peek()?.at ?? this.tokens.at(-1)!.at;
-    this.checkDepth(depth + 1, at);
-    const condition = this.parseBinary(1, depth + 1);
-    if (!this.take('?')) return condition;
-    const then = this.parseConditional(depth + 1);
-    this.expect(':');
-    const otherwise = this.parseConditional(depth + 1);
-    return { kind: 'conditional', condition, then, otherwise, at };
-  }
-
-  private parseBinary(minimum: number, depth: number): PPExpression {
-    const at = this.peek()?.at ?? this.tokens.at(-1)!.at;
-    this.checkDepth(depth + 1, at);
-    let left = this.parseUnary(depth + 1);
-    for (;;) {
-      const operator = this.peek()?.text;
-      const precedence = operator === undefined ? undefined : ppPrecedence[operator];
-      if (precedence === undefined || precedence < minimum) break;
-      const operatorToken = this.take()!;
-      const right = this.parseBinary(precedence + 1, depth + 1);
-      left = { kind: 'binary', operator: operatorToken.text, left, right, at: operatorToken.at };
-    }
-    return left;
-  }
-
-  private parseUnary(depth: number): PPExpression {
-    const token = this.peek();
-    if (token && ['+', '-', '!', '~'].includes(token.text)) {
-      this.cursor++;
-      this.checkDepth(depth + 1, token.at);
-      return { kind: 'unary', operator: token.text, operand: this.parseUnary(depth + 1), at: token.at };
-    }
-    return this.parsePrimary(depth);
-  }
-
-  private parsePrimary(depth: number): PPExpression {
-    const token = this.take();
-    if (!token) preprocessError('Missing operand in the #if expression.', this.tokens.at(-1)?.at ?? { file: 'main.c', line: 1, column: 1 });
-    if (token.text === '(') {
-      this.checkDepth(depth + 1, token.at);
-      const nested = this.parseConditional(depth + 1);
-      this.expect(')');
-      return nested;
-    }
-    if (token.kind !== 'number' && token.kind !== 'character') preprocessError(`Expected an integer constant in #if; found «${token.text}».`, token.at);
-    const literal = parseLiteral(token.text, token.at);
-    if (typeof literal.value !== 'bigint') preprocessError('The #if expression only accepts integer constants.', token.at);
-    return { kind: 'value', value: { value: literal.value, unsigned: String(literal.type).startsWith('unsigned') } };
-  }
-}
-
-function ppTruthy(value: PPValue): boolean { return value.value !== 0n; }
-function ppExpressionUnsigned(expression: PPExpression): boolean {
-  if (expression.kind === 'value') return expression.value.unsigned;
-  if (expression.kind === 'unary') return expression.operator === '!' ? false : ppExpressionUnsigned(expression.operand);
-  if (expression.kind === 'conditional') return ppExpressionUnsigned(expression.then) || ppExpressionUnsigned(expression.otherwise);
-  if (['&&', '||', '==', '!=', '<', '<=', '>', '>='].includes(expression.operator)) return false;
-  if (expression.operator === '<<' || expression.operator === '>>') return ppExpressionUnsigned(expression.left);
-  return ppExpressionUnsigned(expression.left) || ppExpressionUnsigned(expression.right);
-}
-function ppAsUnsigned(value: PPValue): bigint { return BigInt.asUintN(64, value.value); }
-function ppUsual(left: PPValue, right: PPValue): { left: bigint; right: bigint; unsigned: boolean } {
-  const unsigned = left.unsigned || right.unsigned;
-  return unsigned
-    ? { left: ppAsUnsigned(left), right: ppAsUnsigned(right), unsigned }
-    : { left: left.value, right: right.value, unsigned };
-}
-function ppResult(value: bigint, unsigned: boolean, at: Location): PPValue {
-  if (unsigned) return { value: BigInt.asUintN(64, value), unsigned: true };
-  if (value < ppSignedMin || value > ppSignedMax) preprocessError('Signed overflow in a #if constant expression.', at, 'INVALID_PREPROCESSOR_EXPRESSION');
-  return { value, unsigned: false };
-}
-
-function evaluatePreprocessorExpression(tokens: readonly PPToken[], limits: PrepareLimits): boolean {
-  const tree = new PreprocessorExpressionParser(tokens, limits).parse();
-  const evaluate = (expression: PPExpression, active = true): PPValue => {
-    if (!active) return { value: 0n, unsigned: false };
-    if (expression.kind === 'value') return expression.value;
-    if (expression.kind === 'unary') {
-      const operand = evaluate(expression.operand);
-      if (expression.operator === '!') return { value: ppTruthy(operand) ? 0n : 1n, unsigned: false };
-      if (expression.operator === '+') return operand;
-      if (expression.operator === '-') return ppResult(-operand.value, operand.unsigned, expression.at);
-      if (expression.operator === '~') return ppResult(~operand.value, operand.unsigned, expression.at);
-      return preprocessError(`Unsupported unary operator in #if: ${expression.operator}.`, expression.at);
-    }
-    if (expression.kind === 'conditional') {
-      const condition = evaluate(expression.condition);
-      const selected = ppTruthy(condition) ? evaluate(expression.then) : evaluate(expression.otherwise);
-      return ppResult(selected.value, ppExpressionUnsigned(expression), expression.at);
-    }
-    const left = evaluate(expression.left);
-    if (expression.operator === '&&') return ppTruthy(left) ? { value: ppTruthy(evaluate(expression.right)) ? 1n : 0n, unsigned: false } : { value: 0n, unsigned: false };
-    if (expression.operator === '||') return ppTruthy(left) ? { value: 1n, unsigned: false } : { value: ppTruthy(evaluate(expression.right)) ? 1n : 0n, unsigned: false };
-    const right = evaluate(expression.right);
-    const operands = ppUsual(left, right);
-    const a = operands.left, b = operands.right, unsigned = operands.unsigned;
-    switch (expression.operator) {
-      case '+': return ppResult(a + b, unsigned, expression.at);
-      case '-': return ppResult(a - b, unsigned, expression.at);
-      case '*': return ppResult(a * b, unsigned, expression.at);
-      case '/':
-        if (b === 0n) preprocessError('Division by zero in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
-        if (!unsigned && a === ppSignedMin && b === -1n) preprocessError('Division overflow in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
-        return ppResult(a / b, unsigned, expression.at);
-      case '%':
-        if (b === 0n) preprocessError('Remainder by zero in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
-        return ppResult(a % b, unsigned, expression.at);
-      case '<<': case '>>': {
-        if (right.value < 0n || right.value >= 64n) preprocessError('Shift count out of range in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
-        const shift = Number(right.value);
-        if (expression.operator === '>>') return ppResult((unsigned ? BigInt.asUintN(64, a) : a) >> BigInt(shift), unsigned, expression.at);
-        if (!unsigned && (a < 0n || (a << BigInt(shift)) > ppSignedMax)) preprocessError('Signed shift out of range in a #if expression.', expression.at, 'INVALID_PREPROCESSOR_EXPRESSION');
-        return ppResult(a << BigInt(shift), unsigned, expression.at);
-      }
-      case '&': return ppResult(a & b, unsigned, expression.at);
-      case '^': return ppResult(a ^ b, unsigned, expression.at);
-      case '|': return ppResult(a | b, unsigned, expression.at);
-      case '==': return { value: a === b ? 1n : 0n, unsigned: false };
-      case '!=': return { value: a !== b ? 1n : 0n, unsigned: false };
-      case '<': return { value: a < b ? 1n : 0n, unsigned: false };
-      case '<=': return { value: a <= b ? 1n : 0n, unsigned: false };
-      case '>': return { value: a > b ? 1n : 0n, unsigned: false };
-      case '>=': return { value: a >= b ? 1n : 0n, unsigned: false };
-      default: return preprocessError(`Unsupported binary operator in #if: ${expression.operator}.`, expression.at);
-    }
-  };
-  return ppTruthy(evaluate(tree));
-}
+  }}
 
 export interface PreprocessOptions { readonly captureSourceSpans?: boolean }
 
