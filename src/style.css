@@ -866,6 +866,48 @@ body,
   font-size: 10px;
 }
 
+.editor-completion-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.editor-completion-popover {
+  position: absolute;
+  min-width: 112px;
+  max-width: min(240px, calc(100% - 8px));
+  max-height: min(144px, calc(100% - 8px));
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 3px 0;
+  background: var(--bg2);
+  box-shadow: var(--shadow-small);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 19px;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.editor-completion-option {
+  min-height: 19px;
+  overflow: hidden;
+  padding: 0 8px;
+  color: var(--fg);
+  text-overflow: ellipsis;
+  white-space: pre;
+  cursor: pointer;
+}
+
+.editor-completion-option:hover,
+.editor-completion-option.is-active {
+  background: var(--selection);
+  color: var(--fg);
+}
+
 .editor-limit-status {
   position: absolute;
   right: 8px;

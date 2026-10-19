@@ -1,7 +1,9 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { createEditorHistory } from './history.ts';
+import { getEditorCaretGeometry } from './caretGeometry.ts';
 import {
   evaluateEditorCommand,
+  evaluateEditorTextReplacement,
   evaluateNativeEdit,
   getCursorPosition,
   reconcileNativeEdit,
@@ -16,6 +18,14 @@ import { getPlaygroundShortcut } from '../keyboardShortcuts.ts';
 import { notifyEditorSourceChange } from './sourcePersistence.ts';
 import type { EditorCommand, EditorSelection, EditorSnapshot } from './types.ts';
 import type { EditorCommandEvaluation } from './operations.ts';
+import { getCompletionSuggestions } from './completionProvider.ts';
+import type { CompletionTrigger } from './completionProvider.ts';
+import {
+  canCalculateCompletion,
+  getCompletionKeyAction,
+  isCompletionCaretVisible,
+  isEditorCompositionEvent,
+} from './completionInteractions.ts';
 
 interface EditorViewport {
   scrollTop: number;
@@ -32,6 +42,21 @@ interface PendingInput {
 
 interface EditorCallbacks {
   onCompositionChange?: (composing: boolean) => void;
+  completionEnabled?: boolean;
+}
+
+export interface EditorCompletionState {
+  readonly cursorOffset: number;
+  readonly replaceStart: number;
+  readonly replaceEnd: number;
+  readonly options: readonly string[];
+  readonly selectedIndex: number;
+  readonly selectedByUser: boolean;
+}
+
+interface ActiveEditorCompletion extends EditorCompletionState {
+  readonly contextKey: string;
+  readonly manual: boolean;
 }
 
 function getSelection(editor: HTMLTextAreaElement): EditorSelection {
@@ -78,35 +103,21 @@ function expectedNativeText(before: EditorSnapshot, command: EditorCommand): str
 function keepCaretVisible(editor: HTMLTextAreaElement, snapshot: EditorSnapshot,
   measure: CanvasRenderingContext2D | null) {
   const style = getComputedStyle(editor);
-  const fontSize = parseFloat(style.fontSize) || 13.5;
-  const lineHeight = parseFloat(style.lineHeight) || fontSize * 1.5;
-  const top = parseFloat(style.paddingTop) || 0;
   const bottom = parseFloat(style.paddingBottom) || 0;
   const left = parseFloat(style.paddingLeft) || 0;
   const right = parseFloat(style.paddingRight) || 0;
   const offset = snapshot.selection.direction === 'backward'
     ? snapshot.selection.start : snapshot.selection.end;
-  const before = snapshot.text.slice(0, offset);
-  const lineTop = top + (before.split('\n').length - 1) * lineHeight;
+  const caret = getEditorCaretGeometry(editor, snapshot.text, offset, measure);
+  const lineTop = caret.top;
+  const top = parseFloat(style.paddingTop) || 0;
 
   if (lineTop < editor.scrollTop + top) editor.scrollTop = Math.max(0, lineTop - top);
-  else if (lineTop + lineHeight > editor.scrollTop + editor.clientHeight - bottom) {
-    editor.scrollTop = lineTop + lineHeight - editor.clientHeight + bottom;
+  else if (lineTop + caret.lineHeight > editor.scrollTop + editor.clientHeight - bottom) {
+    editor.scrollTop = lineTop + caret.lineHeight - editor.clientHeight + bottom;
   }
 
-  if (measure) measure.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-  const spaceWidth = measure?.measureText(' ').width || fontSize * 0.6;
-  const tabWidth = style.tabSize.endsWith('px')
-    ? parseFloat(style.tabSize) : (parseFloat(style.tabSize) || 4) * spaceWidth;
-  const letterSpacing = parseFloat(style.letterSpacing) || 0;
-  const parts = before.slice(before.lastIndexOf('\n') + 1).split('\t');
-  let width = 0;
-  parts.forEach((part, index) => {
-    if (index > 0) width = (Math.floor(width / tabWidth) + 1) * tabWidth;
-    width += (measure?.measureText(part).width ?? part.length * spaceWidth)
-      + Array.from(part).length * letterSpacing;
-  });
-  const caretLeft = left + width;
+  const caretLeft = caret.left;
   if (caretLeft < editor.scrollLeft + left) editor.scrollLeft = Math.max(0, caretLeft - left);
   else if (caretLeft + 1 > editor.scrollLeft + editor.clientWidth - right) {
     editor.scrollLeft = caretLeft + 1 - editor.clientWidth + right;
@@ -119,8 +130,18 @@ export function useCodeEditor(
   callbacks: EditorCallbacks = {},
 ) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  const completionEnabled = callbacks.completionEnabled ?? false;
+  const completionEnabledRef = useRef(completionEnabled);
+  completionEnabledRef.current = completionEnabled;
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [isComposing, setIsComposing] = useState(false);
+  const [completion, setCompletion] = useState<EditorCompletionState | null>(null);
+  const completionRef = useRef<ActiveEditorCompletion | null>(null);
+  const completionRefreshRef = useRef<(trigger?: CompletionTrigger) => void>(() => {});
+  const completionAcceptRef = useRef<(index: number) => boolean>(() => false);
+  const completionDismissRef = useRef<() => void>(() => {});
+  const acceptCompletion = useCallback((index: number) => completionAcceptRef.current(index), []);
+  const dismissCompletionFromViewport = useCallback(() => completionDismissRef.current(), []);
   const normalizedInitialText = normalizeEditorText(initialText);
   const initialDiagnostic = getEditorLineLimitDiagnostic(normalizedInitialText);
   const [text, setText] = useState(initialDiagnostic ? '' : normalizedInitialText);
@@ -129,6 +150,7 @@ export function useCodeEditor(
   useLayoutEffect(() => {
     const editor = ref.current;
     if (!editor) return;
+    const activeEditor = editor;
 
     if (initialDiagnostic) editor.value = '';
     editor.setSelectionRange(0, 0);
@@ -147,17 +169,77 @@ export function useCodeEditor(
     let compositionTimer: ReturnType<typeof setTimeout> | undefined;
     let writing = false;
     let publishedText = text;
+    let dismissedCompletionContext: string | null = null;
 
-    function publishEditorState(persistSource = true) {
+    function completionContextKey(source: string, cursorOffset: number): string {
+      return `${cursorOffset}\u0000${source}`;
+    }
+
+    function updateCompletion(next: ActiveEditorCompletion | null) {
+      completionRef.current = next;
+      setCompletion(next);
+    }
+
+    function refreshCompletion(trigger: CompletionTrigger = 'automatic') {
+      if (!editor) {
+        updateCompletion(null);
+        return;
+      }
+      const selection = getSelection(editor);
+      if (!canCalculateCompletion(
+        completionEnabledRef.current,
+        composing || compositionBefore !== null,
+        selection.start !== selection.end,
+        document.activeElement === editor,
+      )) {
+        updateCompletion(null);
+        return;
+      }
+      const source = normalizeEditorText(editor.value);
+      const cursorOffset = selection.end;
+      const contextKey = completionContextKey(source, cursorOffset);
+      if (trigger === 'automatic' && dismissedCompletionContext === contextKey) {
+        updateCompletion(null);
+        return;
+      }
+      if (dismissedCompletionContext !== contextKey) dismissedCompletionContext = null;
+
+      const previous = completionRef.current;
+      const effectiveTrigger = trigger === 'automatic' && previous?.contextKey === contextKey && previous.manual
+        ? 'manual' : trigger;
+      const result = getCompletionSuggestions({ source, cursorOffset, trigger: effectiveTrigger });
+      if (!result) {
+        updateCompletion(null);
+        return;
+      }
+      const sameContext = previous?.contextKey === contextKey
+        && previous.replaceStart === result.replaceStart
+        && previous.replaceEnd === result.replaceEnd
+        && previous.options.length === result.options.length
+        && previous.options.every((option, index) => option === result.options[index]);
+      updateCompletion({
+        cursorOffset,
+        ...result,
+        selectedIndex: sameContext ? previous.selectedIndex : 0,
+        selectedByUser: sameContext && previous.selectedByUser,
+        contextKey,
+        manual: effectiveTrigger === 'manual',
+      });
+    }
+
+    completionRefreshRef.current = refreshCompletion;
+
+    function publishEditorState(persistSource = true, refreshSuggestions = persistSource) {
       setText(snapshot.text);
       if (persistSource) {
         publishedText = notifyEditorSourceChange(snapshot.text, publishedText, onSourceChange);
       }
       const next = getCursorPosition(snapshot);
       setCursor((current) => current.line === next.line && current.column === next.column ? current : next);
+      if (refreshSuggestions) refreshCompletion();
     }
 
-    function write(next: EditorSnapshot, viewport?: EditorViewport, keepVisible = true) {
+    function write(next: EditorSnapshot, viewport?: EditorViewport, keepVisible = true, refreshSuggestions = true) {
       const targetViewport = viewport ?? getViewport(editor!);
       writing = true;
       snapshot = next;
@@ -168,8 +250,22 @@ export function useCodeEditor(
       if (keepVisible) keepCaretVisible(editor!, next, measure);
       snapshotViewport = getViewport(editor!);
       writing = false;
-      publishEditorState();
+      publishEditorState(true, refreshSuggestions);
     }
+
+    function dismissCompletion(suppressAutomatic = false) {
+      if (suppressAutomatic && editor) {
+        const selection = getSelection(editor);
+        if (selection.start === selection.end) {
+          dismissedCompletionContext = completionContextKey(
+            normalizeEditorText(editor.value), selection.end,
+          );
+        }
+      }
+      updateCompletion(null);
+    }
+
+    completionDismissRef.current = () => dismissCompletion(true);
 
     function rejectLimit(before: EditorSnapshot, viewport: EditorViewport = snapshotViewport) {
       setLimitMessage(EDITOR_LINE_LIMIT_MESSAGE);
@@ -254,13 +350,70 @@ export function useCodeEditor(
       pending = null;
       literalInput = false;
       suppressPairs = false;
+      dismissCompletion();
       setLimitMessage(null);
       write(result ?? before);
     }
 
+    function acceptCompletionAt(index: number): boolean {
+      if (!completionEnabledRef.current) {
+        dismissCompletion();
+        return false;
+      }
+      finishComposition();
+      const before = capture();
+      const current = completionRef.current;
+      if (!current || !Number.isInteger(index) || index < 0 || index >= current.options.length) return false;
+      const caret = getEditorCaretGeometry(activeEditor, before.text, current.cursorOffset, measure);
+      if (!isCompletionCaretVisible(caret, {
+        scrollTop: activeEditor.scrollTop,
+        scrollLeft: activeEditor.scrollLeft,
+        clientHeight: activeEditor.clientHeight,
+        clientWidth: activeEditor.clientWidth,
+      })) {
+        dismissCompletion(true);
+        return false;
+      }
+      const replacement = current.options[index];
+      const evaluation = evaluateEditorTextReplacement(
+        before,
+        current.replaceStart,
+        current.replaceEnd,
+        replacement,
+      );
+      if (!evaluation || evaluation.status === 'line-limit') {
+        dismissCompletion();
+        return false;
+      }
+      history.breakGroup();
+      history.record(before, evaluation.snapshot);
+      const nextOffset = current.replaceStart + replacement.length;
+      dismissedCompletionContext = completionContextKey(evaluation.snapshot.text, nextOffset);
+      pending = null;
+      literalInput = false;
+      suppressPairs = false;
+      setLimitMessage(null);
+      dismissCompletion();
+      write(evaluation.snapshot, undefined, true, false);
+      return true;
+    }
+
+    completionAcceptRef.current = acceptCompletionAt;
+
+    function moveCompletionSelection(direction: -1 | 1): boolean {
+      const current = completionRef.current;
+      if (!current || current.options.length === 0) return false;
+      const selectedIndex = (current.selectedIndex + direction + current.options.length) % current.options.length;
+      updateCompletion({ ...current, selectedIndex, selectedByUser: true });
+      return true;
+    }
+
     function onKeyDown(event: KeyboardEvent) {
-      if (event.isComposing || composing || event.keyCode === 229) return;
-      if (getPlaygroundShortcut(event)) return;
+      if (isEditorCompositionEvent(event, composing)) return;
+      if (getPlaygroundShortcut(event)) {
+        dismissCompletion();
+        return;
+      }
       finishComposition();
       const before = capture();
       const altGraph = event.getModifierState('AltGraph');
@@ -268,6 +421,41 @@ export function useCodeEditor(
       suppressPairs = modified;
       const mayExit = exitOnTab;
       exitOnTab = false;
+
+      const manualCompletion = event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+        && (event.code === 'Space' || event.key === ' ');
+      if (manualCompletion) {
+        event.preventDefault();
+        history.breakGroup();
+        refreshCompletion('manual');
+        return;
+      }
+
+      const activeCompletion = completionRef.current;
+      const completionAction = getCompletionKeyAction(
+        event.key,
+        activeCompletion !== null,
+        activeCompletion?.selectedByUser ?? false,
+        modified,
+        event.shiftKey,
+      );
+      if (completionAction === 'move-next' || completionAction === 'move-previous') {
+        event.preventDefault();
+        moveCompletionSelection(completionAction === 'move-next' ? 1 : -1);
+        return;
+      }
+      if (completionAction === 'dismiss') {
+        event.preventDefault();
+        history.breakGroup();
+        dismissCompletion(true);
+        return;
+      }
+      if (completionAction === 'accept' && activeCompletion) {
+        event.preventDefault();
+        history.breakGroup();
+        acceptCompletionAt(activeCompletion.selectedIndex);
+        return;
+      }
 
       if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'z') {
         event.preventDefault();
@@ -406,9 +594,10 @@ export function useCodeEditor(
 
     function onCompositionStart() {
       finishComposition();
+      dismissCompletion();
+      composing = true;
       compositionBefore = capture();
       compositionViewport = snapshotViewport;
-      composing = true;
       setIsComposing(true);
       callbacks.onCompositionChange?.(true);
       exitOnTab = false;
@@ -436,6 +625,7 @@ export function useCodeEditor(
     function onBlur() {
       exitOnTab = false;
       history.breakGroup();
+      dismissCompletion();
       finishComposition(true);
       pending = null;
       suppressPairs = false;
@@ -471,8 +661,29 @@ export function useCodeEditor(
       editor.removeEventListener('compositionend', onCompositionEnd);
       editor.removeEventListener('blur', onBlur);
       document.removeEventListener('selectionchange', onSelectionChange);
+      completionRefreshRef.current = () => {};
+      completionAcceptRef.current = () => false;
+      completionDismissRef.current = () => {};
     };
   }, []);
 
-  return { ref, cursor, text, limitMessage, isComposing };
+  useLayoutEffect(() => {
+    if (!completionEnabled) {
+      completionRef.current = null;
+      setCompletion(null);
+      return;
+    }
+    completionRefreshRef.current('automatic');
+  }, [completionEnabled]);
+
+  return {
+    ref,
+    cursor,
+    text,
+    limitMessage,
+    isComposing,
+    completion: completionEnabled ? completion : null,
+    acceptCompletion,
+    dismissCompletion: dismissCompletionFromViewport,
+  };
 }

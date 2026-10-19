@@ -57,6 +57,7 @@ export const messages = {
   'editor.lineLimit': 'Files cannot exceed {{max}} lines.',
   'editor.fileTooLong': 'File was not loaded: it has {{count}} lines and the limit is {{max}}.',
   'editor.diagnosticsForLine': 'Syntax diagnostics on line {{line}}',
+  'editor.completionListLabel': 'Code suggestions',
   'editor.relatedLocations': 'Related locations',
   'editor.sourceLocation': '{{file}}:{{line}}:{{column}}',
   'editor.diagnosticMarker.one': '{{count}} analysis error on line {{line}}',

@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   applyEditorCommand,
   evaluateEditorCommand,
+  evaluateEditorTextReplacement,
   evaluateNativeEdit,
   getCursorPosition,
   reconcileNativeEdit,
@@ -184,6 +185,27 @@ test('a rejected native edit leaves undo and redo history untouched', () => {
   const redone = history.redo(undone);
   assert.equal(redone?.text, lines999);
   assert.equal(history.canUndo(), true);
+});
+
+test('completion replaces a whole identifier, preserves its suffix, and undoes as one action', () => {
+  const before = snapshot('pri(value);', 3);
+  const replacement = evaluateEditorTextReplacement(before, 0, 3, 'printf');
+  assert.equal(replacement?.status, 'applied');
+  assert.equal(replacement?.snapshot.text, 'printf(value);');
+  assertCaret(replacement.snapshot, 6);
+
+  const history = createEditorHistory(before);
+  history.record(before, replacement.snapshot);
+  assert.equal(history.undo(replacement.snapshot)?.text, before.text);
+  assert.equal(history.canRedo(), true);
+  assert.equal(history.redo(before)?.text, 'printf(value);');
+});
+
+test('completion replacement rejects invalid ranges without changing the source', () => {
+  const before = snapshot('value', 2);
+  assert.equal(evaluateEditorTextReplacement(before, -1, 2, 'name'), null);
+  assert.equal(evaluateEditorTextReplacement(before, 4, 2, 'name'), null);
+  assert.equal(before.text, 'value');
 });
 
 test('each supported pair opens with the caret inside, skips its generated closer, and deletes as a unit', () => {

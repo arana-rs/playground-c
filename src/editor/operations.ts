@@ -279,6 +279,21 @@ export function evaluateNativeEdit(
     : { status: 'line-limit', snapshot };
 }
 
+/** Replace a source range as one editor action while retaining tracked delimiter pairs. */
+export function evaluateEditorTextReplacement(
+  previous: EditorSnapshot,
+  start: number,
+  end: number,
+  replacement: string,
+): NativeEditEvaluation | null {
+  const before = normalizeSnapshot(previous);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+    || start < 0 || end < start || end > before.text.length) return null;
+  const text = before.text.slice(0, start) + replacement + before.text.slice(end);
+  const position = start + replacement.length;
+  return evaluateNativeEdit(before, text, { start: position, end: position, direction: 'none' });
+}
+
 export function getCursorPosition(snapshot: EditorSnapshot): { line: number; column: number } {
   const normalized = normalizeSnapshot(snapshot);
   const position = normalized.selection.direction === 'backward' ? normalized.selection.start : normalized.selection.end;

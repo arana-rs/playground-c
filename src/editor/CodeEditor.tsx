@@ -11,6 +11,9 @@ import {
 } from './diagnosticRendering.ts';
 import type { DiagnosticAnchorHitbox } from './diagnosticRendering.ts';
 import type { EditorDiagnosticGroup } from './editorDiagnostics.ts';
+import type { EditorCompletionState } from './useCodeEditor.ts';
+import { getEditorCaretGeometry } from './caretGeometry.ts';
+import { isCompletionCaretVisible } from './completionInteractions.ts';
 import { useI18n } from '../i18n.tsx';
 
 interface CodeEditorProps {
@@ -24,6 +27,9 @@ interface CodeEditorProps {
   compactReadOnlyGutter?: boolean;
   limitMessage?: EditorLimitMessage | null;
   diagnostics?: readonly EditorDiagnosticGroup[];
+  completion?: EditorCompletionState | null;
+  onCompletionAccept?: (index: number) => boolean;
+  onCompletionDismiss?: () => void;
 }
 
 const EditorLineNumber = memo(function EditorLineNumber({
@@ -71,7 +77,8 @@ function revealEditorLine(editor: HTMLTextAreaElement, line: number): void {
 export const CodeEditor = memo(function CodeEditor({
   editorRef, text, initialText = '', activeLine = 1, highlightLine,
   readOnly = false, showActiveLine = true, compactReadOnlyGutter = false,
-  limitMessage = null, diagnostics = [],
+  limitMessage = null, diagnostics = [], completion = null, onCompletionAccept,
+  onCompletionDismiss,
 }: CodeEditorProps) {
   const { t } = useI18n();
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -81,6 +88,9 @@ export const CodeEditor = memo(function CodeEditor({
   const gutterRef = useRef<HTMLDivElement>(null);
   const diagnosticMarkersRef = useRef<HTMLDivElement>(null);
   const diagnosticPopoverRef = useRef<HTMLDivElement>(null);
+  const completionPopoverRef = useRef<HTMLDivElement>(null);
+  const completionRef = useRef(completion);
+  const caretMeasureRef = useRef<CanvasRenderingContext2D | null>(null);
   const activeDiagnosticLineRef = useRef<number | null>(null);
   const activeDiagnosticAnchorOffsetRef = useRef<number | null>(null);
   const diagnosticAnchorHitboxesRef = useRef<readonly DiagnosticAnchorHitbox[] | null>(null);
@@ -89,6 +99,8 @@ export const CodeEditor = memo(function CodeEditor({
   const diagnosticCloseTimerRef = useRef<number | null>(null);
   const diagnosticOverlayRef = useRef<HTMLDivElement>(null);
   const diagnosticPopoverId = useId();
+  const completionPopoverId = useId();
+  completionRef.current = completion;
   const [hoveredDiagnosticLine, setHoveredDiagnosticLine] = useState<number | null>(null);
   const [hoveredDiagnosticAnchorOffset, setHoveredDiagnosticAnchorOffset] = useState<number | null>(null);
   const [focusedDiagnosticLine, setFocusedDiagnosticLine] = useState<number | null>(null);
@@ -233,6 +245,53 @@ export const CodeEditor = memo(function CodeEditor({
     return hitboxes;
   }, []);
 
+  const positionCompletionPopover = useCallback(() => {
+    const editor = editorRef.current;
+    const popover = completionPopoverRef.current;
+    const completionState = completionRef.current;
+    const pane = editor?.parentElement;
+    if (!editor || !popover || !completionState || !pane) return;
+
+    if (!caretMeasureRef.current) caretMeasureRef.current = document.createElement('canvas').getContext('2d');
+    const caret = getEditorCaretGeometry(
+      editor,
+      editor.value,
+      completionState.cursorOffset,
+      caretMeasureRef.current,
+    );
+    const editorRect = editor.getBoundingClientRect();
+    const paneRect = pane.getBoundingClientRect();
+    const requestedLeft = editorRect.left - paneRect.left + editor.clientLeft
+      + caret.left - editor.scrollLeft;
+    const requestedTop = editorRect.top - paneRect.top + editor.clientTop
+      + caret.top + caret.lineHeight - editor.scrollTop;
+    const maxLeft = Math.max(4, pane.clientWidth - popover.offsetWidth - 4);
+    const maxTop = Math.max(4, pane.clientHeight - popover.offsetHeight - 4);
+    popover.style.left = `${Math.max(4, Math.min(requestedLeft, maxLeft))}px`;
+    popover.style.top = `${Math.max(4, Math.min(requestedTop, maxTop))}px`;
+  }, [editorRef]);
+
+  const dismissOffscreenCompletion = useCallback(() => {
+    const editor = editorRef.current;
+    const completionState = completionRef.current;
+    if (!editor || !completionState) return;
+    if (!caretMeasureRef.current) caretMeasureRef.current = document.createElement('canvas').getContext('2d');
+    const caret = getEditorCaretGeometry(
+      editor,
+      editor.value,
+      completionState.cursorOffset,
+      caretMeasureRef.current,
+    );
+    if (!isCompletionCaretVisible(caret, {
+      scrollTop: editor.scrollTop,
+      scrollLeft: editor.scrollLeft,
+      clientHeight: editor.clientHeight,
+      clientWidth: editor.clientWidth,
+    })) {
+      onCompletionDismiss?.();
+    }
+  }, [editorRef, onCompletionDismiss]);
+
   const syncScroll = useCallback(() => {
     const editor = editorRef.current;
     const viewport = viewportRef.current;
@@ -256,6 +315,7 @@ export const CodeEditor = memo(function CodeEditor({
     if (diagnosticMarkers) {
       diagnosticMarkers.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
     }
+    dismissOffscreenCompletion();
     const activeLine = activeDiagnosticLineRef.current;
     const popover = diagnosticPopoverRef.current;
     if (activeLine !== null && popover) {
@@ -296,7 +356,8 @@ export const CodeEditor = memo(function CodeEditor({
       popover.style.removeProperty('left');
       popover.style.removeProperty('max-height');
     }
-  }, [editorRef]);
+    positionCompletionPopover();
+  }, [dismissOffscreenCompletion, editorRef, positionCompletionPopover]);
 
   const handleDiagnosticPointerMove = useCallback((event: ReactPointerEvent<HTMLTextAreaElement>) => {
     if (event.pointerType === 'touch' || event.buttons !== 0 || isComposingRef.current) return;
@@ -368,7 +429,7 @@ export const CodeEditor = memo(function CodeEditor({
   useLayoutEffect(() => {
     diagnosticAnchorHitboxesRef.current = null;
     syncScroll();
-  }, [text, highlightLine, diagnosticGroups.length, diagnosticAnchorRanges, syncScroll]);
+  }, [text, highlightLine, completion, diagnosticGroups.length, diagnosticAnchorRanges, syncScroll]);
 
   useLayoutEffect(() => {
     activeDiagnosticLineRef.current = activeDiagnosticGroup?.line ?? null;
@@ -440,6 +501,10 @@ export const CodeEditor = memo(function CodeEditor({
         ref={editorRef}
         className={`editor${readOnly ? ' is-readonly' : ''}${compactGutterClass}`}
         aria-label={t('editor.codeAreaLabel', { file: 'main.c' })}
+        aria-autocomplete={completion ? 'list' : 'none'}
+        aria-controls={completion ? completionPopoverId : undefined}
+        aria-activedescendant={completion
+          ? `${completionPopoverId}-option-${completion.selectedIndex}` : undefined}
         defaultValue={initialText}
         readOnly={readOnly}
         spellCheck={false}
@@ -558,6 +623,31 @@ export const CodeEditor = memo(function CodeEditor({
               </ul>
             </div>
           )}
+        </div>
+      )}
+      {completion && (
+        <div className="editor-completion-overlay" aria-hidden="false">
+          <div
+            ref={completionPopoverRef}
+            id={completionPopoverId}
+            className="editor-completion-popover"
+            role="listbox"
+            aria-label={t('editor.completionListLabel')}
+          >
+            {completion.options.map((option, index) => (
+              <div
+                key={`${option}:${index}`}
+                id={`${completionPopoverId}-option-${index}`}
+                className={`editor-completion-option${completion.selectedIndex === index ? ' is-active' : ''}`}
+                role="option"
+                aria-selected={completion.selectedIndex === index}
+                onMouseDown={event => event.preventDefault()}
+                onClick={() => onCompletionAccept?.(index)}
+              >
+                {option}
+              </div>
+            ))}
+          </div>
         </div>
       )}
       <div

@@ -59,6 +59,7 @@ export const messages: Record<TranslationKey, string> = {
   'editor.lineLimit': 'El archivo no puede superar {{max}} líneas.',
   'editor.fileTooLong': 'No se cargó el archivo: tiene {{count}} líneas y el límite es {{max}}.',
   'editor.diagnosticsForLine': 'Diagnósticos de sintaxis en la línea {{line}}',
+  'editor.completionListLabel': 'Sugerencias de código',
   'editor.relatedLocations': 'Ubicaciones relacionadas',
   'editor.sourceLocation': '{{file}}:{{line}}:{{column}}',
   'editor.diagnosticMarker.one': '{{count}} error de análisis en la línea {{line}}',
