@@ -1,7 +1,37 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RUN_CONFIGURATION } from '../src/execution/configuration.ts';
+import {
+  createExecutionDocumentSnapshot,
+  createWorkspaceSourceSnapshot,
+} from '../src/execution/documentSnapshot.ts';
 import { createRunConfiguration } from '../src/execution/settings.ts';
+import { MemoryViewerController } from '../src/memory/MemoryViewerController.ts';
+
+class InlineMemoryWorker {
+  onmessage = null;
+  onerror = null;
+  onmessageerror = null;
+  messages = [];
+  terminated = false;
+
+  constructor(scope) {
+    this.scope = scope;
+  }
+
+  postMessage(data) {
+    this.messages.push(data);
+    this.scope.onmessage?.({ data });
+  }
+
+  terminate() {
+    this.terminated = true;
+  }
+
+  emit(data) {
+    this.onmessage?.({ data });
+  }
+}
 
 test('the real Worker prepares main, advances by line, and drains only lifecycle events', async () => {
   const responses = [];
@@ -79,6 +109,81 @@ test('the real Worker prepares main, advances by line, and drains only lifecycle
     assert.equal(responses[4].progress.kind, 'terminated');
     assert.deepEqual(responses[4].stackScalars, [], 'terminal inspection reflects normal scope exit');
     assert.ok(responses.flatMap(response => response.events ?? []).every(event => !('value' in event)));
+  } finally {
+    if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
+    else delete globalThis.self;
+  }
+});
+
+test('debug steps show and restore the captured source for an explicitly included .c file', async () => {
+  const mainSource = '#include "local.h"\n#include "helper.c"\nint main(void) {\n  return helper();\n}\n';
+  const headerSource = '#ifndef LOCAL_H\n#define LOCAL_H\nint helper(void);\n#endif\n';
+  const helperSource = '#include "local.h"\nint helper(void) {\n  int value = 9;\n  return value;\n}\n';
+  const unusedSource = 'int main(void) { return 99; }\n';
+  const snapshot = createWorkspaceSourceSnapshot(
+    createExecutionDocumentSnapshot('main-id', 'main.c', 7, mainSource),
+    [
+      { id: 'main-id', name: 'main.c', source: mainSource },
+      { id: 'header-id', name: 'local.h', source: headerSource },
+      { id: 'helper-id', name: 'helper.c', source: helperSource },
+      { id: 'unused-id', name: 'unused.c', source: unusedSource },
+    ],
+  );
+  const responses = [];
+  let worker = null;
+  const scope = {
+    onmessage: null,
+    postMessage(response) {
+      responses.push(response);
+      worker?.emit(response);
+    },
+  };
+  const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
+  Object.defineProperty(globalThis, 'self', { configurable: true, writable: true, value: scope });
+
+  try {
+    await import('../src/memory/memory.worker.ts?memory-viewer-workspace-snapshot-test');
+    const controller = new MemoryViewerController(snapshot, {
+      workerFactory: () => {
+        worker = new InlineMemoryWorker(scope);
+        return worker;
+      },
+      timers: { setTimeout: () => 1, clearTimeout: () => {} },
+    });
+    controller.start();
+
+    assert.equal(responses[0].type, 'debug-ready');
+    assert.equal(worker.messages[0].type, 'debug-start');
+    assert.deepEqual(worker.messages[0].snapshot.translationUnits, ['main.c']);
+    assert.deepEqual(worker.messages[0].snapshot.files.map(file => file.name), [
+      'main.c', 'local.h', 'helper.c', 'unused.c',
+    ]);
+    assert.equal(controller.state.sourceFileName, 'main.c');
+    assert.deepEqual(controller.state.document, {
+      documentId: 'main-id',
+      fileName: 'main.c',
+      sourceRevision: 7,
+      source: mainSource,
+    });
+
+    for (let step = 0; step < 12 && controller.state.location?.file !== 'helper.c'; step += 1) {
+      controller.next();
+    }
+    assert.equal(controller.state.location?.file, 'helper.c');
+    assert.equal(controller.state.sourceFileName, 'helper.c');
+    assert.equal(controller.state.source, helperSource);
+    assert.ok(responses.every(response => response.type !== 'debug-error'), 'only main.c is compiled as a translation unit');
+
+    controller.previous();
+    assert.equal(controller.state.location?.file, 'main.c');
+    assert.equal(controller.state.sourceFileName, 'main.c');
+    assert.equal(controller.state.source, mainSource);
+    controller.next();
+    assert.equal(controller.state.location?.file, 'helper.c');
+    assert.equal(controller.state.sourceFileName, 'helper.c');
+    assert.equal(controller.state.source, helperSource);
+
+    controller.dispose();
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
     else delete globalThis.self;

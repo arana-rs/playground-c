@@ -9,6 +9,7 @@ import {
   reconcileNativeEdit,
 } from '../src/editor/operations.ts';
 import { createEditorHistory } from '../src/editor/history.ts';
+import { getEditorLanguage } from '../src/editor/languageMode.ts';
 import {
   EDITOR_LINE_LIMIT_MESSAGE,
   MAX_EDITOR_LINES,
@@ -371,6 +372,57 @@ test('Tab inserts four spaces at a caret and Shift+Tab safely handles unindented
   const unchanged = edit(snapshot('ab', 1), { type: 'indent', outdent: true });
   assert.equal(unchanged.text, 'ab');
   assertCaret(unchanged, 1);
+});
+
+test('the exact Makefile name selects plain editor mode and leaves other file names in C mode', () => {
+  assert.equal(getEditorLanguage('Makefile'), 'makefile');
+  assert.equal(getEditorLanguage('makefile'), 'c');
+  assert.equal(getEditorLanguage('main.c'), 'c');
+});
+
+test('Makefile Tab inserts literal tabs, Shift+Tab removes tabs, and Enter retains recipe indentation', () => {
+  const tabbed = evaluateEditorCommand(snapshot('echo ready', 0), { type: 'indent', outdent: false }, 'makefile');
+  assert.equal(tabbed.status, 'applied');
+  assert.equal(tabbed.snapshot.text, '\techo ready');
+  assertCaret(tabbed.snapshot, 1);
+
+  const selected = evaluateEditorCommand(snapshot('one\ntwo', 0, 7, 'forward'), {
+    type: 'indent', outdent: false,
+  }, 'makefile');
+  assert.equal(selected.status, 'applied');
+  assert.equal(selected.snapshot.text, '\tone\n\ttwo');
+  assert.deepEqual(selected.snapshot.selection, { start: 0, end: 9, direction: 'forward' });
+  const outdented = evaluateEditorCommand(selected.snapshot, { type: 'indent', outdent: true }, 'makefile');
+  assert.equal(outdented.status, 'applied');
+  assert.equal(outdented.snapshot.text, 'one\ntwo');
+  assert.deepEqual(outdented.snapshot.selection, { start: 0, end: 7, direction: 'forward' });
+
+  const recipe = '\tcc main.c';
+  const entered = evaluateEditorCommand(snapshot(recipe), { type: 'enter' }, 'makefile');
+  assert.equal(entered.status, 'applied');
+  assert.equal(entered.snapshot.text, `${recipe}\n\t`);
+  const afterTarget = evaluateEditorCommand(snapshot('all:'), { type: 'enter' }, 'makefile');
+  assert.equal(afterTarget.snapshot.text, 'all:\n');
+  const afterBrace = evaluateEditorCommand(snapshot('all: {}', 6), { type: 'enter' }, 'makefile');
+  assert.equal(afterBrace.snapshot.text, 'all: {\n}');
+});
+
+test('Makefile mode does not auto-pair or auto-delete delimiters, and its edits remain undoable', () => {
+  const opening = evaluateEditorCommand(snapshot(), { type: 'type', character: '(' }, 'makefile');
+  assert.equal(opening.status, 'unsupported', 'the browser inserts Makefile characters literally');
+  const backspace = evaluateEditorCommand(snapshot('()', 1, 1, 'none', [
+    { open: 0, close: 1, opener: '(', closer: ')' },
+  ]), { type: 'backspace' }, 'makefile');
+  assert.equal(backspace.status, 'unsupported', 'Backspace keeps native single-character behavior');
+
+  const before = snapshot('\techo ready');
+  const result = evaluateEditorCommand(before, { type: 'enter' }, 'makefile');
+  assert.equal(result.status, 'applied');
+  const history = createEditorHistory(before);
+  history.record(before, result.snapshot);
+  assert.equal(history.undo(result.snapshot)?.text, before.text);
+  assert.equal(history.canRedo(), true);
+  assert.equal(history.redo(before)?.text, '\techo ready\n\t');
 });
 
 test('an empty first line belongs to the document start during Enter and multiline indentation', () => {

@@ -41,6 +41,10 @@ export function formatTimeoutDiagnosticsReport(
       schemaVersion: report.schemaVersion,
       outcome: report.outcome,
       reason: report.reason,
+      document: {
+        id: report.document.id,
+        sourceRevision: report.document.sourceRevision,
+      },
       file: {
         name: report.file.name,
         sizeBytes: report.file.sizeBytes,

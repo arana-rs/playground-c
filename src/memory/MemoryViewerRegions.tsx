@@ -22,6 +22,8 @@ import {
   EMPTY_EXIT_PRESENTATION,
   EMPTY_HEAP_EXIT_PRESENTATION,
   EMPTY_VALUE_CHANGE_PRESENTATION,
+  completeMemoryViewerHeapExitPresentation,
+  isMemoryViewerHeapEmpty,
 } from './MemoryViewerRegionModel.ts';
 import type {
   MemoryViewerExitPresentation,
@@ -33,6 +35,7 @@ import { MemoryViewerHeapContents } from './MemoryViewerHeapContents.tsx';
 import { MemoryViewerRegionSection } from './MemoryViewerRegionSection.tsx';
 import { MemoryViewerStackContents } from './MemoryViewerStackContents.tsx';
 import { MemoryViewerStaticContents } from './MemoryViewerStaticContents.tsx';
+import { latestFreedMemoryViewerHeapObject } from './heapSnapshots.ts';
 import { useI18n } from '../i18n.tsx';
 
 export function MemoryViewerRegions({
@@ -59,6 +62,7 @@ export function MemoryViewerRegions({
     stack: true,
     heap: false,
   });
+  const wasHeapExpandedRef = useRef(expanded.heap);
   const autoOpenedHeap = useRef(false);
   const expandedPointerTargetKeyRef = useRef<string | null>(null);
   const entrypointMainRootScopeIdRef = useRef<number | null>(null);
@@ -69,7 +73,21 @@ export function MemoryViewerRegions({
     () => findMemoryViewerFunctionRootScopeIds(lifecycle),
     [lifecycle],
   );
-  const selectedSnapshotRef = useRef({ stepIndex, activeScopes, heapObjects, arrays, aggregates, stackScalars, pointers, staticObjects });
+  const freedHeapObject = useMemo(
+    () => latestFreedMemoryViewerHeapObject(lifecycle),
+    [lifecycle],
+  );
+  const selectedSnapshotRef = useRef({
+    stepIndex,
+    activeScopes,
+    heapObjects,
+    freedHeapObject: null as typeof freedHeapObject,
+    arrays,
+    aggregates,
+    stackScalars,
+    pointers,
+    staticObjects,
+  });
   const heapFocusIdRef = useRef<number | null>(null);
   const [hoveredPointerIdentity, setHoveredPointerIdentity] = useState<MemoryViewerPointerIdentity | null>(null);
   const [focusedPointerIdentity, setFocusedPointerIdentity] = useState<MemoryViewerPointerIdentity | null>(null);
@@ -110,8 +128,6 @@ export function MemoryViewerRegions({
     : memoryViewerPointerTargetRegion(highlightedPointerTarget, staticScalars, heapObjects, pointers, aggregates);
   const exitTimerRef = useRef<MemoryViewerExitCleanupTimer | null>(null);
   if (!exitTimerRef.current) exitTimerRef.current = new MemoryViewerExitCleanupTimer();
-  const heapExitTimerRef = useRef<MemoryViewerExitCleanupTimer | null>(null);
-  if (!heapExitTimerRef.current) heapExitTimerRef.current = new MemoryViewerExitCleanupTimer();
   const [exitPresentation, setExitPresentation] = useState<MemoryViewerExitPresentation>(EMPTY_EXIT_PRESENTATION);
   const [heapExitPresentation, setHeapExitPresentation] = useState<MemoryViewerHeapExitPresentation>(EMPTY_HEAP_EXIT_PRESENTATION);
   const [valueChangePresentation, setValueChangePresentation] = useState<MemoryViewerValueChangePresentation>(EMPTY_VALUE_CHANGE_PRESENTATION);
@@ -120,16 +136,8 @@ export function MemoryViewerRegions({
     exitTimerRef.current?.clear();
   }
 
-  function clearHeapExitTimer() {
-    heapExitTimerRef.current?.clear();
-  }
-
   function resetExitPresentation() {
     setExitPresentation(EMPTY_EXIT_PRESENTATION);
-  }
-
-  function resetHeapExitPresentation() {
-    setHeapExitPresentation(EMPTY_HEAP_EXIT_PRESENTATION);
   }
 
   function updatePointerHover(pointerIdentity: MemoryViewerPointerIdentity, isHovered: boolean) {
@@ -216,6 +224,7 @@ export function MemoryViewerRegions({
     stepIndex,
     activeScopes,
     heapObjects,
+    freedHeapObject,
     arrays,
     aggregates,
     stackScalars,
@@ -231,7 +240,6 @@ export function MemoryViewerRegions({
     selectedSnapshotRef,
     heapFocusIdRef,
     exitTimerRef,
-    heapExitTimerRef,
     exitPresentation,
     setExitPresentation,
     heapExitPresentation,
@@ -252,22 +260,23 @@ export function MemoryViewerRegions({
   }, [expanded.stack]);
 
   useEffect(() => {
-    if (expanded.heap) return;
-    clearHeapExitTimer();
-    resetHeapExitPresentation();
+    const wasExpanded = wasHeapExpandedRef.current;
+    wasHeapExpandedRef.current = expanded.heap;
+    if (expanded.heap || !wasExpanded) return;
+    setHeapExitPresentation(current => current.phase === 'waiting' || current.phase === 'fading'
+      ? completeMemoryViewerHeapExitPresentation(current)
+      : current);
   }, [expanded.heap]);
 
   useEffect(() => () => {
     clearExitTimer();
-    clearHeapExitTimer();
   }, []);
 
   const staticIsEmpty = staticScalars.length === 0
     && !arrays.some(array => array.region === 'static')
     && !aggregates.some(aggregate => aggregate.region === 'static')
     && !pointers.some(pointer => pointer.region === 'static');
-  const heapIsEmpty = heapObjects.length === 0
-    && !aggregates.some(aggregate => aggregate.region === 'heap');
+  const heapIsEmpty = isMemoryViewerHeapEmpty(heapObjects, aggregates, freedHeapObject, heapExitPresentation);
 
   return (
     <section className="memory-viewer-regions" aria-label={t('memoryViewer.regionLabel')}>
@@ -357,7 +366,11 @@ export function MemoryViewerRegions({
         onToggle={() => setExpanded(current => ({ ...current, heap: !current.heap }))}
       >
         <MemoryViewerHeapContents
+          key={status === 'starting' && stepIndex === 0 ? 'starting-session' : 'active-session'}
           heapObjects={heapObjects}
+          freedHeapObject={freedHeapObject}
+          pointers={pointers}
+          arrays={arrays}
           aggregates={aggregates}
           stepIndex={stepIndex}
           heapExitPresentation={heapExitPresentation}
@@ -367,6 +380,9 @@ export function MemoryViewerRegions({
           highlightedPointerTarget={highlightedPointerTarget}
           onPointerHoverChange={updatePointerHover}
           onPointerFocusChange={updatePointerFocus}
+          onFreedHeapExitComplete={() => setHeapExitPresentation(current => current.phase === 'fading'
+            ? completeMemoryViewerHeapExitPresentation(current)
+            : current)}
           t={t}
         />
       </MemoryViewerRegionSection>

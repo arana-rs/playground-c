@@ -1,11 +1,13 @@
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import type { EditorCompletionState } from './useCodeEditor.ts';
+import type { EditorLanguage } from './languageMode.ts';
 
 interface CodeEditorInputProps {
   editorRef: RefObject<HTMLTextAreaElement | null>;
   className: string;
   accessibleLabel: string;
   initialText: string;
+  language: EditorLanguage;
   readOnly: boolean;
   completion: EditorCompletionState | null;
   completionPopoverId: string;
@@ -22,6 +24,7 @@ export function CodeEditorInput({
   className,
   accessibleLabel,
   initialText,
+  language,
   readOnly,
   completion,
   completionPopoverId,
@@ -36,6 +39,7 @@ export function CodeEditorInput({
     <textarea
       ref={editorRef}
       className={className}
+      data-editor-language={language}
       aria-label={accessibleLabel}
       aria-autocomplete={completion ? 'list' : 'none'}
       aria-controls={completion ? completionPopoverId : undefined}

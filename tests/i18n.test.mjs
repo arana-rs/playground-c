@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createEditorSourcePersister, readEditorSource } from '../src/editor/sourcePersistence.ts';
+import {
+  createDefaultWorkspace,
+  createWorkspacePersister,
+  getActiveWorkspaceFile,
+  readWorkspace,
+  updateWorkspaceFileSource,
+} from '../src/editor/sourcePersistence.ts';
 import { createServer } from 'vite';
 
 function createStorage() {
@@ -40,10 +46,12 @@ test('language preference falls back to English, persists valid choices, and lea
 
     const initialSource = 'int main(void) { return 0; }';
     const editedSource = 'int main(void) { return 42; }';
-    const persistSource = createEditorSourcePersister(initialSource, () => storage);
-    persistSource(editedSource);
+    const initialWorkspace = createDefaultWorkspace(initialSource);
+    const persistWorkspace = createWorkspacePersister(initialWorkspace, () => storage);
+    const editedWorkspace = updateWorkspaceFileSource(initialWorkspace, 'main', editedSource);
+    persistWorkspace(editedWorkspace);
     assert.equal(writeLanguage(storage, 'en'), true);
-    assert.equal(readEditorSource(() => storage, initialSource), editedSource);
+    assert.equal(getActiveWorkspaceFile(readWorkspace(() => storage, initialSource)).source, editedSource);
     assert.equal(storage.values.get(LANGUAGE_STORAGE_KEY), 'en');
   } finally {
     await vite.close();
@@ -72,6 +80,54 @@ test('language switch renders the current locale with an accessible next-languag
     assert.match(spanishMarkup, /title="Cambiar idioma a inglés"/u);
     assert.match(spanishMarkup, /aria-pressed="true"/u);
     assert.match(spanishMarkup, />SPA<\/span>/u);
+  } finally {
+    await vite.close();
+  }
+});
+
+test('unsupported workspace notice is localized and the editor and workspace controls render read-only', async () => {
+  const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom' });
+  try {
+    const { LanguageProvider } = await vite.ssrLoadModule('/src/i18n.tsx');
+    const { WorkspacePersistenceNotice } = await vite.ssrLoadModule('/src/application/PlaygroundShell.tsx');
+    const { WorkspaceFileTabs } = await vite.ssrLoadModule('/src/components/WorkspaceFileTabs.tsx');
+    const { CodeEditor } = await vite.ssrLoadModule('/src/editor/CodeEditor.tsx');
+    const renderLocalized = (element, language) => renderToStaticMarkup(createElement(
+      LanguageProvider,
+      { initialLanguage: language },
+      element,
+    ));
+
+    const englishNotice = renderLocalized(createElement(WorkspacePersistenceNotice), 'en');
+    const spanishNotice = renderLocalized(createElement(WorkspacePersistenceNotice), 'es');
+    assert.match(englishNotice, /role="status"[^>]*aria-live="polite"/u);
+    assert.match(englishNotice, /unsupported format/u);
+    assert.doesNotMatch(englishNotice, /<button/u);
+    assert.match(spanishNotice, /formato no compatible/u);
+
+    const files = [{ id: 'main', name: 'main.c', source: 'int main(void) {}' }];
+    const tabs = renderLocalized(createElement(WorkspaceFileTabs, {
+      files,
+      activeFileId: 'main',
+      requestedFileId: 'main',
+      isComposing: false,
+      persistenceLocked: true,
+      onSelectFile() {},
+      onCreateFile() { return null; },
+      onRenameFile() {},
+      onDeleteFile() {},
+    }), 'en');
+    assert.match(tabs, /class="workspace-file-tab[^"]*"[^>]*disabled=""/u);
+    assert.match(tabs, /class="workspace-file-tab__create"[^>]*disabled=""/u);
+
+    const editor = renderLocalized(createElement(CodeEditor, {
+      editorRef: { current: null },
+      text: files[0].source,
+      initialText: files[0].source,
+      fileName: files[0].name,
+      readOnly: true,
+    }), 'en');
+    assert.match(editor, /<textarea[^>]*readOnly=""/u);
   } finally {
     await vite.close();
   }

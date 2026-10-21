@@ -56,3 +56,12 @@ export function hasDirectStdioInclude(source: string): boolean {
   }
   return false;
 }
+
+/**
+ * Conservatively detect stdio.h anywhere in a captured workspace. This can
+ * enable the debug console for an unreferenced sibling, but never changes the
+ * files prepared or executed by the engine.
+ */
+export function hasStdioIncludeInWorkspace(files: readonly { readonly source: string }[]): boolean {
+  return files.some(file => hasDirectStdioInclude(file.source));
+}

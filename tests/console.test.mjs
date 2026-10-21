@@ -14,6 +14,7 @@ const metrics = {
   peakMemoryBytes: 0,
 };
 const bytes = (text) => new TextEncoder().encode(text);
+const document = { documentId: 'document-main', fileName: 'main.c', sourceRevision: 0, source: '' };
 
 test('Run limits include the shared I/O budget and a bounded preprocess-step budget', () => {
   assert.equal(RUN_CONFIGURATION.options.execute.limits.maxIOBytes, 1_048_576);
@@ -155,11 +156,11 @@ test('console frames preparation diagnostics and distinguishes worker failures, 
   assert.equal(preparationError, 'Could not prepare the program:\nmain.c:1:1: Virtual header «missing.h» was not found.');
   assert.equal(formatConsole({
     status: 'error',
-    file: 'main.c',
+    document,
     reason: 'run',
     message: 'The execution engine stopped unexpectedly.',
   }), 'The execution engine failed while processing "main.c": The execution engine stopped unexpectedly.');
-  assert.equal(formatConsole({ status: 'timeout', file: 'main.c', timeoutMs: 10_000 }),
+  assert.equal(formatConsole({ status: 'timeout', document, timeoutMs: 10_000, diagnosticsReport: {}, transcript: [] }),
     'The 10 s time limit expired while starting, reading, preparing, or running "main.c"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.');
   assert.equal(formatConsole({ status: 'cancelled' }), 'Execution cancelled by the user.');
 });
@@ -168,10 +169,10 @@ test('console status follows runner outcomes without treating a nonzero exit as 
   assert.deepEqual(getConsoleStatus({ status: 'idle' }), { key: 'ready', tone: 'ready' });
   assert.deepEqual(getConsoleStatus({ status: 'running' }), { key: 'running', tone: 'running' });
   assert.deepEqual(getConsoleStatus({ status: 'cancelled' }), { key: 'cancelled', tone: 'cancelled' });
-  assert.deepEqual(getConsoleStatus({ status: 'timeout', file: 'main.c', timeoutMs: 10_000 }), {
+  assert.deepEqual(getConsoleStatus({ status: 'timeout', document, timeoutMs: 10_000, diagnosticsReport: {}, transcript: [] }), {
     key: 'timedOut', tone: 'stopped',
   });
-  assert.deepEqual(getConsoleStatus({ status: 'error', file: 'main.c', reason: 'run', message: 'failed' }), {
+  assert.deepEqual(getConsoleStatus({ status: 'error', document, reason: 'run', message: 'failed', transcript: [] }), {
     key: 'error', tone: 'error',
   });
   assert.deepEqual(getConsoleStatus({

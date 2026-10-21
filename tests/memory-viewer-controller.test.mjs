@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MemoryViewerController } from '../src/memory/MemoryViewerController.ts';
+import { latestFreedMemoryViewerHeapObject } from '../src/memory/heapSnapshots.ts';
 import { TerminalPresentation } from '../src/components/terminalPresentation.ts';
 import { formatConsoleSegments } from '../src/execution/useRunner.ts';
 import { RUN_CONFIGURATION } from '../src/execution/configuration.ts';
+import { hasStdioIncludeInWorkspace } from '../src/memory/stdioInclude.ts';
+import { formatMemoryViewerLocationLabel } from '../src/memory/memoryViewerLocationLabel.ts';
+import {
+  createExecutionDocumentSnapshot,
+  createWorkspaceSourceSnapshot,
+} from '../src/execution/documentSnapshot.ts';
 
 const metrics = {
   prepareMs: 0,
@@ -141,6 +148,16 @@ function heapSnapshot(id, address, size = 8) {
   return { id, address, size, origin: 'heap' };
 }
 
+function heapObjectLifecycleEvent(sequence, kind, allocationId, address, size = 8) {
+  return {
+    ...objectLifecycleEvent(sequence, kind, 'heap', { allocationId, origin: 'heap' }),
+    frameId: null,
+    scopeId: null,
+    addressVirtual: BigInt(address),
+    size,
+  };
+}
+
 class FakeWorker {
   onmessage = null;
   onerror = null;
@@ -197,6 +214,151 @@ function setup(options = {}) {
   controller.start();
   return { controller, workers, timers };
 }
+
+test('debug session starts with the selected workspace filename', () => {
+  const { controller, workers } = setup({ fileName: 'lib/π.c' });
+  assert.equal(workers[0].messages[0].snapshot.entry, 'lib/π.c');
+  assert.deepEqual(workers[0].messages[0].snapshot.translationUnits, ['lib/π.c']);
+  controller.dispose();
+});
+
+test('debug history retains the captured document identity, source, and locations after selection changes', () => {
+  const source = 'int main(void) { return 0; }';
+  const documentA = createExecutionDocumentSnapshot('document-a', 'main.c', 5, source);
+  const workers = [];
+  const controller = new MemoryViewerController(documentA, {
+    workerFactory: () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    },
+    timers: new FakeTimers(),
+  });
+  controller.start();
+  const worker = workers[0];
+  const request = worker.messages[0];
+  const jobId = request.jobId;
+  worker.emit({
+    type: 'debug-ready',
+    jobId,
+    location: { file: 'main.c', line: 1, column: 1 },
+    events: [lifecycleEvent(1)],
+    stackScalars: [],
+    staticObjects: [],
+    heapObjects: [],
+    arrays: [],
+    omittedArrayObjects: 0,
+    hasHeapAllocationCalls: false,
+    aggregates: [],
+    omittedAggregateObjects: 0,
+  });
+
+  const selectedDocumentB = createExecutionDocumentSnapshot('document-b', 'main.c', 1, 'int main(void) { return 7; }');
+  assert.equal(request.snapshot.fileName, 'main.c');
+  assert.equal(request.snapshot.source, source);
+  assert.deepEqual(request.snapshot.files.map(file => [file.name, file.source]), [['main.c', source]]);
+  assert.deepEqual(request.snapshot.translationUnits, ['main.c']);
+  assert.equal(controller.state.document.documentId, 'document-a');
+  assert.equal(controller.state.document.sourceRevision, 5);
+  assert.equal(controller.state.document.source, source);
+  assert.equal(controller.state.location.file, 'main.c');
+  assert.equal(controller.state.lifecycle.eventCount, 1);
+  assert.equal(Object.isFrozen(controller.state.document), true);
+  assert.equal(selectedDocumentB.documentId, 'document-b');
+  assert.equal(controller.state.document.documentId, 'document-a');
+
+  controller.dispose();
+});
+
+test('debug history selects captured source by location and restores it when moving backward', () => {
+  const mainSource = '#include "local.h"\nint main(void) { return helper(); }\n';
+  const headerSource = 'int helper(void);\n';
+  const helperSource = 'int helper(void) {\n  return 7;\n}\n';
+  const workspaceFiles = [
+    { id: 'main-id', name: 'main.c', source: mainSource },
+    { id: 'header-id', name: 'local.h', source: headerSource },
+    { id: 'helper-id', name: 'helper.c', source: helperSource },
+  ];
+  const snapshot = createWorkspaceSourceSnapshot(
+    createExecutionDocumentSnapshot('main-id', 'main.c', 4, mainSource),
+    workspaceFiles,
+  );
+  const workers = [];
+  const controller = new MemoryViewerController(snapshot, {
+    workerFactory: () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    },
+    timers: new FakeTimers(),
+  });
+  controller.start();
+  const worker = workers[0];
+  const request = worker.messages[0];
+  const jobId = request.jobId;
+
+  assert.deepEqual(request.snapshot.translationUnits, ['main.c']);
+  assert.equal(Object.isFrozen(request.snapshot), true);
+  assert.equal(Object.isFrozen(request.snapshot.files), true);
+  assert.equal(controller.state.sourceFileName, 'main.c');
+  worker.emit({
+    type: 'debug-ready',
+    jobId,
+    location: { file: 'main.c', line: 2, column: 1 },
+    events: [],
+    stackScalars: [],
+    staticObjects: [],
+    heapObjects: [],
+    arrays: [],
+    omittedArrayObjects: 0,
+    hasHeapAllocationCalls: false,
+    aggregates: [],
+    omittedAggregateObjects: 0,
+  });
+
+  assert.equal(controller.state.source, mainSource);
+  assert.equal(controller.state.sourceFileName, 'main.c');
+  assert.equal(formatMemoryViewerLocationLabel(controller.state.location, controller.state.sourceFileName, () => ''), 'main.c:2:1');
+  controller.next();
+  worker.emit({
+    type: 'debug-progress',
+    jobId,
+    requestId: 1,
+    progress: { kind: 'paused', location: { file: 'helper.c', line: 2, column: 3 }, metrics },
+    events: [],
+    stackScalars: [],
+    staticObjects: [],
+    heapObjects: [],
+    arrays: [],
+    omittedArrayObjects: 0,
+    aggregates: [],
+    omittedAggregateObjects: 0,
+  });
+
+  assert.equal(controller.state.location.file, 'helper.c');
+  assert.equal(controller.state.sourceFileName, 'helper.c');
+  assert.equal(controller.state.source, helperSource);
+  assert.equal(formatMemoryViewerLocationLabel(controller.state.location, controller.state.sourceFileName, () => ''), 'helper.c:2:3');
+  controller.previous();
+  assert.equal(controller.state.location.file, 'main.c');
+  assert.equal(controller.state.sourceFileName, 'main.c');
+  assert.equal(controller.state.source, mainSource);
+  assert.equal(formatMemoryViewerLocationLabel(controller.state.location, controller.state.sourceFileName, () => ''), 'main.c:2:1');
+  controller.next();
+  assert.equal(controller.state.location.file, 'helper.c');
+  assert.equal(controller.state.sourceFileName, 'helper.c');
+  assert.equal(controller.state.source, helperSource);
+  assert.equal(formatMemoryViewerLocationLabel(controller.state.location, controller.state.sourceFileName, () => ''), 'helper.c:2:3');
+
+  assert.equal(formatMemoryViewerLocationLabel(
+    { file: 'generated.c', line: 7, column: 4 },
+    controller.state.sourceFileName,
+    (_key, values) => `Location ${values.file}:${values.line}:${values.column}; outside main.c`,
+  ), 'Location generated.c:7:4; outside main.c', 'unknown source names retain the engine-reported location');
+  assert.equal(formatMemoryViewerLocationLabel(null, controller.state.sourceFileName, () => ''), '');
+
+  controller.dispose();
+});
 
 function ready(worker, line = 1, events = [], stackScalars = [], staticObjects = [], heapObjects = [], arrays = [], omittedArrayObjects = 0) {
   const jobId = worker.messages[0].jobId;
@@ -546,6 +708,67 @@ test('heapObjects retains engine order and restores IDs while navigating free an
     [41, '0x20000000000000'],
     [43, '0x20000000000001'],
   ], 'reusing an address creates another ID without confusing the two lifetimes');
+});
+
+test('the last freed heap card follows selected history, address reuse, and session resets', () => {
+  const { controller, workers } = setup();
+  const firstWorker = workers[0];
+  const firstAddress = '0x30000';
+  const secondAddress = '0x31000';
+  const first = heapSnapshot(61, firstAddress, 8);
+  const second = heapSnapshot(62, secondAddress, 16);
+  const jobId = ready(firstWorker, 1, [
+    heapObjectLifecycleEvent(1, 'object-create', first.id, first.address, first.size),
+    heapObjectLifecycleEvent(2, 'object-create', second.id, second.address, second.size),
+  ], [], [], [first, second]);
+  assert.equal(latestFreedMemoryViewerHeapObject(controller.state.lifecycle), null);
+
+  controller.next();
+  firstWorker.emit({
+    type: 'debug-progress', jobId, requestId: 1, progress: paused(2),
+    events: [heapObjectLifecycleEvent(3, 'object-delete', first.id, first.address, first.size)],
+    heapObjects: [second],
+  });
+  assert.deepEqual(latestFreedMemoryViewerHeapObject(controller.state.lifecycle), first);
+
+  controller.next();
+  firstWorker.emit({ type: 'debug-progress', jobId, requestId: 2, progress: paused(3), events: [], heapObjects: [second] });
+  assert.deepEqual(latestFreedMemoryViewerHeapObject(controller.state.lifecycle), first,
+    'an intermediate step retains the last released block');
+
+  const reused = heapSnapshot(63, firstAddress, 24);
+  controller.next();
+  firstWorker.emit({
+    type: 'debug-progress', jobId, requestId: 3, progress: paused(4),
+    events: [heapObjectLifecycleEvent(4, 'object-create', reused.id, reused.address, reused.size)],
+    heapObjects: [second, reused],
+  });
+  assert.deepEqual(latestFreedMemoryViewerHeapObject(controller.state.lifecycle), first,
+    'a live allocation at the same address remains a distinct ID from the released block');
+
+  controller.next();
+  firstWorker.emit({
+    type: 'debug-progress', jobId, requestId: 4, progress: paused(5),
+    events: [heapObjectLifecycleEvent(5, 'object-delete', second.id, second.address, second.size)],
+    heapObjects: [reused],
+  });
+  assert.deepEqual(latestFreedMemoryViewerHeapObject(controller.state.lifecycle), second,
+    'a later free replaces the earlier freed card while all live allocations remain in the snapshot');
+
+  controller.previous();
+  assert.equal(controller.state.stepIndex, 3);
+  assert.deepEqual(latestFreedMemoryViewerHeapObject(controller.state.lifecycle), first,
+    'Previous restores the released card from the selected prefix');
+  controller.next();
+  assert.deepEqual(latestFreedMemoryViewerHeapObject(controller.state.lifecycle), second,
+    'forward navigation restores the later release');
+
+  controller.start();
+  const nextJobId = ready(workers[1]);
+  assert.equal(nextJobId, workers[1].messages[0].jobId);
+  assert.equal(latestFreedMemoryViewerHeapObject(controller.state.lifecycle), null,
+    'a new debug session does not retain a card from the prior session');
+  controller.dispose();
 });
 
 test('history copies and restores parameter/variable origin with the scalar value', () => {
@@ -1086,6 +1309,49 @@ test('I/O on retains normal interactive input', () => {
     type: 'debug-stdin', jobId, requestId: 1, inputRequestId: 21,
     bytes: new TextEncoder().encode('5\n'),
   });
+});
+
+test('stdio.h in a captured included source keeps Memory Viewer input interactive', () => {
+  const mainSource = '#include "local.h"\nint main(void) { return read_value(); }';
+  const snapshot = createWorkspaceSourceSnapshot(
+    createExecutionDocumentSnapshot('main-id', 'main.c', 1, mainSource),
+    [
+      { id: 'main-id', name: 'main.c', source: mainSource },
+      { id: 'header-id', name: 'local.h', source: '#include "helper.c"\nint read_value(void);' },
+      { id: 'helper-id', name: 'helper.c', source: '#include <stdio.h>\nint read_value(void) { int value; scanf("%d", &value); return value; }' },
+    ],
+  );
+  const enableConsole = hasStdioIncludeInWorkspace(snapshot.files);
+  assert.equal(enableConsole, true, 'stdio.h in a source reached through local includes enables the input console');
+
+  const workers = [];
+  const controller = new MemoryViewerController(snapshot, {
+    enableConsole,
+    workerFactory: () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    },
+    timers: new FakeTimers(),
+  });
+  controller.start();
+  const worker = workers[0];
+  const jobId = ready(worker);
+  assert.equal(worker.messages[0].enableConsole, true);
+  controller.next();
+  worker.emit({
+    type: 'debug-progress', jobId, requestId: 1, inputRequestId: 31, progress: inputNeeded(2), events: [],
+    heapObjects: [], pointers: [], arrays: [], omittedArrayObjects: 0, aggregates: [], omittedAggregateObjects: 0,
+    stackScalars: [], staticObjects: [],
+  });
+
+  assert.equal(controller.state.status, 'waiting-input');
+  assert.equal(controller.state.inputRequestId, 31);
+  assert.equal(worker.messages.some(message => message.type === 'debug-stdin-eof'), false,
+    'input waits for the user instead of receiving automatic EOF');
+  assert.equal(controller.sendStdinLine('12'), true);
+  assert.equal(worker.messages.at(-1).type, 'debug-stdin');
+  controller.dispose();
 });
 
 test('stdin retains the same step across waits while history restores the transcript prefix', () => {

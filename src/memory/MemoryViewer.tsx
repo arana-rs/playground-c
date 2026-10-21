@@ -7,8 +7,10 @@ import { CodeEditor } from '../editor/CodeEditor.tsx';
 import { formatConsoleSegments } from '../execution/useRunner.ts';
 import type { ConsoleEntry, ConsoleStatusTone } from '../execution/useRunner.ts';
 import type { RunConfiguration } from '../execution/configuration.ts';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
 import { useMemoryViewer } from './useMemoryViewer.ts';
-import { hasDirectStdioInclude } from './stdioInclude.ts';
+import { hasStdioIncludeInWorkspace } from './stdioInclude.ts';
+import { formatMemoryViewerLocationLabel } from './memoryViewerLocationLabel.ts';
 import type { MemoryViewerPlaybackInterval } from './playbackSpeed.ts';
 import { MEMORY_VIEWER_MODES } from './MemoryViewerRegionModel.ts';
 import type { MemoryViewerMode } from './MemoryViewerRegionModel.ts';
@@ -25,7 +27,7 @@ export type { MemoryViewerAggregateBlockProps } from './MemoryViewerAggregateBlo
 export { MemoryViewerArrayBlock } from './MemoryViewerArrayBlock.tsx';
 
 interface MemoryViewerProps {
-  source: string;
+  document: WorkspaceSourceSnapshot;
   configuration: RunConfiguration;
   playbackIntervalMs: MemoryViewerPlaybackInterval;
   onClose: () => void;
@@ -71,7 +73,7 @@ function isOutsideDialogBounds(dialog: HTMLDialogElement, clientX: number, clien
   return clientX < bounds.left || clientX >= bounds.right || clientY < bounds.top || clientY >= bounds.bottom;
 }
 
-export function MemoryViewer({ source, configuration, playbackIntervalMs, onClose }: MemoryViewerProps) {
+export function MemoryViewer({ document, configuration, playbackIntervalMs, onClose }: MemoryViewerProps) {
   const { language, t } = useI18n();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -79,7 +81,9 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
   const backdropPointerIdRef = useRef<number | null>(null);
   const [mode, setMode] = useState<MemoryViewerMode>('minimal');
   const {
+    document: capturedDocument,
     source: frozenSource,
+    sourceFileName,
     location,
     status,
     isPlaying,
@@ -112,8 +116,8 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
     setConsoleEnabled,
     stop,
     transcriptRevision,
-  } = useMemoryViewer(source, configuration, false, playbackIntervalMs);
-  const hasStdioInclude = useMemo(() => hasDirectStdioInclude(frozenSource), [frozenSource]);
+  } = useMemoryViewer(document, configuration, false, playbackIntervalMs);
+  const hasStdioInclude = useMemo(() => hasStdioIncludeInWorkspace(document.files), [document.files]);
   const [ioPreference, setIoPreference] = useState(
     () => readMemoryViewerIoConsolePreference(() => window.localStorage),
   );
@@ -125,7 +129,7 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
   useEffect(() => {
     setConsoleEnabled(showIoConsole);
   }, [setConsoleEnabled, showIoConsole]);
-  const hasMainSourceLocation = location?.file === 'main.c';
+  const hasSourceLocation = location?.file === sourceFileName;
   const consoleTranscript = useMemo<readonly ConsoleEntry[]>(
     () => transcript.map(entry => entry.stream === 'system'
       ? { stream: 'system', text: entry.text, tone: entry.tone, role: entry.role }
@@ -133,8 +137,8 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
     [transcript, transcriptRevision],
   );
   const consoleSegments = useMemo(
-    () => formatConsoleSegments({ status: 'running', transcript: consoleTranscript, inputRequestId }),
-    [consoleTranscript, inputRequestId],
+    () => formatConsoleSegments({ status: 'running', document: capturedDocument, transcript: consoleTranscript, inputRequestId }),
+    [capturedDocument, consoleTranscript, inputRequestId],
   );
   const consoleStatus = getDebugConsoleStatus(status, isPlaying, isViewingHistory, inputRequestId, t);
 
@@ -184,11 +188,7 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
     onClose();
   }
 
-  const locationLabel = location
-    ? hasMainSourceLocation
-      ? `main.c:${location.line}:${location.column}`
-      : t('memoryViewer.location', { file: location.file, line: location.line, column: location.column })
-    : '';
+  const locationLabel = formatMemoryViewerLocationLabel(location, sourceFileName, t);
 
   return (
     <dialog
@@ -205,7 +205,7 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
         <header className="memory-viewer-header">
           <div className="memory-viewer-controls" aria-label={t('memoryViewer.controls')}>
             <Button
-              className="memory-viewer-control memory-viewer-icon-control"
+              className="memory-viewer-control memory-viewer-icon-control memory-viewer-play-control"
               variant="ghost"
               size="sm"
               type="button"
@@ -225,7 +225,7 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
               )}
             </Button>
             <Button
-              className="memory-viewer-control memory-viewer-icon-control"
+              className="memory-viewer-control memory-viewer-icon-control memory-viewer-step-control"
               variant="ghost"
               size="sm"
               type="button"
@@ -239,7 +239,7 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
               </svg>
             </Button>
             <Button
-              className="memory-viewer-control memory-viewer-icon-control"
+              className="memory-viewer-control memory-viewer-icon-control memory-viewer-step-control"
               variant="ghost"
               size="sm"
               type="button"
@@ -306,7 +306,7 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
           </div>
         </header>
         <div className="memory-viewer-filebar">
-          <SelectedFileTab fileName="main.c" />
+          <SelectedFileTab fileName={sourceFileName} />
           <span className="memory-viewer-status" role="status" aria-live="polite" aria-atomic="true">
             {isViewingHistory ? t('memoryViewer.status.historySelected') : getStatusLabel(status, isPlaying, t)}
           </span>
@@ -324,13 +324,15 @@ export function MemoryViewer({ source, configuration, playbackIntervalMs, onClos
         )}
         <main className="editor-pane memory-viewer-editor-pane">
           <CodeEditor
+            key={sourceFileName}
             editorRef={editorRef}
             text={frozenSource}
+            fileName={sourceFileName}
             initialText={frozenSource}
-            activeLine={hasMainSourceLocation ? location.line : 1}
-            highlightLine={hasMainSourceLocation ? location.line : undefined}
+            activeLine={hasSourceLocation ? location.line : 1}
+            highlightLine={hasSourceLocation ? location.line : undefined}
             readOnly
-            showActiveLine={hasMainSourceLocation}
+            showActiveLine={hasSourceLocation}
             compactReadOnlyGutter
           />
         </main>

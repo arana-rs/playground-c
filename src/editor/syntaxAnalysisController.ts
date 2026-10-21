@@ -1,11 +1,19 @@
 import type { Diagnostic, PrepareOptions, PrepareResource } from '@playground/c11-engine/core';
 import type { SyntaxAnalysisRequest, SyntaxAnalysisResponse } from './syntaxAnalysisProtocol.ts';
+import { cloneWorkspaceSourceSnapshot, sameWorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
 
 export type SyntaxAnalysisState =
   | { status: 'off' }
   | { status: 'analyzing' }
   | { status: 'ok' }
-  | { status: 'analysis-errors'; diagnostics: readonly Diagnostic[]; diagnosticCount: number; truncated: boolean }
+  | {
+    status: 'analysis-errors';
+    snapshot: WorkspaceSourceSnapshot;
+    diagnostics: readonly Diagnostic[];
+    diagnosticCount: number;
+    truncated: boolean;
+  }
   | { status: 'limit'; resource: PrepareResource }
   | { status: 'unavailable' }
   | { status: 'timeout' };
@@ -48,7 +56,7 @@ export class SyntaxAnalysisController {
   private readonly debounceMs: number;
   private enabled = false;
   private composing = false;
-  private source = '';
+  private snapshot: WorkspaceSourceSnapshot | null = null;
   private options: PrepareOptions = {};
   private timeoutMs: number;
   private state: SyntaxAnalysisState = OFF_STATE;
@@ -56,6 +64,7 @@ export class SyntaxAnalysisController {
   private debounceTimer: number | null = null;
   private timeoutTimer: number | null = null;
   private activeJobId: number | null = null;
+  private activeSnapshot: WorkspaceSourceSnapshot | null = null;
   private nextJobId = 0;
 
   constructor(options: SyntaxAnalysisControllerOptions) {
@@ -83,9 +92,9 @@ export class SyntaxAnalysisController {
     this.queueLatestSource();
   }
 
-  setSource(source: string): void {
-    if (this.source === source) return;
-    this.source = source;
+  setSnapshot(snapshot: WorkspaceSourceSnapshot): void {
+    if (this.snapshot && sameWorkspaceSourceSnapshot(this.snapshot, snapshot)) return;
+    this.snapshot = cloneWorkspaceSourceSnapshot(snapshot);
     if (!this.enabled) return;
     this.cancelPendingWork();
     this.publish(ANALYZING_STATE);
@@ -142,6 +151,8 @@ export class SyntaxAnalysisController {
 
   private startLatestSource(): void {
     if (!this.enabled || this.composing) return;
+    const snapshot = this.snapshot;
+    if (!snapshot) return;
     let worker = this.worker;
     try {
       if (!worker) {
@@ -158,10 +169,12 @@ export class SyntaxAnalysisController {
 
     const jobId = ++this.nextJobId;
     this.activeJobId = jobId;
+    this.activeSnapshot = snapshot;
     this.timeoutTimer = this.timers.setTimeout(() => {
       this.timeoutTimer = null;
       if (this.activeJobId !== jobId) return;
       this.activeJobId = null;
+      this.activeSnapshot = null;
       this.terminateWorker();
       this.publish({ status: 'timeout' });
     }, this.timeoutMs);
@@ -169,7 +182,7 @@ export class SyntaxAnalysisController {
     const request: SyntaxAnalysisRequest = {
       type: 'analyze',
       jobId,
-      source: this.source,
+      snapshot,
       options: this.options,
     };
     try {
@@ -182,7 +195,13 @@ export class SyntaxAnalysisController {
   private receiveResponse(response: SyntaxAnalysisResponse): void {
     if (!response || response.jobId !== this.activeJobId) return;
     this.activeJobId = null;
+    const snapshot = this.activeSnapshot;
+    this.activeSnapshot = null;
     this.clearTimeoutTimer();
+    if (!snapshot) {
+      this.publish({ status: 'unavailable' });
+      return;
+    }
     if (response.type === 'error') {
       this.publish({ status: 'unavailable' });
       return;
@@ -199,6 +218,7 @@ export class SyntaxAnalysisController {
       }
       this.publish({
         status: 'analysis-errors',
+        snapshot,
         diagnostics: result.diagnostics,
         diagnosticCount: result.diagnostics.length,
         truncated: result.truncated,
@@ -213,6 +233,7 @@ export class SyntaxAnalysisController {
   private failActiveJob(status: 'unavailable'): void {
     if (this.activeJobId === null) return;
     this.activeJobId = null;
+    this.activeSnapshot = null;
     this.clearTimeoutTimer();
     this.terminateWorker();
     this.publish({ status });
@@ -223,6 +244,7 @@ export class SyntaxAnalysisController {
     this.clearTimeoutTimer();
     if (this.activeJobId !== null) {
       this.activeJobId = null;
+      this.activeSnapshot = null;
       this.terminateWorker();
     }
   }

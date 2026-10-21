@@ -43,7 +43,10 @@ function readVisibleViewportRect() {
   );
 }
 
-export function useConsoleLayout(editorRef: { current: HTMLTextAreaElement | null }) {
+export function useConsoleLayout(
+  editorRef: { current: HTMLTextAreaElement | null },
+  workspacePersistenceLocked = false,
+) {
   const [viewportRect, setViewportRect] = useState(() => readVisibleViewportRect());
   const [preferredConsoleHeight, setPreferredConsoleHeight] = useState(
     () => getInitialConsoleHeight(readVisibleViewportRect().height),
@@ -244,7 +247,7 @@ export function useConsoleLayout(editorRef: { current: HTMLTextAreaElement | nul
     left: viewportRect.left,
     width: viewportRect.width,
     height: viewportRect.height,
-    gridTemplateRows: `${playgroundRows.header}px ${playgroundRows.tabs}px minmax(${playgroundRows.editorMinimum}px, 1fr) ${playgroundRows.separator}px ${consoleVisible ? consoleHeight : 0}px ${playgroundRows.footer}px`,
+    gridTemplateRows: `${playgroundRows.header}px ${workspacePersistenceLocked ? 'max-content' : `${playgroundRows.tabs}px`} minmax(${playgroundRows.editorMinimum}px, 1fr) ${playgroundRows.separator}px ${consoleVisible ? consoleHeight : 0}px ${playgroundRows.footer}px`,
   };
 
   return {

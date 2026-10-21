@@ -2,19 +2,20 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { PrepareOptions } from '@playground/c11-engine/core';
 import { SyntaxAnalysisController } from './syntaxAnalysisController.ts';
 import type { SyntaxAnalysisState, SyntaxAnalysisWorker } from './syntaxAnalysisController.ts';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
 
 function createSyntaxAnalysisWorker(): SyntaxAnalysisWorker {
   return new Worker(new URL('./syntax.worker.ts', import.meta.url), { type: 'module' }) as unknown as SyntaxAnalysisWorker;
 }
 
 export function useSyntaxAnalysis({
-  source,
+  snapshot,
   enabled,
   composing,
   options,
   timeoutMs,
 }: {
-  source: string;
+  snapshot: WorkspaceSourceSnapshot;
   enabled: boolean;
   composing: boolean;
   options: PrepareOptions;
@@ -33,12 +34,12 @@ export function useSyntaxAnalysis({
   const controller = controllerRef.current;
 
   useLayoutEffect(() => {
-    controller.setSource(source);
+    controller.setSnapshot(snapshot);
     controller.setOptions(options);
     controller.setTimeoutMs(timeoutMs);
     controller.setComposing(composing);
     controller.setEnabled(enabled);
-  }, [controller, source, enabled, composing, options, timeoutMs]);
+  }, [controller, snapshot, enabled, composing, options, timeoutMs]);
 
   useEffect(() => () => controller.dispose(), [controller]);
 

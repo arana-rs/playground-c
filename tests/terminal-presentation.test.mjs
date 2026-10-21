@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { TerminalPresentation } from '../src/components/terminalPresentation.ts';
+import { getConsoleCopyText, TerminalPresentation } from '../src/components/terminalPresentation.ts';
 import { formatConsole, formatConsoleSegments } from '../src/execution/useRunner.ts';
 
 const ESC = '\u001b';
@@ -76,6 +76,18 @@ test('stdin is literal, stdout and stderr share the screen, and protected diagno
   assert.equal(screenText(snapshot), 'finished');
   assert.equal(protectedText(snapshot), 'Runtime error: diagnostic');
   assert.equal(snapshot.protectedSegments[0]?.tone, 'error');
+});
+
+test('console copy keeps submitted input and diagnostics, omits marked status text, and is empty without copyable output', () => {
+  const snapshot = render(
+    output('prompt: '),
+    input('42\n'),
+    protectedOutput('Runtime error: diagnostic'),
+    { tone: 'system', text: '\nexit code: 0', role: 'protected', stream: 'system', copyable: false },
+  );
+
+  assert.equal(getConsoleCopyText(snapshot), 'prompt: 42\nRuntime error: diagnostic');
+  assert.equal(getConsoleCopyText(render()), '');
 });
 
 test('formatter retains stdout, stderr, stdin, and system roles without changing their text', () => {

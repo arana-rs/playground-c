@@ -3,6 +3,16 @@ import type {
 } from '@playground/c11-engine/core';
 import { RUN_CONFIGURATION } from '../execution/configuration.ts';
 import type { RunConfiguration } from '../execution/configuration.ts';
+import { getBuildPlanEntryFile, resolveBuildPlan } from '../build/buildPlan.ts';
+import {
+  cloneWorkspaceSourceSnapshot,
+  createExecutionDocumentSnapshot,
+  createWorkspaceSourceSnapshot,
+} from '../execution/documentSnapshot.ts';
+import type {
+  ExecutionDocumentSnapshot,
+  WorkspaceSourceSnapshot,
+} from '../execution/documentSnapshot.ts';
 import type { MemoryViewerProgress } from './protocol.ts';
 import { MemoryViewerConsole } from './MemoryViewerConsole.ts';
 import type { MemoryViewerConsoleCheckpoint } from './MemoryViewerConsole.ts';
@@ -52,6 +62,8 @@ function defaultTimers() {
 /** Owns a single debug Worker and a bounded cursor over already-produced VM steps. */
 export class MemoryViewerController {
   private readonly configuration: RunConfiguration;
+  private document: ExecutionDocumentSnapshot;
+  private sourceSnapshot: WorkspaceSourceSnapshot;
   private readonly maxHistoryEntries: number;
   private playbackIntervalMs: number;
   private readonly timers: NonNullable<MemoryViewerControllerOptions['timers']>;
@@ -67,10 +79,24 @@ export class MemoryViewerController {
   private historyOffset = 0;
   private hasHeapAllocationCalls = false;
   private source: string;
+  private entrySourceFile: { readonly name: string; readonly source: string } | null = null;
   private currentState: MemoryViewerState;
 
-  constructor(source = '', options: MemoryViewerControllerOptions = {}) {
-    this.source = source;
+  constructor(source: string | ExecutionDocumentSnapshot | WorkspaceSourceSnapshot = '', options: MemoryViewerControllerOptions = {}) {
+    const document = typeof source === 'string'
+      ? createExecutionDocumentSnapshot(
+        options.documentId ?? 'main',
+        options.fileName ?? 'main.c',
+        options.sourceRevision ?? 0,
+        source,
+      )
+      : createExecutionDocumentSnapshot(source.documentId, source.fileName, source.sourceRevision, source.source);
+    this.sourceSnapshot = typeof source === 'object' && 'files' in source
+      ? cloneWorkspaceSourceSnapshot(source)
+      : createWorkspaceSourceSnapshot(document);
+    this.document = document;
+    this.source = this.document.source;
+    this.updateEntrySourceFile();
     this.configuration = options.configuration ?? RUN_CONFIGURATION;
     this.maxHistoryEntries = Math.max(1, options.maxHistoryEntries ?? this.configuration.memoryViewer.historySteps);
     this.playbackIntervalMs = Math.max(0, options.playbackIntervalMs ?? this.configuration.memoryViewer.playIntervalMs);
@@ -134,8 +160,16 @@ export class MemoryViewerController {
     const viewingHistory = this.cursor < this.history.length - 1
       || (this.session.originStep !== null && !isAtPendingFrontier);
     const isAtTranscriptFrontier = !entry || this.cursor === this.history.length - 1;
+    const locationFileName = entry?.location?.file;
+    const sourceFile = locationFileName
+      ? this.sourceSnapshot.files.find(file => file.name === locationFileName)
+      : undefined;
+    const fallbackSourceFile = this.entrySourceFile;
+    const sourceFileName = sourceFile?.name ?? fallbackSourceFile?.name ?? this.document.fileName;
     return {
-      source: this.source,
+      document: this.document,
+      source: sourceFile?.source ?? fallbackSourceFile?.source ?? this.source,
+      sourceFileName,
       location: isInputWaitVisible ? this.session.inputLocation : entry?.location ?? null,
       status,
       isPlaying: this.isPlaying,
@@ -162,11 +196,38 @@ export class MemoryViewerController {
     for (const listener of this.listeners) listener(this.currentState);
   }
 
-  start(source = this.source): void {
+  private updateEntrySourceFile(): void {
+    const resolution = resolveBuildPlan(this.sourceSnapshot.files, this.document.fileName);
+    this.entrySourceFile = getBuildPlanEntryFile(this.sourceSnapshot.files, resolution)
+      ?? this.sourceSnapshot.files.find(file => file.name === this.document.fileName)
+      ?? null;
+  }
+
+  start(source: string | WorkspaceSourceSnapshot = this.sourceSnapshot): void {
     this.pausePlayback();
     this.session.reset();
     this.disposed = false;
-    this.source = source;
+    if (typeof source === 'string') {
+      if (source !== this.document.source) {
+        this.document = createExecutionDocumentSnapshot(
+          this.document.documentId,
+          this.document.fileName,
+          this.document.sourceRevision + 1,
+          source,
+        );
+        this.sourceSnapshot = createWorkspaceSourceSnapshot(this.document, this.sourceSnapshot.files);
+      }
+    } else {
+      this.sourceSnapshot = cloneWorkspaceSourceSnapshot(source);
+      this.document = createExecutionDocumentSnapshot(
+        this.sourceSnapshot.documentId,
+        this.sourceSnapshot.fileName,
+        this.sourceSnapshot.sourceRevision,
+        this.sourceSnapshot.source,
+      );
+    }
+    this.updateEntrySourceFile();
+    this.source = this.document.source;
     this.consoleJournal.reset();
     this.snapshots.reset();
     this.isPlaying = false;
@@ -175,7 +236,7 @@ export class MemoryViewerController {
     this.historyOffset = 0;
     this.hasHeapAllocationCalls = false;
     this.publish();
-    this.session.start(source);
+    this.session.start(this.sourceSnapshot);
   }
 
   togglePlay(): void {

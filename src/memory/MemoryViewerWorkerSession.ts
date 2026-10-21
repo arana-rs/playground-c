@@ -1,5 +1,6 @@
 import type { DebugSourceLocation } from '@playground/c11-engine/core';
 import type { RunConfiguration } from '../execution/configuration.ts';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
 import { MemoryViewerConsole } from './MemoryViewerConsole.ts';
 import type { MemoryViewerControllerOptions } from './memoryViewerControllerTypes.ts';
 import type { MemoryViewerCommand, MemoryViewerProgress, MemoryViewerResponse } from './protocol.ts';
@@ -86,7 +87,7 @@ export class MemoryViewerWorkerSession {
     this.vmAlive = false;
   }
 
-  start(source: string): void {
+  start(snapshot: WorkspaceSourceSnapshot): void {
     let worker: Worker;
     try {
       worker = this.workerFactory();
@@ -113,7 +114,7 @@ export class MemoryViewerWorkerSession {
 
     try {
       const command: MemoryViewerCommand = {
-        type: 'debug-start', jobId, fileName: 'main.c', source,
+        type: 'debug-start', jobId, snapshot,
         configuration: { options: this.configuration.options, debug: this.configuration.debug },
         enableConsole: this.consoleJournal.isEnabled,
         consoleGeneration: this.consoleJournal.consoleGeneration,

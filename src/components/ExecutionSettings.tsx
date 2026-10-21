@@ -16,6 +16,8 @@ interface ExecutionSettingsProps {
   playbackIntervalMs: MemoryViewerPlaybackInterval;
   onApply: (settings: ExecutionSettingsValue) => void;
   onPlaybackIntervalChange: (intervalMs: MemoryViewerPlaybackInterval) => void;
+  onLoadDebugExample: () => void;
+  debugExampleDisabled?: boolean;
 }
 
 function toDraft(settings: ExecutionSettingsValue): DraftSettings {
@@ -31,7 +33,14 @@ function parsePositiveSafeInteger(value: string): number | null {
   return isPositiveSafeInteger(parsed) ? parsed : null;
 }
 
-export function ExecutionSettings({ value, playbackIntervalMs, onApply, onPlaybackIntervalChange }: ExecutionSettingsProps) {
+export function ExecutionSettings({
+  value,
+  playbackIntervalMs,
+  onApply,
+  onPlaybackIntervalChange,
+  onLoadDebugExample,
+  debugExampleDisabled = false,
+}: ExecutionSettingsProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(() => toDraft(value));
@@ -195,6 +204,22 @@ export function ExecutionSettings({ value, playbackIntervalMs, onApply, onPlayba
               {stepsInvalid && <span className="execution-settings-error" id={stepsErrorId}>{t('executionSettings.invalid')}</span>}
             </label>
             <div className="execution-settings-actions">
+              <Button
+                className="execution-settings-debug-example-button execution-settings-apply-button"
+                variant="secondary"
+                size="sm"
+                type="button"
+                aria-label={t('executionSettings.loadDebugExample')}
+                title={t('executionSettings.loadDebugExample')}
+                disabled={debugExampleDisabled}
+                onClick={onLoadDebugExample}
+                leadingIcon={(
+                  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                    <path d="M8 4.15c-1.46 0-2.45 1.05-2.45 2.55v3c0 1.5.99 2.55 2.45 2.55s2.45-1.05 2.45-2.55v-3c0-1.5-.99-2.55-2.45-2.55Z" />
+                    <path d="M8 4.15V2.2m-2.1 2.65L4.55 3.5m5.55 1.35 1.35-1.35M5.55 6H2.8m10.4 0h-2.75M5.55 8.6H2.2m11.6 0h-3.35m-4.9 2.15-1.7 1.55m7.1-1.55 1.7 1.55" />
+                  </svg>
+                )}
+              />
               <Button className="execution-settings-apply-button" variant="secondary" size="sm" type="submit">
                 {t('executionSettings.apply')}
               </Button>

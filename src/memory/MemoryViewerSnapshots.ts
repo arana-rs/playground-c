@@ -12,7 +12,11 @@ import type { PersistentSnapshotBatch } from './PersistentSnapshotHistory.ts';
 import { cloneMemoryViewerArraySnapshot, sameMemoryViewerArraySnapshot } from './arraySnapshots.ts';
 import { cloneMemoryViewerAggregateSnapshot, sameMemoryViewerAggregateSnapshot } from './aggregateSnapshots.ts';
 import { cloneMemoryViewerPointerSnapshot, sameMemoryViewerPointerSnapshot } from './pointerSnapshots.ts';
-import type { MemoryViewerActiveScope, MemoryViewerLifecycleBatch } from './memoryViewerControllerTypes.ts';
+import type {
+  MemoryViewerActiveScope,
+  MemoryViewerFreedHeapEvent,
+  MemoryViewerLifecycleBatch,
+} from './memoryViewerControllerTypes.ts';
 
 export interface MemoryViewerSnapshotPayload {
   readonly events: readonly DebugEvent[];
@@ -151,11 +155,16 @@ export class MemoryViewerSnapshots {
     if (!this.usedHeap && freshEvents.some(event => event.kind === 'object-create' && event.duration === 'heap')) {
       this.usedHeap = true;
     }
-    this.lifecycle = {
+    let latestFreedHeapEvent = this.lifecycle?.latestFreedHeapEvent ?? null;
+    for (const event of freshEvents) {
+      if (isFreedHeapEvent(event)) latestFreedHeapEvent = event;
+    }
+    this.lifecycle = Object.freeze({
       previous: this.lifecycle,
-      events: freshEvents,
+      events: Object.freeze(freshEvents),
+      latestFreedHeapEvent,
       eventCount: (this.lifecycle?.eventCount ?? 0) + freshEvents.length,
-    };
+    });
     // Lifecycle events are authoritative: frame-exit, errors, and limits do not imply scope exits.
     for (const event of freshEvents) {
       if (event.kind === 'scope-enter' && event.scopeId !== null) {
@@ -172,6 +181,10 @@ export class MemoryViewerSnapshots {
       }
     }
   }
+}
+
+function isFreedHeapEvent(event: DebugEvent): event is MemoryViewerFreedHeapEvent {
+  return event.kind === 'object-delete' && event.duration === 'heap' && event.origin === 'heap';
 }
 
 /** Materialize a selected persistent lifecycle prefix only when a consumer needs it. */

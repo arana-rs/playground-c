@@ -1,4 +1,8 @@
 import { createDebugSession, prepare } from '@playground/c11-engine/core';
+import {
+  createExecutionDocumentSnapshot,
+  createWorkspaceSourceSnapshot,
+} from '../execution/documentSnapshot.ts';
 import type {
   DebugExecutionSession,
   DebugAggregateInspection,
@@ -9,9 +13,9 @@ import type {
   DebugProgress,
   DebugScalarSnapshot,
   DebugStaticObjectSnapshot,
-  SourceProject,
 } from '@playground/c11-engine/core';
 import { RUN_CONFIGURATION } from '../execution/configuration.ts';
+import { createBuildPlanProject, resolveBuildPlan } from '../build/buildPlan.ts';
 import { OutputSnapshotDeltas } from '../execution/outputSnapshotDeltas.ts';
 import { createWorkerRuntimeServices } from '../execution/workerRuntimeServices.ts';
 import type { MemoryViewerCommand, MemoryViewerProgress, MemoryViewerResponse } from './protocol.ts';
@@ -176,12 +180,23 @@ function begin(command: Extract<MemoryViewerCommand, { type: 'debug-start' }>) {
     options: RUN_CONFIGURATION.options,
     debug: RUN_CONFIGURATION.debug,
   };
-  const project: SourceProject = {
-    entry: command.fileName,
-    files: [{ name: command.fileName, source: command.source }],
-  };
+  const snapshot = 'snapshot' in command
+    ? command.snapshot
+    : createWorkspaceSourceSnapshot(createExecutionDocumentSnapshot(
+      command.fileName,
+      command.fileName,
+      0,
+      command.source,
+    ));
 
   try {
+    const resolution = resolveBuildPlan(snapshot.files, snapshot.fileName);
+    const project = createBuildPlanProject(snapshot.files, resolution);
+    if (!project || resolution.status !== 'ready') {
+      startupError(command.jobId, null, 'error', formatDiagnostics(resolution.diagnostics));
+      return;
+    }
+
     const preparation = prepare(project, configuration.options.prepare);
     if (preparation.kind !== 'prepared') {
       startupError(

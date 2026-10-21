@@ -94,7 +94,99 @@ export interface MemoryViewerHeapExitPresentation {
   readonly deletedObjects: readonly DebugHeapObjectSnapshot[];
   readonly previousObjectIds: readonly number[];
   readonly focusId: number | null;
-  readonly phase: 'waiting' | 'fading';
+  readonly completedObjectId: number | null;
+  readonly phase: 'waiting' | 'fading' | 'complete';
+}
+
+export function createMemoryViewerHeapExitPresentation(
+  stepIndex: number,
+  releasedObject: DebugHeapObjectSnapshot,
+  previousObjects: readonly DebugHeapObjectSnapshot[],
+): MemoryViewerHeapExitPresentation {
+  return {
+    stepIndex,
+    deletedObjects: [releasedObject],
+    previousObjectIds: previousObjects.map(object => object.id),
+    focusId: releasedObject.id,
+    completedObjectId: null,
+    phase: 'waiting',
+  };
+}
+
+export function resolveMemoryViewerHeapExitPresentation(
+  presentation: MemoryViewerHeapExitPresentation,
+  previousRelease: DebugHeapObjectSnapshot | null,
+  currentRelease: DebugHeapObjectSnapshot | null,
+  stepIndex: number,
+  previousObjects: readonly DebugHeapObjectSnapshot[],
+  fallbackRelease: DebugHeapObjectSnapshot | null = null,
+): MemoryViewerHeapExitPresentation {
+  if (previousRelease?.id !== currentRelease?.id) {
+    if (currentRelease) return createMemoryViewerHeapExitPresentation(stepIndex, currentRelease, previousObjects);
+    if (previousRelease && shouldDisplayMemoryViewerFreedHeapObject(previousRelease, presentation)) {
+      return {
+        ...createMemoryViewerHeapExitPresentation(stepIndex, previousRelease, previousObjects),
+        phase: 'fading',
+      };
+    }
+    return presentation.phase === 'fading'
+      && previousRelease !== null
+      && memoryViewerHeapPresentationHasObject(presentation, previousRelease.id)
+      ? presentation
+      : EMPTY_HEAP_EXIT_PRESENTATION;
+  }
+  if (currentRelease) {
+    return memoryViewerHeapPresentationHasObject(presentation, currentRelease.id)
+      ? presentation
+      : createMemoryViewerHeapExitPresentation(stepIndex, currentRelease, previousObjects);
+  }
+  return fallbackRelease
+    ? createMemoryViewerHeapExitPresentation(stepIndex, fallbackRelease, previousObjects)
+    : EMPTY_HEAP_EXIT_PRESENTATION;
+}
+
+export function completeMemoryViewerHeapExitPresentation(
+  presentation: MemoryViewerHeapExitPresentation,
+): MemoryViewerHeapExitPresentation {
+  if (presentation.phase === 'complete') return presentation;
+  return {
+    ...EMPTY_HEAP_EXIT_PRESENTATION,
+    stepIndex: presentation.stepIndex,
+    completedObjectId: presentation.deletedObjects.at(-1)?.id ?? presentation.completedObjectId,
+    phase: 'complete',
+  };
+}
+
+function memoryViewerHeapPresentationHasObject(
+  presentation: MemoryViewerHeapExitPresentation,
+  objectId: number,
+): boolean {
+  return presentation.completedObjectId === objectId
+    || presentation.deletedObjects.some(object => object.id === objectId);
+}
+
+export function shouldDisplayMemoryViewerFreedHeapObject(
+  releasedObject: DebugHeapObjectSnapshot | null,
+  presentation: MemoryViewerHeapExitPresentation,
+): boolean {
+  if (!releasedObject) return false;
+  if (!memoryViewerHeapPresentationHasObject(presentation, releasedObject.id)) return true;
+  return presentation.phase === 'waiting';
+}
+
+export function isMemoryViewerHeapEmpty(
+  heapObjects: readonly DebugHeapObjectSnapshot[],
+  aggregates: readonly DebugAggregateSnapshot[],
+  releasedObject: DebugHeapObjectSnapshot | null,
+  presentation: MemoryViewerHeapExitPresentation,
+): boolean {
+  const releaseHasFinished = releasedObject === null
+    ? presentation.deletedObjects.length === 0 || presentation.phase === 'complete'
+    : memoryViewerHeapPresentationHasObject(presentation, releasedObject.id)
+      && presentation.phase === 'complete';
+  return heapObjects.length === 0
+    && !aggregates.some(aggregate => aggregate.region === 'heap')
+    && releaseHasFinished;
 }
 
 export interface MemoryViewerValueChangePresentation {
@@ -125,6 +217,7 @@ export const EMPTY_HEAP_EXIT_PRESENTATION: MemoryViewerHeapExitPresentation = {
   deletedObjects: [],
   previousObjectIds: [],
   focusId: null,
+  completedObjectId: null,
   phase: 'waiting',
 };
 

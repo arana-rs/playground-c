@@ -10,6 +10,7 @@ import type {
 } from '@playground/c11-engine/core';
 import { RUN_CONFIGURATION } from '../execution/configuration.ts';
 import type { RunConfiguration } from '../execution/configuration.ts';
+import type { ExecutionDocumentSnapshot } from '../execution/documentSnapshot.ts';
 
 export const MEMORY_VIEWER_PLAY_INTERVAL_MS = RUN_CONFIGURATION.memoryViewer.playIntervalMs;
 export const MEMORY_VIEWER_HISTORY_LIMIT = RUN_CONFIGURATION.memoryViewer.historySteps;
@@ -23,10 +24,22 @@ export interface MemoryViewerTranscriptEntry {
   readonly role?: 'input' | 'protected';
 }
 
+/** Heap deletion event retained by each lifecycle prefix for constant-time history lookup. */
+export type MemoryViewerFreedHeapEvent = DebugEvent & {
+  readonly kind: 'object-delete';
+  readonly duration: 'heap';
+  readonly origin: 'heap';
+  readonly allocationId: number;
+  readonly addressVirtual: bigint;
+  readonly size: number;
+};
+
 /** Immutable, persistent batches let later UI replay lifecycle events without copying each prefix. */
 export interface MemoryViewerLifecycleBatch {
   readonly previous: MemoryViewerLifecycleBatch | null;
   readonly events: readonly DebugEvent[];
+  /** Latest heap deletion in this prefix, shared by batches that contain no newer deletion. */
+  readonly latestFreedHeapEvent: MemoryViewerFreedHeapEvent | null;
   readonly eventCount: number;
 }
 
@@ -40,8 +53,11 @@ export interface MemoryViewerActiveScope {
 }
 
 export interface MemoryViewerState {
-  /** Source captured when the viewer mounted. */
+  /** Identity and exact source owned by this debug history. */
+  readonly document: ExecutionDocumentSnapshot;
+  /** File whose captured source matches the selected debug location. */
   readonly source: string;
+  readonly sourceFileName: string;
   readonly location: DebugSourceLocation | null;
   readonly status: MemoryViewerStatus;
   readonly isPlaying: boolean;
@@ -88,6 +104,9 @@ export interface MemoryViewerState {
 }
 
 export interface MemoryViewerControllerOptions {
+  readonly documentId?: string;
+  readonly fileName?: string;
+  readonly sourceRevision?: number;
   readonly configuration?: RunConfiguration;
   readonly workerFactory?: () => Worker;
   readonly maxHistoryEntries?: number;

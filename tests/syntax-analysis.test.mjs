@@ -3,6 +3,10 @@ import test from 'node:test';
 import { SyntaxAnalysisController } from '../src/editor/syntaxAnalysisController.ts';
 import { analyzeSyntaxRequest } from '../src/editor/syntaxAnalysisWorker.ts';
 import {
+  createExecutionDocumentSnapshot,
+  createWorkspaceSourceSnapshot,
+} from '../src/execution/documentSnapshot.ts';
+import {
   readSyntaxAnalysisMode,
   SYNTAX_ANALYSIS_STORAGE_KEY,
   writeSyntaxAnalysisMode,
@@ -73,6 +77,17 @@ function createController({ timeoutMs = 10_000, debounceMs = 300 } = {}) {
   return { controller, workers, timers, states };
 }
 
+function workspaceSnapshot(source, { documentId = 'main', fileName = 'main.c', files = [] } = {}) {
+  return createWorkspaceSourceSnapshot(
+    createExecutionDocumentSnapshot(documentId, fileName, 0, source),
+    [{ id: documentId, name: fileName, source }, ...files],
+  );
+}
+
+function setSource(controller, source) {
+  controller.setSnapshot(workspaceSnapshot(source));
+}
+
 function resultResponse(jobId, result) {
   return { type: 'result', jobId, result };
 }
@@ -94,14 +109,14 @@ test('syntax analysis is lazy, debounced, and sends only the latest source with 
   const { controller, workers, timers, states } = createController();
   const prepareOptions = { limits: { maxDepth: 256 } };
 
-  controller.setSource('int first;');
+  setSource(controller, 'int first;');
   timers.runAll();
   assert.equal(workers.length, 0);
 
   controller.setEnabled(true);
   assert.equal(controller.currentState.status, 'analyzing');
-  controller.setSource('int stale;');
-  controller.setSource('int latest;');
+  setSource(controller, 'int stale;');
+  setSource(controller, 'int latest;');
   assert.equal(workers.length, 0);
   timers.runNext();
 
@@ -109,7 +124,7 @@ test('syntax analysis is lazy, debounced, and sends only the latest source with 
   assert.deepEqual(workers[0].messages[0], {
     type: 'analyze',
     jobId: 1,
-    source: 'int latest;',
+    snapshot: workspaceSnapshot('int latest;'),
     options: {},
   });
   assert.equal(states.at(-1).status, 'analyzing');
@@ -121,9 +136,19 @@ test('syntax analysis is lazy, debounced, and sends only the latest source with 
   controller.dispose();
 });
 
+test('syntax analysis sends the active filename to its Worker', () => {
+  const { controller, workers, timers } = createController();
+  controller.setSnapshot(workspaceSnapshot('int value;', { documentId: 'unicode', fileName: 'π.c' }));
+  controller.setEnabled(true);
+  timers.runNext();
+
+  assert.equal(workers[0].messages[0].snapshot.fileName, 'π.c');
+  controller.dispose();
+});
+
 test('a synchronous edit callback invalidates active analysis before the React effect and rejects stale results', () => {
   const { controller, workers, timers } = createController();
-  controller.setSource('int old;');
+  setSource(controller, 'int old;');
   controller.setEnabled(true);
   timers.runNext();
   const oldWorker = workers[0];
@@ -137,7 +162,7 @@ test('a synchronous edit callback invalidates active analysis before the React e
   });
 
   // This is the synchronous callback wired to the editor before React commits its new text.
-  controller.setSource('int latest;');
+  setSource(controller, 'int latest;');
   assert.equal(oldWorker.terminated, true);
   assert.deepEqual(controller.currentState, { status: 'analyzing' });
   staleHandler?.({ data: staleError });
@@ -153,9 +178,53 @@ test('a synchronous edit callback invalidates active analysis before the React e
   controller.dispose();
 });
 
+test('workspace analysis invalidates on sibling content and name changes and ignores stale replies', () => {
+  const { controller, workers, timers } = createController();
+  const main = { id: 'main', name: 'main.c', source: 'int main(void) { return 0; }' };
+  const header = { id: 'header', name: 'shared.h', source: 'int value(void);' };
+  const helper = { id: 'helper', name: 'helper.c', source: 'int value(void) { return 1; }' };
+  const makeSnapshot = (nextHeader = header, nextHelper = helper) => workspaceSnapshot(main.source, {
+    files: [nextHeader, nextHelper],
+  });
+
+  controller.setSnapshot(makeSnapshot());
+  controller.setEnabled(true);
+  timers.runNext();
+  const firstWorker = workers[0];
+  const firstHandler = firstWorker.onmessage;
+  const firstJobId = firstWorker.messages[0].jobId;
+
+  controller.setSnapshot(makeSnapshot({ ...header, source: 'int value(void);\n#define VALUE 2' }));
+  assert.equal(firstWorker.terminated, true);
+  firstHandler?.({ data: resultResponse(firstJobId, { kind: 'ok', diagnostics: [], metrics: {} }) });
+  assert.deepEqual(controller.currentState, { status: 'analyzing' });
+
+  timers.runNext();
+  const secondWorker = workers[1];
+  const secondHandler = secondWorker.onmessage;
+  const secondJobId = secondWorker.messages[0].jobId;
+  assert.equal(secondWorker.messages[0].snapshot.files[1].source, 'int value(void);\n#define VALUE 2');
+
+  controller.setSnapshot(makeSnapshot({ ...header, source: 'int value(void);\n#define VALUE 2' }, {
+    ...helper,
+    name: 'renamed-helper.c',
+  }));
+  assert.equal(secondWorker.terminated, true);
+  secondHandler?.({ data: resultResponse(secondJobId, { kind: 'ok', diagnostics: [], metrics: {} }) });
+  assert.deepEqual(controller.currentState, { status: 'analyzing' });
+
+  timers.runNext();
+  const thirdWorker = workers[2];
+  const thirdJobId = thirdWorker.messages[0].jobId;
+  assert.equal(thirdWorker.messages[0].snapshot.files[2].name, 'renamed-helper.c');
+  thirdWorker.emit(resultResponse(thirdJobId, { kind: 'ok', diagnostics: [], metrics: {} }));
+  assert.deepEqual(controller.currentState, { status: 'ok' });
+  controller.dispose();
+});
+
 test('IME composition cancels active work and analyzes only the final source after composition ends', () => {
   const { controller, workers, timers } = createController();
-  controller.setSource('int before_composition;');
+  setSource(controller, 'int before_composition;');
   controller.setEnabled(true);
   timers.runNext();
   const activeWorker = workers[0];
@@ -164,14 +233,14 @@ test('IME composition cancels active work and analyzes only the final source aft
 
   controller.setComposing(true);
   assert.equal(activeWorker.terminated, true);
-  controller.setSource('int partial =');
+  setSource(controller, 'int partial =');
   timers.runAll();
   assert.equal(workers.length, 1);
 
-  controller.setSource('int final_value;');
+  setSource(controller, 'int final_value;');
   controller.setComposing(false);
   timers.runNext();
-  assert.equal(workers[1].messages[0].source, 'int final_value;');
+  assert.equal(workers[1].messages[0].snapshot.source, 'int final_value;');
   staleHandler?.({ data: resultResponse(staleJobId, { kind: 'ok', diagnostics: [], metrics: {} }) });
   assert.deepEqual(controller.currentState, { status: 'analyzing' });
   controller.dispose();
@@ -180,7 +249,7 @@ test('IME composition cancels active work and analyzes only the final source aft
 test('limits and engine failures stay distinct from analysis diagnostic counts', () => {
   const { controller, workers, timers } = createController();
   controller.setEnabled(true);
-  controller.setSource('int value;');
+  setSource(controller, 'int value;');
   timers.runNext();
   const firstJob = workers[0].messages[0].jobId;
   workers[0].emit(resultResponse(firstJob, {
@@ -193,7 +262,7 @@ test('limits and engine failures stay distinct from analysis diagnostic counts',
   }));
   assert.deepEqual(controller.currentState, { status: 'limit', resource: 'maxTokens' });
 
-  controller.setSource('int next_value;');
+  setSource(controller, 'int next_value;');
   timers.runNext();
   const secondJob = workers[0].messages.at(-1).jobId;
   workers[0].emit(resultResponse(secondJob, {
@@ -208,6 +277,7 @@ test('limits and engine failures stay distinct from analysis diagnostic counts',
 
 test('an error result without diagnostics is unavailable instead of showing a fabricated zero count', () => {
   const { controller, workers, timers } = createController();
+  setSource(controller, 'int value;');
   controller.setEnabled(true);
   timers.runNext();
   workers[0].emit(resultResponse(workers[0].messages[0].jobId, {
@@ -223,6 +293,7 @@ test('an error result without diagnostics is unavailable instead of showing a fa
 
 test('truncated parser recovery keeps the capped count and announces 20+', () => {
   const { controller, workers, timers } = createController();
+  setSource(controller, 'int value;');
   controller.setEnabled(true);
   timers.runNext();
   const jobId = workers[0].messages[0].jobId;
@@ -236,6 +307,7 @@ test('truncated parser recovery keeps the capped count and announces 20+', () =>
   }));
   assert.deepEqual(controller.currentState, {
     status: 'analysis-errors',
+    snapshot: workspaceSnapshot('int value;'),
     diagnostics: Array.from({ length: 20 }, (_, index) => ({
       code: 'PARSE_ERROR', message: `error ${index}`, file: 'main.c', line: index + 1, column: 1,
     })),
@@ -250,7 +322,7 @@ test('current diagnostics are retained for the result and cleared synchronously 
   const diagnostics = [
     { code: 'PARSE_ERROR', message: 'Expected ;.', file: 'main.c', line: 1, column: 8 },
   ];
-  controller.setSource('int x =');
+  setSource(controller, 'int x =');
   controller.setEnabled(true);
   timers.runNext();
   workers[0].emit(resultResponse(workers[0].messages[0].jobId, {
@@ -258,10 +330,14 @@ test('current diagnostics are retained for the result and cleared synchronously 
   }));
 
   assert.deepEqual(controller.currentState, {
-    status: 'analysis-errors', diagnostics, diagnosticCount: 1, truncated: false,
+    status: 'analysis-errors',
+    snapshot: workspaceSnapshot('int x ='),
+    diagnostics,
+    diagnosticCount: 1,
+    truncated: false,
   });
 
-  controller.setSource('int x = 1;');
+  setSource(controller, 'int x = 1;');
   assert.deepEqual(controller.currentState, { status: 'analyzing' });
   controller.setComposing(true);
   assert.deepEqual(controller.currentState, { status: 'analyzing' });
@@ -272,7 +348,7 @@ test('current diagnostics are retained for the result and cleared synchronously 
 
 test('Off cancels debounce and terminates active analysis; re-enabling analyzes the latest source', () => {
   const { controller, workers, timers } = createController();
-  controller.setSource('int latest;');
+  setSource(controller, 'int latest;');
   controller.setEnabled(true);
   timers.runNext();
   const activeWorker = workers[0];
@@ -283,17 +359,17 @@ test('Off cancels debounce and terminates active analysis; re-enabling analyzes 
   timers.runAll();
   assert.equal(workers.length, 1);
 
-  controller.setSource('int latest_after_off;');
+  setSource(controller, 'int latest_after_off;');
   controller.setEnabled(true);
   timers.runNext();
   assert.equal(workers.length, 2);
-  assert.equal(workers[1].messages[0].source, 'int latest_after_off;');
+  assert.equal(workers[1].messages[0].snapshot.source, 'int latest_after_off;');
   controller.dispose();
 });
 
 test('Off clears a not-yet-started debounce without creating a Worker', () => {
   const { controller, workers, timers } = createController();
-  controller.setSource('int pending;');
+  setSource(controller, 'int pending;');
   controller.setEnabled(true);
   controller.setEnabled(false);
   timers.runAll();
@@ -305,7 +381,7 @@ test('Off clears a not-yet-started debounce without creating a Worker', () => {
 
 test('Worker failures terminate the active Worker and stale messages cannot replace the failure state', () => {
   const { controller, workers, timers } = createController();
-  controller.setSource('int value;');
+  setSource(controller, 'int value;');
   controller.setEnabled(true);
   timers.runNext();
   const worker = workers[0];
@@ -322,14 +398,14 @@ test('Worker failures terminate the active Worker and stale messages cannot repl
 
 test('analysis timeout terminates the Worker and reports a recoverable non-syntax state', () => {
   const { controller, workers, timers } = createController({ timeoutMs: 50 });
-  controller.setSource('int value;');
+  setSource(controller, 'int value;');
   controller.setEnabled(true);
   timers.runNext();
   timers.runNext();
 
   assert.equal(workers[0].terminated, true);
   assert.deepEqual(controller.currentState, { status: 'timeout' });
-  controller.setSource('int next_value;');
+  setSource(controller, 'int next_value;');
   timers.runNext();
   assert.equal(workers.length, 2);
   controller.dispose();
@@ -339,10 +415,22 @@ test('syntax Worker analyzes declarations without a main function and never exec
   const response = analyzeSyntaxRequest({
     type: 'analyze',
     jobId: 91,
-    source: 'int value;\n',
+    snapshot: workspaceSnapshot('int value;\n'),
     options: {},
   });
   assert.equal(response.type, 'result');
   assert.equal(response.jobId, 91);
   assert.equal(response.result.kind, 'ok');
+});
+
+test('syntax analysis keeps the active source filename in diagnostic locations', () => {
+  const response = analyzeSyntaxRequest({
+    type: 'analyze',
+    jobId: 92,
+    snapshot: workspaceSnapshot('int value = ;\n', { documentId: 'unicode', fileName: 'π.c' }),
+    options: {},
+  });
+  assert.equal(response.type, 'result');
+  assert.equal(response.result.kind, 'error');
+  assert.equal(response.result.diagnostics[0].file, 'π.c');
 });

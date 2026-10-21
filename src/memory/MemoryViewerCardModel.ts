@@ -35,6 +35,7 @@ export interface MemoryViewerCardRecord {
   readonly isParameter: boolean;
   readonly isStringLiteral: boolean;
   readonly isHeapBlock: boolean;
+  readonly isFreed?: boolean;
   readonly isArrayElement: boolean;
   readonly isPointer: boolean;
   readonly isPointerTarget: boolean;
@@ -155,7 +156,7 @@ export function pointerCardRecord(
   };
 }
 
-function pointerCardValueRecord(pointer: {
+export function pointerCardValueRecord(pointer: {
   readonly initialized: boolean | null;
   readonly status: DebugPointerSnapshot['status'] | undefined;
   readonly displayValue: string;
@@ -244,7 +245,12 @@ export function arrayElementCardRecord(
   };
 }
 
-export function heapCardRecord(block: DebugHeapObjectSnapshot, t: Translate): MemoryViewerCardRecord {
+export function heapCardRecord(
+  block: DebugHeapObjectSnapshot,
+  t: Translate,
+  aliasLabel?: string,
+  isFreed = false,
+): MemoryViewerCardRecord {
   return {
     id: block.id,
     arrayElementKey: null,
@@ -255,15 +261,16 @@ export function heapCardRecord(block: DebugHeapObjectSnapshot, t: Translate): Me
     size: block.size,
     origin: block.origin,
     duration: 'heap',
-    label: t('memoryViewer.heapBlock'),
+    label: aliasLabel ?? t('memoryViewer.heapBlock'),
     typeLabel: 'heap block',
-    valueTitle: t('memoryViewer.unknownContents'),
-    valueContent: '?',
+    valueTitle: isFreed ? t('memoryViewer.freed') : t('memoryViewer.unknownContents'),
+    valueContent: isFreed ? t('memoryViewer.freed') : '?',
     initialized: null,
     valueChanged: false,
     isParameter: false,
     isStringLiteral: false,
     isHeapBlock: true,
+    isFreed,
     isArrayElement: false,
     isPointer: false,
     isPointerTarget: false,

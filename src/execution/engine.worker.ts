@@ -1,8 +1,9 @@
 import { createExecutionSession, prepare } from '@playground/c11-engine/core';
-import type { EngineMetrics, SourceProject } from '@playground/c11-engine/core';
+import type { EngineMetrics } from '@playground/c11-engine/core';
 import type { RunMetrics, RunResult } from '@playground/c11-engine/browser';
 import { RUN_DIAGNOSTIC_STAGE } from './diagnostics.ts';
 import type { RunDiagnosticMetrics, RunDiagnosticStage, RunWorkerProgress } from './diagnostics.ts';
+import { createBuildPlanProject, resolveBuildPlan } from '../build/buildPlan.ts';
 import type { RunRequest, RunResponse, WorkerCommand } from './protocol.ts';
 import { OutputSnapshotDeltas } from './outputSnapshotDeltas.ts';
 import { createWorkerRuntimeServices } from './workerRuntimeServices.ts';
@@ -183,7 +184,7 @@ async function start(request: RunRequest) {
   let source: string;
   const readStartedAt = performance.now();
   try {
-    source = await request.file.text();
+    source = request.snapshot.source;
   } catch (error) {
     run.readMs = performance.now() - readStartedAt;
     const message = error instanceof Error ? error.message : String(error);
@@ -191,8 +192,8 @@ async function start(request: RunRequest) {
       kind: 'read-error',
       diagnostics: [{
         code: 'READ_FAILED',
-        message: `Could not read "${request.file.name}": ${message}`,
-        file: request.file.name,
+        message: `Could not read "${request.snapshot.fileName}": ${message}`,
+        file: request.snapshot.fileName,
         line: 1,
         column: 1,
       }],
@@ -204,28 +205,52 @@ async function start(request: RunRequest) {
   }
   run.readMs = performance.now() - readStartedAt;
   if (activeRun !== run) return;
-  run.sourceLineCount = sourceLineCount(source);
   reportProgress(run, RUN_DIAGNOSTIC_STAGE.prepare);
 
   try {
-    const project: SourceProject = {
-      entry: request.file.name,
-      files: [{ name: request.file.name, source }],
-    };
-    const preparation = prepare(project, request.options.prepare);
-    if (preparation.kind !== 'prepared') {
+    const prepareStartedAt = performance.now();
+    const resolution = resolveBuildPlan(request.snapshot.files, request.snapshot.fileName);
+    const project = createBuildPlanProject(request.snapshot.files, resolution);
+    const entrySource = resolution.plan
+      ? request.snapshot.files.find(file => file.name === resolution.plan.entry)?.source
+      : undefined;
+    run.sourceLineCount = sourceLineCount(entrySource ?? source);
+
+    if (!project || resolution.status !== 'ready') {
+      const metrics = {
+        ...emptyMetrics(),
+        prepareMs: performance.now() - prepareStartedAt,
+      };
+      run.prepareMs = metrics.prepareMs;
+      run.diagnosticMetrics = diagnosticMetrics(metrics);
       const result: RunResult = {
-        ...preparation,
-        metrics: metricsWithTiming(preparation.metrics, run),
+        kind: 'prepare-error',
+        diagnostics: resolution.diagnostics,
+        metrics: metricsWithTiming(metrics, run),
       };
       activeRun = null;
       post({ type: 'result', jobId: request.jobId, result });
       return;
     }
 
-    run.prepareMs = preparation.metrics.prepareMs;
+    const preparation = prepare(project, request.options.prepare);
+    const metrics = {
+      ...preparation.metrics,
+      prepareMs: performance.now() - prepareStartedAt,
+    };
+    if (preparation.kind !== 'prepared') {
+      const result: RunResult = {
+        ...preparation,
+        metrics: metricsWithTiming(metrics, run),
+      };
+      activeRun = null;
+      post({ type: 'result', jobId: request.jobId, result });
+      return;
+    }
+
+    run.prepareMs = metrics.prepareMs;
     run.diagnosticMetrics = {
-      ...diagnosticMetrics(preparation.metrics),
+      ...diagnosticMetrics(metrics),
       instructionCount: null,
       peakMemoryBytes: null,
     };

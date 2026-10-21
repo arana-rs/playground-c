@@ -3,10 +3,11 @@ import type { DebugAggregateSnapshot } from './useMemoryViewer.ts';
 import type { MemoryViewerPointerIdentity } from './pointerSnapshots.ts';
 import { hasAnonymousAggregateMember } from './aggregateSnapshots.ts';
 import { useI18n } from '../i18n.tsx';
-import { arrayElementCardRecord } from './MemoryViewerCardModel.ts';
+import { arrayElementCardRecord, pointerCardValueRecord } from './MemoryViewerCardModel.ts';
 import type { MemoryViewerCardRecord } from './MemoryViewerCardModel.ts';
 import { MemoryViewerMetadataFooter, MemoryViewerScalarCard } from './MemoryViewerScalarCard.tsx';
 import { truncateMemoryViewerScalarValue } from './scalarValue.ts';
+import { memoryViewerAggregateMemberPointerIdentity } from './pointerSnapshots.ts';
 import type { Translate } from '../i18n.tsx';
 
 function aggregateStatusMessage(aggregate: DebugAggregateSnapshot, t: Translate): string | null {
@@ -25,17 +26,24 @@ function aggregateMemberCardRecord(
   t: Translate,
 ): MemoryViewerCardRecord {
   const isPointer = member.kind === 'pointer';
-  const isUnsupported = member.kind === 'unsupported' || isPointer;
-  const isUninitialized = !isUnsupported && (member.initialized === false || member.pointerStatus === 'uninitialized');
-  const reasonLabel = isPointer
-    ? t('memoryViewer.pendingPointerField')
-    : member.unsupportedReason === 'array'
-      ? t('memoryViewer.pendingArrayField')
-      : member.unsupportedReason === 'flexible-array' ? t('memoryViewer.flexibleArrayMember') : t('memoryViewer.pendingAggregateField');
+  const isUnsupported = member.kind === 'unsupported';
+  const pointerValue = isPointer
+    ? pointerCardValueRecord({
+      initialized: member.initialized,
+      status: member.pointerStatus,
+      displayValue: member.displayValue ?? '?',
+      target: member.target,
+    }, t)
+    : null;
+  const isUninitialized = pointerValue?.initialized === false
+    || (!isPointer && !isUnsupported && member.initialized === false);
+  const reasonLabel = member.unsupportedReason === 'array'
+    ? t('memoryViewer.pendingArrayField')
+    : member.unsupportedReason === 'flexible-array' ? t('memoryViewer.flexibleArrayMember') : t('memoryViewer.pendingAggregateField');
   const bitRange = member.bitWidth === undefined || member.bitOffset === undefined
     ? null
     : `${member.bitOffset}–${member.bitOffset + member.bitWidth - 1}`;
-  const valueTitle = isUnsupported
+  const valueTitle = pointerValue?.valueTitle ?? (isUnsupported
     ? member.flexibleArray
       ? t('memoryViewer.flexibleArrayDetails', {
         reason: reasonLabel,
@@ -55,17 +63,19 @@ function aggregateMemberCardRecord(
       })
       : member.initialized === true
         ? member.displayValue ?? '?'
-        : t('memoryViewer.uninitialized');
-  const valueContent = isUninitialized || isUnsupported
+        : t('memoryViewer.uninitialized'));
+  const valueContent = isUnsupported
     ? '—'
-    : truncateMemoryViewerScalarValue(member.displayValue ?? '?');
+    : pointerValue?.valueContent ?? (isUninitialized
+      ? '—'
+      : truncateMemoryViewerScalarValue(member.displayValue ?? '?'));
   return {
     id: null,
     arrayElementKey: null,
     arrayElementIndex: null,
     aggregateMemberKey: member.key,
     aggregateMemberName: member.name,
-    aggregateUnsupportedReason: isPointer ? 'pointer' : member.kind === 'unsupported' ? member.unsupportedReason : undefined,
+    aggregateUnsupportedReason: member.kind === 'unsupported' ? member.unsupportedReason : undefined,
     address: member.address,
     size: member.size,
     origin: aggregate.origin,
@@ -75,16 +85,16 @@ function aggregateMemberCardRecord(
     valueTitle,
     uninitializedVisualLabel: isUninitialized ? t('memoryViewer.uninitialized') : undefined,
     valueContent,
-    initialized: isUnsupported ? null : member.initialized,
+    initialized: isUnsupported ? null : pointerValue?.initialized ?? member.initialized,
     valueChanged,
     isParameter: false,
     isStringLiteral: false,
     isHeapBlock: false,
     isArrayElement: false,
-    isPointer: false,
-    isPointerTarget: !isPointer && isPointerTarget,
-    pointerStatus: null,
-    pointerIdentity: null,
+    isPointer,
+    isPointerTarget,
+    pointerStatus: pointerValue?.pointerStatus ?? null,
+    pointerIdentity: isPointer ? memoryViewerAggregateMemberPointerIdentity(aggregate, member.key) : null,
   };
 }
 
@@ -145,6 +155,7 @@ type MemoryViewerAggregateLayoutItem =
 
 export interface MemoryViewerAggregateBlockProps {
   aggregate: DebugAggregateSnapshot;
+  heapAliasLabel?: string;
   changedMemberKeys: ReadonlySet<string>;
   pointerTargetFieldKey?: string | null;
   pointerTargetRoot?: boolean;
@@ -156,6 +167,7 @@ export interface MemoryViewerAggregateBlockProps {
 
 export function MemoryViewerAggregateBlock({
   aggregate,
+  heapAliasLabel,
   changedMemberKeys,
   pointerTargetFieldKey = null,
   pointerTargetRoot = false,
@@ -165,7 +177,7 @@ export function MemoryViewerAggregateBlock({
   onPointerFocusChange,
 }: MemoryViewerAggregateBlockProps) {
   const { t } = useI18n();
-  const name = aggregate.name ?? (aggregate.region === 'heap'
+  const name = aggregate.name ?? heapAliasLabel ?? (aggregate.region === 'heap'
     ? t('memoryViewer.aggregateOnHeap')
     : t('memoryViewer.temporaryAggregate'));
   const placeholder = aggregateStatusMessage(aggregate, t)

@@ -1,4 +1,5 @@
 import { getCContext } from './context.ts';
+import type { EditorLanguage } from './languageMode.ts';
 import { isEditorTextWithinLineLimit, normalizeEditorText } from './limits.ts';
 import type { AutoPair, EditorCommand, EditorSelection, EditorSnapshot } from './types.ts';
 
@@ -136,12 +137,16 @@ function backspace(snapshot: EditorSnapshot): EditorSnapshot | null {
   return editSnapshot(snapshot, { start: start - 1, end: start + 1, inserted: '' }, caret(start - 1));
 }
 
-function enter(snapshot: EditorSnapshot): EditorSnapshot {
+function enter(snapshot: EditorSnapshot, language: EditorLanguage): EditorSnapshot {
   const { text } = snapshot;
   const { start, end } = snapshot.selection;
   const lineStart = lineStartAt(text, start);
   const before = text.slice(lineStart, start);
   const indentation = before.match(/^[ \t]*/)?.[0] ?? '';
+  if (language === 'makefile') {
+    const inserted = `\n${indentation}`;
+    return editSnapshot(snapshot, { start, end, inserted }, caret(start + inserted.length));
+  }
   const left = before.trimEnd();
   const rightWhitespace = text.slice(end).match(/^[ \t]*/)?.[0] ?? '';
   const close = end + rightWhitespace.length;
@@ -171,10 +176,11 @@ function selectedLineStarts(text: string, start: number, end: number): number[] 
   return starts;
 }
 
-function indent(snapshot: EditorSnapshot, outdent: boolean): EditorSnapshot {
+function indent(snapshot: EditorSnapshot, outdent: boolean, language: EditorLanguage): EditorSnapshot {
+  const indentation = language === 'makefile' ? '\t' : INDENT;
   const { start, end } = snapshot.selection;
   if (start === end && !outdent) {
-    return editSnapshot(snapshot, { start, end, inserted: INDENT }, caret(start + INDENT.length));
+    return editSnapshot(snapshot, { start, end, inserted: indentation }, caret(start + indentation.length));
   }
 
   let result = snapshot;
@@ -182,24 +188,37 @@ function indent(snapshot: EditorSnapshot, outdent: boolean): EditorSnapshot {
   for (const lineStart of starts.reverse()) {
     let removed = 0;
     if (outdent) {
-      removed = snapshot.text[lineStart] === '\t'
-        ? 1
-        : snapshot.text.slice(lineStart).match(/^ {1,4}/)?.[0].length ?? 0;
+      if (snapshot.text[lineStart] === '\t') removed = 1;
+      else if (language === 'c') removed = snapshot.text.slice(lineStart).match(/^ {1,4}/)?.[0].length ?? 0;
     }
     if (!outdent || removed > 0) {
-      result = editSnapshot(result, { start: lineStart, end: lineStart + removed, inserted: outdent ? '' : INDENT });
+      result = editSnapshot(result, {
+        start: lineStart,
+        end: lineStart + removed,
+        inserted: outdent ? '' : indentation,
+      });
     }
   }
   if (start === end) result = { ...result, selection: caret(result.selection.end) };
   return result;
 }
 
-function applyEditorCommandUnchecked(snapshot: EditorSnapshot, command: EditorCommand): EditorSnapshot | null {
+function applyEditorCommandUnchecked(
+  snapshot: EditorSnapshot,
+  command: EditorCommand,
+  language: EditorLanguage,
+): EditorSnapshot | null {
+  if (language === 'makefile') {
+    if (command.type === 'type' || command.type === 'backspace') return null;
+    if (command.type === 'enter') return enter(snapshot, language);
+    return indent(snapshot, command.outdent, language);
+  }
+
   switch (command.type) {
     case 'type': return typeCharacter(snapshot, command.character);
     case 'backspace': return backspace(snapshot);
-    case 'enter': return enter(snapshot);
-    case 'indent': return indent(snapshot, command.outdent);
+    case 'enter': return enter(snapshot, language);
+    case 'indent': return indent(snapshot, command.outdent, language);
   }
 }
 
@@ -212,8 +231,9 @@ export type EditorCommandEvaluation =
 export function evaluateEditorCommand(
   snapshot: EditorSnapshot,
   command: EditorCommand,
+  language: EditorLanguage = 'c',
 ): EditorCommandEvaluation {
-  const result = applyEditorCommandUnchecked(normalizeSnapshot(snapshot), command);
+  const result = applyEditorCommandUnchecked(normalizeSnapshot(snapshot), command, language);
   if (!result) return { status: 'unsupported' };
   const normalizedResult = normalizeSnapshot(result);
   return isEditorTextWithinLineLimit(normalizedResult.text)
@@ -222,8 +242,12 @@ export function evaluateEditorCommand(
 }
 
 /** Compatibility helper; use evaluateEditorCommand to tell rejection from native fallback. */
-export function applyEditorCommand(snapshot: EditorSnapshot, command: EditorCommand): EditorSnapshot | null {
-  const evaluation = evaluateEditorCommand(snapshot, command);
+export function applyEditorCommand(
+  snapshot: EditorSnapshot,
+  command: EditorCommand,
+  language: EditorLanguage = 'c',
+): EditorSnapshot | null {
+  const evaluation = evaluateEditorCommand(snapshot, command, language);
   return evaluation.status === 'applied' ? evaluation.snapshot : null;
 }
 

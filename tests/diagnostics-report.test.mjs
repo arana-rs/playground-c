@@ -6,6 +6,7 @@ const report = {
   schemaVersion: 1,
   outcome: 'timeout',
   reason: 'ui-watchdog',
+  document: { id: 'document-main', sourceRevision: 12 },
   file: { name: 'main.c', sizeBytes: 73, lineCount: 4, path: '/private/main.c' },
   budgets: {
     uiWatchdogMs: 10_000,
@@ -56,6 +57,7 @@ test('timeout report keeps the runner DTO fields and omits source, transcript an
   assert.equal(parsed.run.schemaVersion, 1);
   assert.equal(parsed.run.outcome, 'timeout');
   assert.equal(parsed.run.reason, 'ui-watchdog');
+  assert.deepEqual(parsed.run.document, { id: 'document-main', sourceRevision: 12 });
   assert.equal(parsed.run.file.sizeBytes, 73);
   assert.equal(parsed.run.stages.prepareMs, null);
   assert.equal(parsed.run.stages.mainTotalObservedMs, 10_002);

@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {
+  createExecutionDocumentSnapshot,
+  createWorkspaceSourceSnapshot,
+} from '../src/execution/documentSnapshot.ts';
 
-test('worker returns a startup error when project preparation setup throws', async () => {
+function workspaceSnapshot(source, files = []) {
+  return createWorkspaceSourceSnapshot(
+    createExecutionDocumentSnapshot('main', 'main.c', 0, source),
+    [{ id: 'main', name: 'main.c', source }, ...files],
+  );
+}
+
+test('worker reports a read error when the captured snapshot source cannot be read', async () => {
   const responses = [];
   const scope = { onmessage: null, postMessage: response => responses.push(response) };
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
@@ -9,27 +20,26 @@ test('worker returns a startup error when project preparation setup throws', asy
 
   try {
     await import('../src/execution/engine.worker.ts?startup-error-test');
-    const file = {
-      get name() { throw new Error('failed to read the file name'); },
-      async text() { return 'int main(void) { return 0; }'; },
-    };
+    const snapshot = new Proxy(workspaceSnapshot('int main(void) { return 0; }'), {
+      get(target, key, receiver) {
+        if (key === 'source') throw new Error('failed to read the captured source');
+        return Reflect.get(target, key, receiver);
+      },
+    });
     scope.onmessage({ data: {
       type: 'run',
       jobId: 41,
-      file,
+      snapshot,
       options: { prepare: {}, execute: {} },
     } });
     await new Promise(resolve => setTimeout(resolve, 0));
 
-    assert.deepEqual(responses.map(response => response.type), ['progress', 'progress', 'error']);
+    assert.deepEqual(responses.map(response => response.type), ['progress', 'result']);
     assert.equal(responses[0].progress.stage, 'source-read');
-    assert.equal(responses[1].progress.stage, 'prepare');
-    assert.deepEqual(responses.at(-1), {
-      type: 'error',
-      jobId: 41,
-      phase: 'startup',
-      message: 'failed to read the file name',
-    });
+    assert.equal(responses.at(-1).jobId, 41);
+    assert.equal(responses.at(-1).result.kind, 'read-error');
+    assert.equal(responses.at(-1).result.diagnostics[0].file, 'main.c');
+    assert.match(responses.at(-1).result.diagnostics[0].message, /failed to read the captured source/u);
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
     else delete globalThis.self;
@@ -48,7 +58,7 @@ test('worker reports transition timings and counter snapshots around interactive
     scope.onmessage({ data: {
       type: 'run',
       jobId: 52,
-      file: new File([source], 'main.c', { type: 'text/x-c' }),
+      snapshot: workspaceSnapshot(source),
       options: { prepare: {}, execute: {} },
     } });
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -90,10 +100,11 @@ test('the execution Worker enforces the instruction budget supplied by Run', asy
 
   try {
     await import('../src/execution/engine.worker.ts?execution-settings-budget-test');
+    const source = 'int main(void) { int value = 0; while (value < 100) { value = value + 1; } return value; }';
     scope.onmessage({ data: {
       type: 'run',
       jobId: 53,
-      file: new File(['int main(void) { int value = 0; while (value < 100) { value = value + 1; } return value; }'], 'main.c'),
+      snapshot: workspaceSnapshot(source),
       options: {
         prepare: { limits: { maxDepth: 512 } },
         execute: { limits: { maxDepth: 512, maxInstructions: 1 } },

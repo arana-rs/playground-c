@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formatConsole, RUN_CONFIGURATION, RunnerController } from '../src/execution/useRunner.ts';
+import { formatConsole, formatConsoleSegments, RUN_CONFIGURATION, RunnerController } from '../src/execution/useRunner.ts';
+import { getConsoleCopyText, TerminalPresentation } from '../src/components/terminalPresentation.ts';
 import { createRunConfiguration } from '../src/execution/settings.ts';
+import {
+  createExecutionDocumentSnapshot,
+  createWorkspaceSourceSnapshot,
+  matchesCurrentDocument,
+} from '../src/execution/documentSnapshot.ts';
 
 const bytes = text => new TextEncoder().encode(text);
 const pause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -66,13 +72,101 @@ function createController(timeoutMs = 10_000) {
       return worker;
     },
   );
-  const file = new File(['int main(void) { return 0; }'], 'main.c', { type: 'text/x-c' });
-  return { controller, workers, file };
+  const source = 'int main(void) { return 0; }';
+  const file = new File([source], 'main.c', { type: 'text/x-c' });
+  const document = createExecutionDocumentSnapshot('main', file.name, 0, source);
+  return { controller, workers, file, document };
 }
 
+test('Run sends exactly the captured source and keeps its identity when another same-named document is selected', async () => {
+  const { controller, workers } = createController();
+  const documentA = createExecutionDocumentSnapshot('document-a', 'shared.c', 8, 'int main(void) { return 8; }');
+  const documentB = createExecutionDocumentSnapshot('document-b', 'shared.c', 2, 'int main(void) { return 2; }');
+  controller.run(documentA);
+  const worker = workers[0];
+  const request = worker.messages[0];
+
+  assert.deepEqual(Object.keys(request).sort(), ['jobId', 'options', 'snapshot', 'type']);
+  assert.equal(request.snapshot.entry, 'shared.c');
+  assert.equal(request.snapshot.files[0].name, 'shared.c');
+  assert.equal(request.snapshot.files[0].source, documentA.source);
+  assert.deepEqual(request.snapshot.translationUnits, ['shared.c']);
+  assert.equal(Object.isFrozen(controller.state.document), true);
+  assert.equal(controller.state.document.documentId, 'document-a');
+
+  // The product has no file navigation yet. This controller-level harness models selecting
+  // and editing B while A's Worker remains active.
+  const selectedDocument = { ...documentB, source: 'int main(void) { return 200; }', sourceRevision: 3 };
+  controller.run(selectedDocument);
+  assert.equal(workers.length, 1, 'a second Run is rejected while the first job is active');
+  worker.emit({ type: 'result', jobId: request.jobId, result: terminated() });
+
+  assert.equal(controller.state.status, 'finished');
+  assert.equal(controller.state.document.documentId, 'document-a');
+  assert.equal(controller.state.document.fileName, 'shared.c');
+  assert.equal(controller.state.document.source, documentA.source);
+  assert.equal(controller.state.document.sourceRevision, 8);
+  assert.equal(matchesCurrentDocument(controller.state.document, selectedDocument), false);
+  assert.equal(matchesCurrentDocument(controller.state.document, {
+    ...documentA,
+    fileName: 'renamed.c',
+  }), false, 'renaming the captured file invalidates source decorations');
+  assert.equal(matchesCurrentDocument(controller.state.document, {
+    ...documentA,
+    source: 'int main(void) { return 9; }',
+    sourceRevision: 9,
+  }), false, 'editing the captured file invalidates source decorations');
+  assert.equal(matchesCurrentDocument(controller.state.document, documentA), true);
+});
+
+test('Run dispatches every workspace source with only the active C file as its translation unit', () => {
+  const { controller, workers } = createController();
+  const source = 'int main(void) { return helper(); }';
+  const document = createExecutionDocumentSnapshot('entry', 'main.c', 12, source);
+  const inputFiles = [
+    { id: 'entry', name: 'main.c', source },
+    { id: 'header', name: 'helper.h', source: 'int helper(void);' },
+    { id: 'helper', name: 'helper.c', source: 'int helper(void) { return 3; }' },
+    { id: 'unused', name: 'unused.c', source: 'int unused(void) { return 4; }' },
+  ];
+  const snapshot = createWorkspaceSourceSnapshot(document, inputFiles);
+
+  controller.run(snapshot);
+  const request = workers[0].messages[0];
+
+  assert.equal(request.type, 'run');
+  assert.notEqual(request.snapshot, snapshot, 'the Worker receives its own immutable copy');
+  assert.equal(Object.isFrozen(request.snapshot), true);
+  assert.equal(Object.isFrozen(request.snapshot.files), true);
+  assert.deepEqual(request.snapshot.files, inputFiles);
+  assert.equal(request.snapshot.entry, 'main.c');
+  assert.deepEqual(request.snapshot.translationUnits, ['main.c']);
+  controller.dispose();
+});
+
+test('Stop from another selected document cancels the captured run and keeps its partial transcript', () => {
+  const { controller, workers } = createController();
+  const documentA = createExecutionDocumentSnapshot('document-a', 'main.c', 4, 'int main(void) { return 1; }');
+  controller.run(documentA);
+  const worker = workers[0];
+  const jobId = worker.messages[0].jobId;
+  worker.emit({ type: 'output', jobId, sequence: 1, stream: 'stdout', chunk: bytes('partial A') });
+
+  // Selection changes to B; Stop still targets the sole active job.
+  const selectedDocumentB = createExecutionDocumentSnapshot('document-b', 'main.c', 1, 'int main(void) { return 2; }');
+  controller.stop();
+  worker.emit({ type: 'result', jobId, result: terminated(bytes('late result')) });
+
+  assert.equal(selectedDocumentB.documentId, 'document-b');
+  assert.equal(controller.state.status, 'cancelled');
+  assert.equal(controller.state.document.documentId, 'document-a');
+  assert.match(formatConsole(controller.state), /partial A/u);
+  assert.doesNotMatch(formatConsole(controller.state), /late result/u);
+});
+
 test('runner streams UTF-8 once, echoes lines once, ignores duplicate events, and supports repeated reads', () => {
-  const { controller, workers, file } = createController();
-  controller.run(file);
+  const { controller, workers, document } = createController();
+  controller.run(document);
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
 
@@ -99,10 +193,27 @@ test('runner streams UTF-8 once, echoes lines once, ignores duplicate events, an
   assert.equal(formatConsole(controller.state).includes('duplicate'), false);
 });
 
+test('console copy excludes the generated exit status and keeps matching program output', () => {
+  function completeRun(programOutput) {
+    const { controller, workers, document } = createController();
+    controller.run(document);
+    const worker = workers[0];
+    const jobId = worker.messages[0].jobId;
+    if (programOutput) worker.emit({ type: 'output', jobId, sequence: 1, stream: 'stdout', chunk: bytes(programOutput) });
+    worker.emit({ type: 'result', jobId, result: terminated(bytes(programOutput)) });
+    const presentation = new TerminalPresentation().update(formatConsoleSegments(controller.state));
+    return { display: formatConsole(controller.state), copy: getConsoleCopyText(presentation) };
+  }
+
+  assert.deepEqual(completeRun('exit code: 0'), { display: 'exit code: 0\nexit code: 0', copy: 'exit code: 0' });
+  assert.deepEqual(completeRun('hello'), { display: 'hello\nexit code: 0', copy: 'hello' });
+  assert.deepEqual(completeRun(''), { display: 'exit code: 0', copy: '' });
+});
+
 test('a run sends its selected budgets to the Worker and keeps them in timeout diagnostics', async () => {
-  const { controller, workers, file } = createController();
+  const { controller, workers, file, document } = createController();
   const configuration = { ...createRunConfiguration({ maxDepth: 512, maxInstructions: 337_300 }), timeoutMs: 30 };
-  controller.run(file, configuration);
+  controller.run(document, configuration);
 
   const worker = workers[0];
   const request = worker.messages[0];
@@ -118,8 +229,8 @@ test('a run sends its selected budgets to the Worker and keeps them in timeout d
 });
 
 test('EOF is explicit, blocks later line sends, and remains visible with partial output', () => {
-  const { controller, workers, file } = createController();
-  controller.run(file);
+  const { controller, workers, document } = createController();
+  controller.run(document);
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
   worker.emit({ type: 'output', jobId, sequence: 1, stream: 'stdout', chunk: bytes('Enter a value: ') });
@@ -136,14 +247,14 @@ test('EOF is explicit, blocks later line sends, and remains visible with partial
 });
 
 test('stale worker messages cannot change a newer run and Stop preserves its transcript', () => {
-  const { controller, workers, file } = createController();
-  controller.run(file);
+  const { controller, workers, document } = createController();
+  controller.run(document);
   const first = workers[0];
   const firstId = first.messages[0].jobId;
   first.emit({ type: 'output', jobId: firstId, sequence: 1, stream: 'stdout', chunk: bytes('first') });
   first.emit({ type: 'result', jobId: firstId, result: terminated(bytes('first')) });
 
-  controller.run(file);
+  controller.run(document);
   const second = workers[1];
   const secondId = second.messages[0].jobId;
   first.emit({ type: 'output', jobId: firstId, sequence: 2, stream: 'stdout', chunk: bytes('stale') });
@@ -157,8 +268,8 @@ test('stale worker messages cannot change a newer run and Stop preserves its tra
 });
 
 test('worker startup errors finish the active run immediately with a diagnostic', () => {
-  const { controller, workers, file } = createController();
-  controller.run(file);
+  const { controller, workers, document } = createController();
+  controller.run(document);
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
 
@@ -171,8 +282,8 @@ test('worker startup errors finish the active run immediately with a diagnostic'
 });
 
 test('watchdog pauses for human input and resumes with the remaining active time', async () => {
-  const { controller, workers, file } = createController(160);
-  controller.run(file);
+  const { controller, workers, document } = createController(160);
+  controller.run(document);
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
   await pause(20);
@@ -188,8 +299,8 @@ test('watchdog pauses for human input and resumes with the remaining active time
 });
 
 test('timeout preserves a versioned partial report with explicit unknowns and UI watchdog timing', async () => {
-  const { controller, workers, file } = createController(45);
-  controller.run(file);
+  const { controller, workers, file, document } = createController(45);
+  controller.run(document);
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
   worker.emit({ type: 'progress', jobId, progress: workerProgress('prepare', {
@@ -203,6 +314,8 @@ test('timeout preserves a versioned partial report with explicit unknowns and UI
   assert.equal(controller.state.status, 'timeout');
   assert.equal(worker.terminated, true);
   const report = controller.state.diagnosticsReport;
+  assert.deepEqual(report.document, { id: document.documentId, sourceRevision: document.sourceRevision });
+  assert.deepEqual(controller.state.document, document);
   assert.equal(report.schemaVersion, 1);
   assert.equal(report.outcome, 'timeout');
   assert.equal(report.reason, 'ui-watchdog');
@@ -227,15 +340,15 @@ test('timeout preserves a versioned partial report with explicit unknowns and UI
     peakMemoryBytes: null,
   });
 
-  controller.run(file);
+  controller.run(document);
   assert.equal(controller.state.status, 'running');
   assert.equal('diagnosticsReport' in controller.state, false);
   controller.stop();
 });
 
 test('timeout during execution keeps completed preparation and partial Worker timing', async () => {
-  const { controller, workers, file } = createController(45);
-  controller.run(file);
+  const { controller, workers, document } = createController(45);
+  controller.run(document);
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
   worker.emit({ type: 'progress', jobId, progress: workerProgress('execute', {
@@ -259,8 +372,8 @@ test('timeout during execution keeps completed preparation and partial Worker ti
 });
 
 test('timeout after resume without preparation counters preserves both phase snapshots', async () => {
-  const { controller, workers, file } = createController(45);
-  controller.run(file);
+  const { controller, workers, document } = createController(45);
+  controller.run(document);
   const worker = workers[0];
   const jobId = worker.messages[0].jobId;
   worker.emit({ type: 'progress', jobId, progress: workerProgress('execute', {
@@ -292,8 +405,8 @@ test('timeout after resume without preparation counters preserves both phase sna
 });
 
 test('timeout before the first worker message identifies startup and keeps transport unknown', async () => {
-  const { controller, workers, file } = createController(35);
-  controller.run(file);
+  const { controller, workers, document } = createController(35);
+  controller.run(document);
   const worker = workers[0];
 
   await pause(60);

@@ -1,11 +1,12 @@
 import type { RunOptions, RunResult } from '@playground/c11-engine/browser';
 import type { RunWorkerProgress } from './diagnostics.ts';
+import type { WorkspaceSourceSnapshot } from './documentSnapshot.ts';
 
 /** The parent owns cancellation and the worker owns preparation/execution. */
 export interface RunRequest {
   type: 'run';
   jobId: number;
-  file: File;
+  snapshot: WorkspaceSourceSnapshot;
   options: Omit<RunOptions, 'signal'>;
 }
 

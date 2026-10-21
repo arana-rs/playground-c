@@ -78,6 +78,10 @@ export interface RunDiagnosticsReport {
   schemaVersion: 1;
   outcome: 'timeout';
   reason: 'ui-watchdog';
+  document: {
+    id: string;
+    sourceRevision: number;
+  };
   file: {
     name: string;
     sizeBytes: number;

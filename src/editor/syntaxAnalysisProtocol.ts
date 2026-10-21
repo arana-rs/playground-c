@@ -1,9 +1,10 @@
 import type { PrepareOptions, SyntaxAnalysisResult } from '@playground/c11-engine/core';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
 
 export interface SyntaxAnalysisRequest {
   type: 'analyze';
   jobId: number;
-  source: string;
+  snapshot: WorkspaceSourceSnapshot;
   options: PrepareOptions;
 }
 

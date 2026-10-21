@@ -12,6 +12,12 @@ import type {
   RunWorkerProgress,
 } from './diagnostics.ts';
 import type { RunRequest, RunResponse, WorkerCommand } from './protocol.ts';
+import {
+  cloneWorkspaceSourceSnapshot,
+  createExecutionDocumentSnapshot,
+  createWorkspaceSourceSnapshot,
+} from './documentSnapshot.ts';
+import type { ExecutionDocumentSnapshot, WorkspaceSourceSnapshot } from './documentSnapshot.ts';
 import { RUN_CONFIGURATION } from './configuration.ts';
 import type { RunConfiguration } from './configuration.ts';
 import {
@@ -28,7 +34,8 @@ interface ActiveRun {
   worker: Worker;
   configuration: RunConfiguration;
   startedAt: number;
-  fileName: string;
+  document: ExecutionDocumentSnapshot;
+  sourceSnapshot: WorkspaceSourceSnapshot;
   fileSizeBytes: number;
   timeout: ReturnType<typeof setTimeout> | undefined;
   timeoutStartedAt: number | null;
@@ -136,12 +143,12 @@ export class RunnerController {
     const diagnosticsReport = this.timeoutReport(current);
     const transcript = addSystemEntry(
       this.flushDecoders(current),
-      `The ${formatDuration(current.configuration.timeoutMs)} time limit expired while starting, reading, preparing, or running "${current.fileName}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
+      `The ${formatDuration(current.configuration.timeoutMs)} time limit expired while starting, reading, preparing, or running "${current.document.fileName}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
       'warning',
     );
     this.finish(current, {
       status: 'timeout',
-      file: current.fileName,
+      document: current.document,
       timeoutMs: current.configuration.timeoutMs,
       diagnosticsReport,
       transcript,
@@ -188,8 +195,12 @@ export class RunnerController {
       schemaVersion: 1,
       outcome: 'timeout',
       reason: 'ui-watchdog',
+      document: {
+        id: current.document.documentId,
+        sourceRevision: current.document.sourceRevision,
+      },
       file: {
-        name: current.fileName,
+        name: current.document.fileName,
         sizeBytes: current.fileSizeBytes,
         lineCount: current.sourceLineCount,
       },
@@ -241,12 +252,22 @@ export class RunnerController {
   }
 
   private fail(current: ActiveRun, reason: 'start' | 'run' | 'response' | 'send', message: string) {
-    const transcript = addSystemEntry(this.flushDecoders(current), errorText(current.fileName, reason, message), 'error');
-    this.finish(current, { status: 'error', file: current.fileName, reason, message, transcript });
+    const transcript = addSystemEntry(this.flushDecoders(current), errorText(current.document.fileName, reason, message), 'error');
+    this.finish(current, { status: 'error', document: current.document, reason, message, transcript });
   }
 
-  run(file: File, configuration: RunConfiguration = this.configuration): void {
+  run(document: ExecutionDocumentSnapshot | WorkspaceSourceSnapshot, configuration: RunConfiguration = this.configuration): void {
     if (this.active) return;
+    const snapshot = createExecutionDocumentSnapshot(
+      document.documentId,
+      document.fileName,
+      document.sourceRevision,
+      document.source,
+    );
+    const sourceSnapshot = 'files' in document
+      ? cloneWorkspaceSourceSnapshot(document)
+      : createWorkspaceSourceSnapshot(snapshot);
+    const fileSizeBytes = new TextEncoder().encode(snapshot.source).byteLength;
     const startedAt = performance.now();
     const jobId = ++this.nextJobId;
     let worker: Worker;
@@ -258,8 +279,8 @@ export class RunnerController {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The browser could not start the execution engine.';
       this.publish({
-        status: 'error', file: file.name, reason: 'start', message,
-        transcript: [{ stream: 'system', text: errorText(file.name, 'start', message), tone: 'error' }],
+        status: 'error', document: snapshot, reason: 'start', message,
+        transcript: [{ stream: 'system', text: errorText(snapshot.fileName, 'start', message), tone: 'error' }],
       });
       return;
     }
@@ -269,8 +290,9 @@ export class RunnerController {
       worker,
       configuration,
       startedAt,
-      fileName: file.name,
-      fileSizeBytes: file.size,
+      document: snapshot,
+      sourceSnapshot,
+      fileSizeBytes,
       timeout: undefined,
       timeoutStartedAt: null,
       timeoutRemainingMs: configuration.timeoutMs,
@@ -289,7 +311,7 @@ export class RunnerController {
       firstWorkerEventAt: null,
     };
     this.active = current;
-    this.publish({ status: 'running', transcript: [], inputRequestId: null });
+    this.publish({ status: 'running', document: snapshot, transcript: [], inputRequestId: null });
 
     worker.onmessage = (event: MessageEvent<RunResponse>) => this.onWorkerMessage(current, event.data);
     worker.onerror = event => {
@@ -303,7 +325,7 @@ export class RunnerController {
     };
 
     this.armWatchdog(current);
-    const request: RunRequest = { type: 'run', jobId, file, options: configuration.options };
+    const request: RunRequest = { type: 'run', jobId, snapshot: sourceSnapshot, options: configuration.options };
     const dispatchStartedAt = performance.now();
     current.dispatchStartedAt = dispatchStartedAt;
     current.lastStageObservedAt = dispatchStartedAt;
@@ -335,14 +357,25 @@ export class RunnerController {
       current.lastRequestId = response.requestId;
       if (!this.pauseWatchdog(current)) return;
       current.inputRequestId = response.requestId;
-      this.publish({ status: 'running', transcript: this.currentState.transcript, inputRequestId: response.requestId });
+      this.publish({ status: 'running', document: current.document, transcript: this.currentState.transcript, inputRequestId: response.requestId });
       return;
     }
     if (response.type === 'result') {
       const transcript = this.flushDecoders(current);
-      const summary = formatResultSummary(response.result);
-      const completeTranscript = summary ? addSystemEntry(transcript, summary.text, summary.tone) : transcript;
-      this.finish(current, { status: 'finished', result: response.result, transcript: completeTranscript });
+      const summary = formatResultSummary(response.result, current.sourceSnapshot);
+      const completeTranscript = summary
+        ? addSystemEntry(transcript, summary.text, summary.tone, {
+          copyable: summary.copyable,
+          diagnosticLocations: summary.diagnosticLocations,
+        })
+        : transcript;
+      this.finish(current, {
+        status: 'finished',
+        document: current.document,
+        sourceSnapshot: current.sourceSnapshot,
+        result: response.result,
+        transcript: completeTranscript,
+      });
       return;
     }
     this.fail(current, response.phase === 'startup' ? 'start' : 'run', response.message);
@@ -366,6 +399,7 @@ export class RunnerController {
     if (state.status === 'running') {
       this.publish({
         status: 'running',
+        document: current.document,
         transcript: appendEntry(state.transcript, { stream: 'stdin', text: `${line}\n` }),
         inputRequestId: null,
       });
@@ -392,6 +426,7 @@ export class RunnerController {
     if (state.status === 'running') {
       this.publish({
         status: 'running',
+        document: current.document,
         transcript: appendEntry(state.transcript, { stream: 'system', text: '[EOF]\n', role: 'input' }),
         inputRequestId: null,
       });
@@ -404,7 +439,7 @@ export class RunnerController {
     const current = this.active;
     if (!current) return;
     const transcript = addSystemEntry(this.flushDecoders(current), 'Execution cancelled by the user.', 'warning');
-    this.finish(current, { status: 'cancelled', transcript });
+    this.finish(current, { status: 'cancelled', document: current.document, transcript });
   }
 
   dispose(): void {

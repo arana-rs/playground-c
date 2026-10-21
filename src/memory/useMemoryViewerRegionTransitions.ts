@@ -21,7 +21,7 @@ import {
 } from './stackTransition.ts';
 import { MemoryViewerExitCleanupTimer, readMemoryViewerExitDuration } from './exitCleanup.ts';
 import { chooseMemoryViewerHeapFocusId, compareMemoryViewerHeapObjects } from './heapSnapshots.ts';
-import { stackMemoryObjects } from './MemoryViewerRegionModel.ts';
+import { completeMemoryViewerHeapExitPresentation, resolveMemoryViewerHeapExitPresentation, stackMemoryObjects } from './MemoryViewerRegionModel.ts';
 import { EMPTY_EXIT_PRESENTATION, EMPTY_HEAP_EXIT_PRESENTATION, EMPTY_VALUE_CHANGE_PRESENTATION } from './MemoryViewerRegionModel.ts';
 import type { MemoryViewerExitPresentation, MemoryViewerHeapExitPresentation, MemoryViewerValueChangePresentation } from './MemoryViewerRegionModel.ts';
 
@@ -31,6 +31,7 @@ interface MemoryViewerSelectedSnapshot {
   stepIndex: number;
   activeScopes: readonly MemoryViewerActiveScope[];
   heapObjects: readonly DebugHeapObjectSnapshot[];
+  freedHeapObject: DebugHeapObjectSnapshot | null;
   arrays: readonly DebugArraySnapshot[];
   aggregates: readonly DebugAggregateSnapshot[];
   stackScalars: readonly DebugScalarSnapshot[];
@@ -43,6 +44,7 @@ interface UseMemoryViewerRegionTransitionsProps {
   stepIndex: number;
   activeScopes: readonly MemoryViewerActiveScope[];
   heapObjects: readonly DebugHeapObjectSnapshot[];
+  freedHeapObject: DebugHeapObjectSnapshot | null;
   arrays: readonly DebugArraySnapshot[];
   aggregates: readonly DebugAggregateSnapshot[];
   stackScalars: readonly DebugScalarSnapshot[];
@@ -58,7 +60,6 @@ interface UseMemoryViewerRegionTransitionsProps {
   selectedSnapshotRef: { current: MemoryViewerSelectedSnapshot };
   heapFocusIdRef: { current: number | null };
   exitTimerRef: { current: MemoryViewerExitCleanupTimer | null };
-  heapExitTimerRef: { current: MemoryViewerExitCleanupTimer | null };
   exitPresentation: MemoryViewerExitPresentation;
   setExitPresentation: (value: SetStateAction<MemoryViewerExitPresentation>) => void;
   heapExitPresentation: MemoryViewerHeapExitPresentation;
@@ -71,6 +72,7 @@ export function useMemoryViewerRegionTransitions({
   stepIndex,
   activeScopes,
   heapObjects,
+  freedHeapObject,
   arrays,
   aggregates,
   stackScalars,
@@ -86,7 +88,6 @@ export function useMemoryViewerRegionTransitions({
   selectedSnapshotRef,
   heapFocusIdRef,
   exitTimerRef,
-  heapExitTimerRef,
   exitPresentation,
   setExitPresentation,
   heapExitPresentation,
@@ -95,10 +96,6 @@ export function useMemoryViewerRegionTransitions({
 }: UseMemoryViewerRegionTransitionsProps) {
   function clearExitTimer() {
     exitTimerRef.current?.clear();
-  }
-
-  function clearHeapExitTimer() {
-    heapExitTimerRef.current?.clear();
   }
 
   function finishExitTransition(transitionStep: number, fullyVisible: boolean) {
@@ -125,12 +122,10 @@ export function useMemoryViewerRegionTransitions({
     }, duration);
   }
 
-  function finishHeapExitTransition(transitionStep: number, fullyVisible: boolean) {
-    heapExitTimerRef.current?.clear();
-
-    if (!fullyVisible) {
+  function finishHeapExitTransition(transitionStep: number, targetExists = true) {
+    if (!targetExists) {
       setHeapExitPresentation(current => current.stepIndex === transitionStep && current.phase === 'waiting'
-        ? EMPTY_HEAP_EXIT_PRESENTATION
+        ? completeMemoryViewerHeapExitPresentation(current)
         : current);
       return;
     }
@@ -138,37 +133,39 @@ export function useMemoryViewerRegionTransitions({
     setHeapExitPresentation(current => current.stepIndex === transitionStep && current.phase === 'waiting'
       ? { ...current, phase: 'fading' }
       : current);
-
-    const scrollArea = heapScrollRef.current;
-    if (!scrollArea) return;
-    const duration = readMemoryViewerExitDuration(window.getComputedStyle(scrollArea));
-    heapExitTimerRef.current?.schedule(() => {
-      setHeapExitPresentation(current => current.stepIndex === transitionStep && current.phase === 'fading'
-        ? EMPTY_HEAP_EXIT_PRESENTATION
-        : current);
-    }, duration);
   }
 
   useLayoutEffect(() => {
     const previous = selectedSnapshotRef.current;
-    const current = { stepIndex, activeScopes, heapObjects, arrays, aggregates, stackScalars, pointers, staticObjects };
+    const current = { stepIndex, activeScopes, heapObjects, freedHeapObject, arrays, aggregates, stackScalars, pointers, staticObjects };
     selectedSnapshotRef.current = current;
 
     if (status === 'starting' && stepIndex === 0) {
+      selectedSnapshotRef.current = { ...current, freedHeapObject: null };
       cancelStackFollow();
       cancelHeapFollow();
       heapFocusIdRef.current = null;
       clearExitTimer();
-      clearHeapExitTimer();
       setExitPresentation(EMPTY_EXIT_PRESENTATION);
       setHeapExitPresentation(EMPTY_HEAP_EXIT_PRESENTATION);
       setValueChangePresentation(EMPTY_VALUE_CHANGE_PRESENTATION);
       return;
     }
-    if (previous.stepIndex === stepIndex) return;
+    const freedObjectChanged = previous.freedHeapObject?.id !== freedHeapObject?.id;
+    if (previous.stepIndex === stepIndex) {
+      if (freedObjectChanged) {
+        setHeapExitPresentation(resolveMemoryViewerHeapExitPresentation(
+          heapExitPresentation,
+          previous.freedHeapObject,
+          freedHeapObject,
+          stepIndex,
+          previous.heapObjects,
+        ));
+      }
+      return;
+    }
 
     clearExitTimer();
-    clearHeapExitTimer();
     const changedStackScalarIds = findMemoryViewerChangedScalarIds(previous.stackScalars, stackScalars);
     const previousStackPointers = previous.pointers.filter(pointer => pointer.region === 'stack');
     const currentStackPointers = pointers.filter(pointer => pointer.region === 'stack');
@@ -220,7 +217,13 @@ export function useMemoryViewerRegionTransitions({
         created: heapTransition.created,
         deleted: [],
       });
-      setHeapExitPresentation(EMPTY_HEAP_EXIT_PRESENTATION);
+      setHeapExitPresentation(resolveMemoryViewerHeapExitPresentation(
+        heapExitPresentation,
+        previous.freedHeapObject,
+        freedHeapObject,
+        stepIndex,
+        previous.heapObjects,
+      ));
       setExitPresentation({
         stepIndex,
         deletedScalars: [],
@@ -247,15 +250,14 @@ export function useMemoryViewerRegionTransitions({
     }
 
     heapFocusIdRef.current = heapTransition.deleted.length > 0 ? null : heapFocusId;
-    setHeapExitPresentation(heapTransition.deleted.length > 0
-      ? {
-        stepIndex,
-        deletedObjects: heapTransition.deleted,
-        previousObjectIds: previous.heapObjects.map(object => object.id),
-        focusId: heapFocusId,
-        phase: 'waiting',
-      }
-      : EMPTY_HEAP_EXIT_PRESENTATION);
+    setHeapExitPresentation(resolveMemoryViewerHeapExitPresentation(
+      heapExitPresentation,
+      previous.freedHeapObject,
+      freedHeapObject,
+      stepIndex,
+      previous.heapObjects,
+      freedHeapObject === null ? heapTransition.deleted.at(-1) ?? null : null,
+    ));
     const exitingScopeIds = new Set([
       ...transition.deletedScalars.map(scalar => scalar.scopeId),
       ...transition.deletedPointers.flatMap(pointer => pointer.scopeId === null ? [] : [pointer.scopeId]),
@@ -289,12 +291,13 @@ export function useMemoryViewerRegionTransitions({
       ),
       phase: 'waiting',
     });
-  }, [activeScopes, aggregates, arrays, cancelHeapFollow, cancelStackFollow, heapObjects, pointers, stackScalars, staticObjects, status, stepIndex]);
+  }, [activeScopes, aggregates, arrays, cancelHeapFollow, cancelStackFollow, freedHeapObject, heapExitPresentation, heapObjects, pointers, stackScalars, staticObjects, status, stepIndex]);
 
   useLayoutEffect(() => {
     if (!expandedHeap) return;
-    const hasCurrentHeapExit = heapExitPresentation.stepIndex === stepIndex
-      && heapExitPresentation.deletedObjects.length > 0
+    const presentedReleaseId = freedHeapObject?.id ?? heapExitPresentation.deletedObjects.at(-1)?.id ?? null;
+    const hasCurrentHeapExit = presentedReleaseId !== null
+      && heapExitPresentation.deletedObjects.some(object => object.id === presentedReleaseId)
       && heapExitPresentation.phase === 'waiting';
     const focusId = hasCurrentHeapExit ? heapExitPresentation.focusId : heapFocusIdRef.current;
     if (focusId === null) return;
@@ -303,7 +306,7 @@ export function useMemoryViewerRegionTransitions({
       `[data-memory-viewer-scalar-id="${focusId}"]`,
     );
     if (!target) {
-      if (hasCurrentHeapExit) finishHeapExitTransition(stepIndex, false);
+      if (hasCurrentHeapExit) finishHeapExitTransition(heapExitPresentation.stepIndex, false);
       else heapFocusIdRef.current = null;
       return;
     }
@@ -317,9 +320,9 @@ export function useMemoryViewerRegionTransitions({
     ensureHeapVisible(
       target,
       12,
-      fullyVisible => finishHeapExitTransition(stepIndex, fullyVisible),
+      () => finishHeapExitTransition(heapExitPresentation.stepIndex),
     );
-  }, [ensureHeapVisible, expandedHeap, heapExitPresentation, heapObjects, heapScrollRef, stepIndex]);
+  }, [ensureHeapVisible, expandedHeap, freedHeapObject, heapExitPresentation, heapObjects, heapScrollRef, stepIndex]);
 
   useLayoutEffect(() => {
     if (exitPresentation.stepIndex !== stepIndex || exitPresentation.phase !== 'waiting') return;

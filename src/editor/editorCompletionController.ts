@@ -27,11 +27,12 @@ interface EditorCompletionOptions {
   completionEnabledRef: { current: boolean };
   completionRef: { current: ActiveEditorCompletion | null };
   setCompletion: (completion: EditorCompletionState | null) => void;
+  isReadOnly: () => boolean;
   isComposing: () => boolean;
   capture: () => EditorSnapshot;
   finishComposition: () => void;
   measure: CanvasRenderingContext2D | null;
-  history: ReturnType<typeof createEditorHistory>;
+  getHistory: () => ReturnType<typeof createEditorHistory>;
   resetPendingInput: () => void;
   setLimitMessage: (message: EditorLimitMessage | null) => void;
   write: (next: EditorSnapshot, viewport?: EditorViewport, keepVisible?: boolean,
@@ -48,11 +49,12 @@ export function createEditorCompletionController({
   completionEnabledRef,
   completionRef,
   setCompletion,
+  isReadOnly,
   isComposing,
   capture,
   finishComposition,
   measure,
-  history,
+  getHistory,
   resetPendingInput,
   setLimitMessage,
   write,
@@ -119,7 +121,7 @@ export function createEditorCompletionController({
   }
 
   function acceptCompletionAt(index: number): boolean {
-    if (!completionEnabledRef.current) {
+    if (isReadOnly() || !completionEnabledRef.current) {
       dismissCompletion();
       return false;
     }
@@ -148,6 +150,7 @@ export function createEditorCompletionController({
       dismissCompletion();
       return false;
     }
+    const history = getHistory();
     history.breakGroup();
     history.record(before, evaluation.snapshot);
     const nextOffset = current.replaceStart + replacement.length;

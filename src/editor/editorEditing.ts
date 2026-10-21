@@ -6,6 +6,13 @@ export interface EditorViewport {
   scrollLeft: number;
 }
 
+export function isEditorMutationBlocked(
+  readOnly: boolean,
+  canMutate?: () => boolean,
+): boolean {
+  return readOnly || canMutate?.() === false;
+}
+
 export function getSelection(editor: HTMLTextAreaElement): EditorSelection {
   return {
     start: editor.selectionStart,

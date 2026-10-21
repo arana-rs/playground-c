@@ -3,14 +3,17 @@ import { RUN_CONFIGURATION } from './configuration.ts';
 import type { RunConfiguration } from './configuration.ts';
 import { RunnerController } from './runnerController.ts';
 import type { RunnerState } from './consoleOutput.ts';
+import type { ExecutionDocumentSnapshot } from './documentSnapshot.ts';
 
 export { RUN_CONFIGURATION } from './configuration.ts';
 export type { RunConfiguration } from './configuration.ts';
 export type { RunDiagnosticsReport } from './diagnostics.ts';
+export type { ExecutionDocumentSnapshot } from './documentSnapshot.ts';
 export { RunnerController } from './runnerController.ts';
 export { formatConsole, formatConsoleSegments, getConsoleStatus } from './consoleOutput.ts';
 export type {
   ConsoleEntry,
+  ConsoleDiagnosticLocation,
   ConsoleOutputSegment,
   ConsoleOutputTone,
   ConsoleStatus,
@@ -32,7 +35,7 @@ export function useRunner(configuration: RunConfiguration = RUN_CONFIGURATION) {
   }, [runner]);
   useEffect(() => () => runner.dispose(), [runner]);
 
-  const run = useCallback((file: File, configuration?: RunConfiguration) => runner.run(file, configuration), [runner]);
+  const run = useCallback((document: ExecutionDocumentSnapshot, configuration?: RunConfiguration) => runner.run(document, configuration), [runner]);
   const stop = useCallback(() => runner.stop(), [runner]);
   const sendStdinLine = useCallback((line: string) => runner.sendStdinLine(line), [runner]);
   const sendStdinEOF = useCallback(() => runner.sendStdinEOF(), [runner]);

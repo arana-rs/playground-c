@@ -43,13 +43,14 @@ export function MemoryViewerScalarCard({
 
   return (
     <div
-      className={`memory-viewer-scalar${record.isParameter ? ' memory-viewer-scalar--parameter' : ''}${record.isStringLiteral ? ' memory-viewer-scalar--string-literal' : ''}${record.isHeapBlock ? ' memory-viewer-scalar--heap-block' : ''}${record.isArrayElement ? ' memory-viewer-scalar--array-element' : ''}${isAggregateMember ? ' memory-viewer-scalar--aggregate-member' : ''}${record.isPointer ? ' memory-viewer-scalar--pointer' : ''}${record.pointerStatus === 'null' ? ' memory-viewer-scalar--pointer-null' : ''}${record.isPointerTarget ? ' memory-viewer-scalar--pointer-target' : ''}${record.initialized === false ? ' memory-viewer-scalar--uninitialized' : ''}${record.valueChanged ? ' memory-viewer-scalar--value-changed' : ''}${exiting ? ' memory-viewer-scalar--exiting' : ''}${fading ? ' memory-viewer-scalar--fading' : ''}`}
+      className={`memory-viewer-scalar${record.isParameter ? ' memory-viewer-scalar--parameter' : ''}${record.isStringLiteral ? ' memory-viewer-scalar--string-literal' : ''}${record.isHeapBlock ? ' memory-viewer-scalar--heap-block' : ''}${record.isFreed ? ' memory-viewer-scalar--freed' : ''}${record.isArrayElement ? ' memory-viewer-scalar--array-element' : ''}${isAggregateMember ? ' memory-viewer-scalar--aggregate-member' : ''}${record.isPointer ? ' memory-viewer-scalar--pointer' : ''}${record.pointerStatus === 'null' ? ' memory-viewer-scalar--pointer-null' : ''}${record.isPointerTarget ? ' memory-viewer-scalar--pointer-target' : ''}${record.initialized === false ? ' memory-viewer-scalar--uninitialized' : ''}${record.valueChanged ? ' memory-viewer-scalar--value-changed' : ''}${exiting ? ' memory-viewer-scalar--exiting' : ''}${fading ? ' memory-viewer-scalar--fading' : ''}`}
       data-memory-viewer-scalar-id={record.id ?? undefined}
       data-memory-viewer-array-element-key={record.arrayElementKey ?? undefined}
       data-memory-viewer-aggregate-field-key={record.aggregateMemberKey ?? undefined}
       data-memory-viewer-aggregate-field-name={record.aggregateMemberName ?? undefined}
       data-origin={record.origin}
       data-duration={record.duration}
+      data-freed={record.isFreed ? 'true' : undefined}
       data-initialized={record.initialized === null ? undefined : String(record.initialized)}
       data-pointer-status={record.pointerStatus ?? undefined}
       data-value-changed={record.valueChanged ? 'true' : undefined}

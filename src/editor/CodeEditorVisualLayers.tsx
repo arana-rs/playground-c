@@ -2,6 +2,7 @@ import { memo, useMemo } from 'react';
 import type { RefObject } from 'react';
 import { MAX_EDITOR_LINES } from './limits.ts';
 import { highlightC } from './highlight.ts';
+import type { EditorLanguage } from './languageMode.ts';
 import { splitHighlightTokensAtDiagnostics } from './diagnosticRendering.ts';
 import type { EditorDiagnosticAnchorRange } from './editorDiagnosticAnchors.ts';
 
@@ -22,6 +23,7 @@ interface CodeEditorHighlightLayerProps {
   text: string;
   lineCount: number;
   readOnly: boolean;
+  language: EditorLanguage;
   highlightLine?: number;
   compactGutterClass: string;
   diagnosticAnchorRanges: readonly EditorDiagnosticAnchorRange[];
@@ -34,6 +36,7 @@ export const CodeEditorHighlightLayer = memo(function CodeEditorHighlightLayer({
   text,
   lineCount,
   readOnly,
+  language,
   highlightLine,
   compactGutterClass,
   diagnosticAnchorRanges,
@@ -41,7 +44,9 @@ export const CodeEditorHighlightLayer = memo(function CodeEditorHighlightLayer({
   highlightRef,
   executionLineRef,
 }: CodeEditorHighlightLayerProps) {
-  const tokens = useMemo(() => highlightC(text), [text]);
+  const tokens = useMemo(() => language === 'c'
+    ? highlightC(text)
+    : [{ start: 0, end: text.length, kind: 'plain' as const }], [language, text]);
   const tokenSpans = useMemo(() => splitHighlightTokensAtDiagnostics(
     text,
     tokens,

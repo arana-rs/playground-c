@@ -1,28 +1,54 @@
 import type { Diagnostic, RunResult } from '@playground/c11-engine/browser';
 import { formatDiagnosticLocation } from './diagnosticFormatting.ts';
 import type { RunDiagnosticsReport } from './diagnostics.ts';
+import type { ExecutionDocumentSnapshot, WorkspaceSourceSnapshot } from './documentSnapshot.ts';
+import { isEditorSourceLocationNavigable } from '../editor/editorDiagnostics.ts';
 
 export type ConsoleSystemTone = 'system' | 'warning' | 'error';
 export type ConsoleOutputTone = 'program' | ConsoleSystemTone;
 
+export interface ConsoleDiagnosticLocation {
+  readonly start: number;
+  readonly end: number;
+  readonly file: string;
+  readonly line: number;
+  readonly column: number;
+  readonly sourceId?: string;
+}
+
 export type ConsoleEntry =
   | { stream: 'stdout' | 'stderr' | 'stdin'; text: string }
-  | { stream: 'system'; text: string; tone?: ConsoleSystemTone; role?: 'input' | 'protected' };
+  | {
+    stream: 'system';
+    text: string;
+    tone?: ConsoleSystemTone;
+    role?: 'input' | 'protected';
+    copyable?: boolean;
+    diagnosticLocations?: readonly ConsoleDiagnosticLocation[];
+  };
 
 export interface ConsoleOutputSegment {
   tone: ConsoleOutputTone;
   text: string;
   role?: 'output' | 'input' | 'protected';
   stream?: ConsoleEntry['stream'];
+  copyable?: boolean;
+  diagnosticLocations?: readonly ConsoleDiagnosticLocation[];
 }
 
 export type RunnerState =
   | { status: 'idle'; transcript: readonly ConsoleEntry[] }
-  | { status: 'running'; transcript: readonly ConsoleEntry[]; inputRequestId: number | null }
-  | { status: 'cancelled'; transcript: readonly ConsoleEntry[] }
-  | { status: 'finished'; result: RunResult; transcript: readonly ConsoleEntry[] }
-  | { status: 'error'; file: string; reason: 'start' | 'run' | 'response' | 'send'; message: string; transcript: readonly ConsoleEntry[] }
-  | { status: 'timeout'; file: string; timeoutMs: number; diagnosticsReport: RunDiagnosticsReport; transcript: readonly ConsoleEntry[] };
+  | { status: 'running'; document: ExecutionDocumentSnapshot; transcript: readonly ConsoleEntry[]; inputRequestId: number | null }
+  | { status: 'cancelled'; document: ExecutionDocumentSnapshot; transcript: readonly ConsoleEntry[] }
+  | {
+    status: 'finished';
+    document: ExecutionDocumentSnapshot;
+    sourceSnapshot: WorkspaceSourceSnapshot;
+    result: RunResult;
+    transcript: readonly ConsoleEntry[];
+  }
+  | { status: 'error'; document: ExecutionDocumentSnapshot; reason: 'start' | 'run' | 'response' | 'send'; message: string; transcript: readonly ConsoleEntry[] }
+  | { status: 'timeout'; document: ExecutionDocumentSnapshot; timeoutMs: number; diagnosticsReport: RunDiagnosticsReport; transcript: readonly ConsoleEntry[] };
 
 export type ConsoleStatusTone = 'ready' | 'running' | 'waiting' | 'finished' | 'stopped' | 'cancelled' | 'error';
 export type ConsoleStatusKey = 'ready' | 'running' | 'waitingInput' | 'cancelled' | 'error' | 'timedOut' | 'stopped' | 'finished';
@@ -68,21 +94,43 @@ function appendOutputSegment(
   tone: ConsoleOutputTone,
   role: ConsoleOutputSegment['role'] = 'output',
   stream?: ConsoleOutputSegment['stream'],
+  copyable?: boolean,
+  diagnosticLocations?: readonly ConsoleDiagnosticLocation[],
 ) {
   if (!text) return;
   const previous = segments.at(-1);
-  if (previous?.tone === tone && previous.role === role && previous.stream === stream) previous.text += text;
-  else segments.push({ tone, text, role, stream });
+  const hasLocations = (previous?.diagnosticLocations?.length ?? 0) > 0 || (diagnosticLocations?.length ?? 0) > 0;
+  if (!hasLocations && previous?.tone === tone && previous.role === role && previous.stream === stream && previous.copyable === copyable) previous.text += text;
+  else segments.push({
+    tone,
+    text,
+    role,
+    stream,
+    ...(copyable === false ? { copyable: false } : {}),
+    ...(diagnosticLocations?.length ? { diagnosticLocations } : {}),
+  });
 }
 
 function appendOutputSection(
   segments: ConsoleOutputSegment[],
-  next: { tone: ConsoleOutputTone; text: string; role?: ConsoleOutputSegment['role']; stream?: ConsoleOutputSegment['stream'] },
+  next: {
+    tone: ConsoleOutputTone;
+    text: string;
+    role?: ConsoleOutputSegment['role'];
+    stream?: ConsoleOutputSegment['stream'];
+    copyable?: boolean;
+    diagnosticLocations?: readonly ConsoleDiagnosticLocation[];
+  },
 ) {
   if (!next.text) return;
   const previous = segments.at(-1);
   const separator = previous && !previous.text.endsWith('\n') ? '\n' : '';
-  appendOutputSegment(segments, `${separator}${next.text}`, next.tone, next.role, next.stream);
+  const diagnosticLocations = next.diagnosticLocations?.map(location => ({
+    ...location,
+    start: location.start + separator.length,
+    end: location.end + separator.length,
+  }));
+  appendOutputSegment(segments, `${separator}${next.text}`, next.tone, next.role, next.stream, next.copyable, diagnosticLocations);
 }
 
 function formatTranscriptSegments(transcript: readonly ConsoleEntry[]): ConsoleOutputSegment[] {
@@ -93,7 +141,15 @@ function formatTranscriptSegments(transcript: readonly ConsoleEntry[]): ConsoleO
     } else {
       const tone = entry.stream === 'system' ? entry.tone ?? 'system' : 'program';
       const role = entry.stream === 'system' ? entry.role ?? 'protected' : entry.stream === 'stdin' ? 'input' : 'output';
-      appendOutputSegment(segments, entry.text, tone, role, entry.stream);
+      appendOutputSegment(
+        segments,
+        entry.text,
+        tone,
+        role,
+        entry.stream,
+        entry.stream === 'system' ? entry.copyable : undefined,
+        entry.stream === 'system' ? entry.diagnosticLocations : undefined,
+      );
     }
   }
   return segments;
@@ -103,10 +159,22 @@ export function addSystemEntry(
   transcript: readonly ConsoleEntry[],
   message: string,
   tone: ConsoleSystemTone = 'system',
+  options: { copyable?: boolean; diagnosticLocations?: readonly ConsoleDiagnosticLocation[] } = {},
 ): readonly ConsoleEntry[] {
   const current = transcript.at(-1)?.text ?? '';
   const separator = transcript.length > 0 && current.length > 0 && !current.endsWith('\n') ? '\n' : '';
-  return appendEntry(transcript, { stream: 'system', text: `${separator}${message}`, tone });
+  const diagnosticLocations = options.diagnosticLocations?.map(location => ({
+    ...location,
+    start: location.start + separator.length,
+    end: location.end + separator.length,
+  }));
+  return appendEntry(transcript, {
+    stream: 'system',
+    text: `${separator}${message}`,
+    tone,
+    ...options,
+    ...(diagnosticLocations?.length ? { diagnosticLocations } : {}),
+  });
 }
 
 export function errorText(file: string, reason: 'start' | 'run' | 'response' | 'send', message: string): string {
@@ -122,14 +190,58 @@ export function formatDuration(milliseconds: number) {
   return Number.isInteger(seconds) ? `${formatCount(seconds)} s` : `${formatCount(milliseconds)} ms`;
 }
 
-function formatDiagnostic(item: Diagnostic) {
-  return `${formatDiagnosticLocation(item)}: ${item.message}`;
-}
-
 function appendConsoleSection(current: string, next: string): string {
   if (!next) return current;
   if (!current) return next;
   return `${current}${current.endsWith('\n') ? '' : '\n'}${next}`;
+}
+
+function formatDiagnosticLines(
+  diagnostics: readonly Diagnostic[],
+  sourceSnapshot: WorkspaceSourceSnapshot | undefined,
+  includeMessages: boolean,
+): { text: string; diagnosticLocations: readonly ConsoleDiagnosticLocation[] } {
+  let text = '';
+  const diagnosticLocations: ConsoleDiagnosticLocation[] = [];
+  for (const diagnostic of diagnostics) {
+    if (text) text += '\n';
+    const column = diagnostic.column === undefined ? 1 : diagnostic.column;
+    const locationText = diagnostic.column === undefined
+      ? `${diagnostic.file}:${diagnostic.line}:${column}`
+      : formatDiagnosticLocation(diagnostic);
+    const start = text.length;
+    text += locationText;
+    const sourceFile = sourceSnapshot?.files.find(file => file.name === diagnostic.file);
+    const sourceId = sourceFile
+      && isEditorSourceLocationNavigable(sourceFile.source, sourceFile.name, diagnostic.line, column)
+      ? sourceFile.id
+      : undefined;
+    diagnosticLocations.push({
+      start,
+      end: text.length,
+      file: diagnostic.file,
+      line: diagnostic.line,
+      column,
+      ...(sourceId ? { sourceId } : {}),
+    });
+    if (includeMessages) text += `: ${diagnostic.message}`;
+  }
+  return { text, diagnosticLocations };
+}
+
+function appendDiagnosticSection(
+  heading: string,
+  details: { text: string; diagnosticLocations: readonly ConsoleDiagnosticLocation[] },
+) {
+  const separator = details.text && heading && !heading.endsWith('\n') ? '\n' : '';
+  return {
+    text: appendConsoleSection(heading, details.text),
+    diagnosticLocations: details.diagnosticLocations.map(location => ({
+      ...location,
+      start: location.start + heading.length + separator.length,
+      end: location.end + heading.length + separator.length,
+    })),
+  };
 }
 
 function formatOutputSegments(result: RunResult): ConsoleOutputSegment[] {
@@ -197,50 +309,64 @@ function limitUsage(result: LimitRunResult): number | undefined {
   }
 }
 
-function formatLimit(result: LimitRunResult) {
+function formatLimit(result: LimitRunResult, sourceSnapshot?: WorkspaceSourceSnapshot) {
   const description = limitDescriptions[result.resource];
   const stage = result.stage === 'prepare' ? 'Preparation stopped' : 'Execution stopped';
   const usage = limitUsage(result);
   const counts = usage === undefined || usage <= result.limit
     ? `${formatCount(result.limit)} ${description.unit} allowed`
     : `${formatCount(result.limit)} ${description.unit} allowed; ${formatCount(usage)} were counted`;
-  const locations = result.diagnostics.map(item => formatDiagnosticLocation(item)).join('\n');
-  return appendConsoleSection(
-    `${stage}: the ${description.label} limit was reached (${counts}). ${description.reason}`,
-    locations,
-  );
+  const heading = `${stage}: the ${description.label} limit was reached (${counts}). ${description.reason}`;
+  return appendDiagnosticSection(heading, formatDiagnosticLines(result.diagnostics, sourceSnapshot, false));
 }
 
 interface ConsoleSystemMessage {
   tone: ConsoleSystemTone;
   text: string;
+  copyable?: boolean;
+  diagnosticLocations?: readonly ConsoleDiagnosticLocation[];
 }
 
-export function formatResultSummary(result: RunResult): ConsoleSystemMessage {
+export function formatResultSummary(
+  result: RunResult,
+  sourceSnapshot?: WorkspaceSourceSnapshot,
+): ConsoleSystemMessage {
   if (result.kind === 'terminated') {
-    return { tone: 'system', text: `exit code: ${result.exitCode}` };
+    return { tone: 'system', text: `exit code: ${result.exitCode}`, copyable: false };
   }
   if (result.kind === 'cancelled') {
     return { tone: 'warning', text: `Execution was cancelled during the ${result.stage} stage.` };
   }
   if (result.kind === 'limit') {
-    return { tone: 'warning', text: formatLimit(result) };
+    return { tone: 'warning', ...formatLimit(result, sourceSnapshot) };
   }
   if (result.kind === 'runtime-error') {
+    const formatted = appendDiagnosticSection(
+      'Runtime error:',
+      formatDiagnosticLines(result.diagnostics, sourceSnapshot, true),
+    );
     return {
       tone: 'error',
-      text: appendConsoleSection('Runtime error:', result.diagnostics.map(formatDiagnostic).join('\n')),
+      ...formatted,
     };
   }
   if (result.kind === 'prepare-error') {
+    const formatted = appendDiagnosticSection(
+      'Could not prepare the program:',
+      formatDiagnosticLines(result.diagnostics, sourceSnapshot, true),
+    );
     return {
       tone: 'error',
-      text: appendConsoleSection('Could not prepare the program:', result.diagnostics.map(formatDiagnostic).join('\n')),
+      ...formatted,
     };
   }
+  const formatted = appendDiagnosticSection(
+    'Could not read the file for execution:',
+    formatDiagnosticLines(result.diagnostics, sourceSnapshot, true),
+  );
   return {
     tone: 'error',
-    text: appendConsoleSection('Could not read the file for execution:', result.diagnostics.map(formatDiagnostic).join('\n')),
+    ...formatted,
   };
 }
 
@@ -251,18 +377,18 @@ export function formatConsoleSegments(state: RunnerState): readonly ConsoleOutpu
   if (state.status === 'running') return [];
   if (state.status === 'cancelled') return [{ tone: 'warning', text: 'Execution cancelled by the user.', role: 'protected', stream: 'system' }];
   if (state.status === 'error') {
-    return [{ tone: 'error', text: errorText(state.file, state.reason, state.message), role: 'protected', stream: 'system' }];
+    return [{ tone: 'error', text: errorText(state.document.fileName, state.reason, state.message), role: 'protected', stream: 'system' }];
   }
   if (state.status === 'timeout') {
     return [{
       tone: 'warning',
       role: 'protected',
       stream: 'system',
-      text: `The ${formatDuration(state.timeoutMs)} time limit expired while starting, reading, preparing, or running "${state.file}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
+      text: `The ${formatDuration(state.timeoutMs)} time limit expired while starting, reading, preparing, or running "${state.document.fileName}"; execution stopped. Check for slow code such as loops or recursion. A valid program may also need more time.`,
     }];
   }
   const segments = formatOutputSegments(state.result);
-  const summary = formatResultSummary(state.result);
+  const summary = formatResultSummary(state.result, state.sourceSnapshot);
   appendOutputSection(segments, { ...summary, role: 'protected', stream: 'system' });
   return segments;
 }

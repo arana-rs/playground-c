@@ -15,6 +15,8 @@ export interface EditorDiagnosticRelatedLocation {
   readonly column: number;
   readonly endLine?: number;
   readonly endColumn?: number;
+  /** Stable workspace identity only when this note maps to a physical source location. */
+  readonly sourceId?: string;
   /** Physical source fragments are available only when this location maps safely to the editor. */
   readonly anchors: readonly EditorDiagnosticAnchor[];
 }
@@ -36,6 +38,24 @@ export interface EditorDiagnosticGroup {
   readonly line: number;
   readonly diagnostics: readonly EditorDiagnostic[];
 }
+
+export interface EditorSourceLocationTarget {
+  readonly sourceId?: string;
+  readonly file: string;
+  readonly line: number;
+  readonly column: number;
+}
+
+export type EditorSourceLocationResolution =
+  | {
+    readonly status: 'available';
+    readonly documentId: string;
+    readonly fileName: string;
+    readonly source: string;
+    readonly offset: number;
+    readonly stale: boolean;
+  }
+  | { readonly status: 'unavailable'; readonly reason: 'unknown-source' | 'missing-source' | 'invalid-location' };
 
 interface DiagnosticSourceLocation {
   readonly message?: string;
@@ -125,6 +145,58 @@ function lineOffset(lines: readonly SourceLine[], line: number, column: number):
   if (!sourceLine) return null;
   const offset = sourceLine.start + column - 1;
   return offset <= sourceLine.end ? offset : null;
+}
+
+/** Convert a 1-based diagnostic position with the editor's UTF-16 and CRLF rules. */
+export function getEditorSourceLocationOffset(
+  source: string,
+  line: number,
+  column = 1,
+  clamp = false,
+): number | null {
+  if (!isSafeCoordinate(line) || !isSafeCoordinate(column)) return null;
+  const lines = sourceLines(source);
+  if (!clamp) return lineOffset(lines, line, column);
+
+  const boundedLine = Math.min(line, lines.length);
+  const sourceLine = lines[boundedLine - 1];
+  if (!sourceLine) return null;
+  const boundedColumn = Math.min(column, sourceLine.end - sourceLine.start + 1);
+  return lineOffset(lines, boundedLine, boundedColumn);
+}
+
+/** A logical C location cannot be mapped to editor lines when the source uses #line. */
+export function isEditorSourceLocationNavigable(
+  source: string,
+  fileName: string,
+  line: number,
+  column = 1,
+): boolean {
+  if (fileName !== 'Makefile' && couldRemapLines(source)) return false;
+  return getEditorSourceLocationOffset(source, line, column) !== null;
+}
+
+/** Resolve captured diagnostic identity against the current workspace by ID, never by name. */
+export function resolveEditorSourceLocation(
+  location: EditorSourceLocationTarget,
+  currentFiles: readonly { readonly id: string; readonly name: string; readonly source: string }[],
+  capturedFiles: readonly { readonly id: string; readonly name: string; readonly source: string }[],
+): EditorSourceLocationResolution {
+  if (!location.sourceId) return { status: 'unavailable', reason: 'unknown-source' };
+  const capturedFile = capturedFiles.find(file => file.id === location.sourceId);
+  if (!capturedFile) return { status: 'unavailable', reason: 'unknown-source' };
+  const currentFile = currentFiles.find(file => file.id === location.sourceId);
+  if (!currentFile) return { status: 'unavailable', reason: 'missing-source' };
+  const offset = getEditorSourceLocationOffset(currentFile.source, location.line, location.column, true);
+  if (offset === null) return { status: 'unavailable', reason: 'invalid-location' };
+  return {
+    status: 'available',
+    documentId: currentFile.id,
+    fileName: currentFile.name,
+    source: currentFile.source,
+    offset,
+    stale: currentFile.source !== capturedFile.source,
+  };
 }
 
 function isLowSurrogate(source: string, offset: number): boolean {
@@ -236,6 +308,7 @@ export function projectEditorDiagnostics(
   source: string,
   diagnostics: readonly Diagnostic[],
   fileName = 'main.c',
+  workspaceFiles?: readonly { readonly id: string; readonly name: string; readonly source: string }[],
 ): EditorDiagnostic[] {
   if (couldRemapLines(source)) return [];
 
@@ -246,7 +319,7 @@ export function projectEditorDiagnostics(
     const diagnostic = rawDiagnostic as DiagnosticWithRanges;
     if (diagnostic.file !== fileName || !isSafeCoordinate(diagnostic.line) || !isSafeCoordinate(diagnostic.column)) continue;
     const primaryLine = lines[diagnostic.line - 1];
-    const primaryOffset = lineOffset(lines, diagnostic.line, diagnostic.column);
+    const primaryOffset = getEditorSourceLocationOffset(source, diagnostic.line, diagnostic.column);
     if (!primaryLine || primaryOffset === null
       || (primaryOffset === primaryLine.end && diagnostic.line !== lines.length)) continue;
     const primaryLocation: DiagnosticSourceLocation = {
@@ -258,11 +331,19 @@ export function projectEditorDiagnostics(
     };
     const anchors = projectLocationAnchors(source, lines, primaryLocation, fileName);
     const anchor = anchors[0] ?? null;
-    const relatedLocations = (diagnostic.related ?? []).map(location => ({
-      ...location,
-      message: location.message ?? '',
-      anchors: projectLocationAnchors(source, lines, location, fileName),
-    }));
+    const relatedLocations = (diagnostic.related ?? []).map(location => {
+      const sourceFile = workspaceFiles?.find(file => file.name === location.file);
+      const sourceId = sourceFile
+        && isEditorSourceLocationNavigable(sourceFile.source, sourceFile.name, location.line, location.column)
+        ? sourceFile.id
+        : undefined;
+      return {
+        ...location,
+        message: location.message ?? '',
+        anchors: projectLocationAnchors(source, lines, location, fileName),
+        ...(sourceId ? { sourceId } : {}),
+      };
+    });
 
     const signature = JSON.stringify([
       diagnostic.file,
@@ -308,6 +389,7 @@ export function projectEditorDiagnosticGroups(
   source: string,
   diagnostics: readonly Diagnostic[],
   fileName = 'main.c',
+  workspaceFiles?: readonly { readonly id: string; readonly name: string; readonly source: string }[],
 ): EditorDiagnosticGroup[] {
-  return groupEditorDiagnosticsByLine(projectEditorDiagnostics(source, diagnostics, fileName));
+  return groupEditorDiagnosticsByLine(projectEditorDiagnostics(source, diagnostics, fileName, workspaceFiles));
 }

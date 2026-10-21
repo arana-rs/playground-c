@@ -6,6 +6,8 @@ import { ALLOCATION_ALIGNMENT } from './state.ts';
 import type { AddressReservation } from './state.ts';
 
 export abstract class MemoryAddressSpace extends MemoryAllocation {
+  private static readonly compactHeapSlackSlots = 2n;
+
   protected override reservationSlotCount(size: number): bigint {
     const bytesWithGuard = BigInt(size) + BigInt(VIRTUAL_MEMORY_LAYOUT.guardBytes);
     return (bytesWithGuard + ALLOCATION_ALIGNMENT - 1n) / ALLOCATION_ALIGNMENT;
@@ -88,7 +90,7 @@ export abstract class MemoryAddressSpace extends MemoryAllocation {
       const remainder = address % alignmentBytes;
       return remainder === 0n ? slot : slot + (alignmentBytes - remainder) / ALLOCATION_ALIGNMENT;
     };
-    const randomStart = (): bigint => {
+    const randomStart = (latestStart: bigint): bigint => {
       const random = this.heapAddressRandom();
       if (!Number.isFinite(random) || random < 0 || random >= 1) {
         failure('ENGINE_INTERNAL_ERROR', 'The heap address generator produced an invalid value.', at);
@@ -98,6 +100,13 @@ export abstract class MemoryAddressSpace extends MemoryAllocation {
     };
     const occupiedExtents = [...this.heapExtents.entries()]
       .filter(([start]) => start !== ignoredFirstSlot);
+    const occupied = occupiedExtents
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    const reservationAt = (first: bigint): AddressReservation => ({
+      virtualBase: heapRange.start + first * ALLOCATION_ALIGNMENT,
+      endExclusive: heapRange.start + (first + slotCount) * ALLOCATION_ALIGNMENT,
+      heapSlotCount: slotCount,
+    });
     const fits = (first: bigint): boolean => {
       const end = first + slotCount;
       for (const [occupiedStart, occupiedEnd] of occupiedExtents) {
@@ -105,30 +114,39 @@ export abstract class MemoryAddressSpace extends MemoryAllocation {
       }
       return true;
     };
-    for (let attempt = 0; attempt < 64; attempt++) {
-      const first = randomStart();
-      if (fits(first)) {
-        const virtualBase = heapRange.start + first * ALLOCATION_ALIGNMENT;
-        return { virtualBase, endExclusive: heapRange.start + (first + slotCount) * ALLOCATION_ALIGNMENT, heapSlotCount: slotCount };
+    const randomFit = (latest: bigint): AddressReservation | undefined => {
+      for (let attempt = 0; attempt < 64; attempt++) {
+        const first = randomStart(latest);
+        if (first <= latest && fits(first)) return reservationAt(first);
       }
-    }
+      return undefined;
+    };
 
-    // A sorted list of extents bounds this fallback by live allocation count,
-    // rather than searching the enormous virtual address interval one slot at a time.
-    const occupied = occupiedExtents
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-    let candidate = alignSlot(0n);
-    for (const [start, end] of occupied) {
-      if (candidate <= latestStart && candidate + slotCount <= start) {
-        const virtualBase = heapRange.start + candidate * ALLOCATION_ALIGNMENT;
-        return { virtualBase, endExclusive: heapRange.start + (candidate + slotCount) * ALLOCATION_ALIGNMENT, heapSlotCount: slotCount };
+    const firstFit = (latest: bigint): AddressReservation | undefined => {
+      // A sorted list of extents bounds this scan by live allocation count,
+      // rather than searching the virtual address interval one slot at a time.
+      let candidate = alignSlot(0n);
+      for (const [start, end] of occupied) {
+        if (candidate <= latest && candidate + slotCount <= start) return reservationAt(candidate);
+        if (end > candidate) candidate = alignSlot(end);
       }
-      if (end > candidate) candidate = alignSlot(end);
-    }
-    if (candidate <= latestStart) {
-      const virtualBase = heapRange.start + candidate * ALLOCATION_ALIGNMENT;
-      return { virtualBase, endExclusive: heapRange.start + (candidate + slotCount) * ALLOCATION_ALIGNMENT, heapSlotCount: slotCount };
-    }
-    return undefined;
+      if (candidate <= latest && candidate + slotCount <= totalSlots) return reservationAt(candidate);
+      return undefined;
+    };
+
+    // Prefer a compact prefix that grows with live reservations. The extra two
+    // slots allow small gaps, so later allocations can land before, after, or
+    // between existing blocks without scattering ordinary programs across the arena.
+    const occupiedEnd = occupied.reduce((end, [, occupiedEnd]) => occupiedEnd > end ? occupiedEnd : end, 0n);
+    const compactLatestStart = occupiedEnd + MemoryAddressSpace.compactHeapSlackSlots < latestStart
+      ? occupiedEnd + MemoryAddressSpace.compactHeapSlackSlots
+      : latestStart;
+    const compactReservation = randomFit(compactLatestStart) ?? firstFit(compactLatestStart);
+    if (compactReservation) return compactReservation;
+    if (compactLatestStart === latestStart) return undefined;
+
+    // Preserve the complete heap arena: use its remaining gaps when the compact
+    // search cannot fit this request or the live allocations have fragmented it.
+    return randomFit(latestStart) ?? firstFit(latestStart);
   }
 }

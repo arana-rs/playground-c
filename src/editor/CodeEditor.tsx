@@ -8,7 +8,9 @@ import {
   getDiagnosticPopoverVerticalPlacement,
 } from './diagnosticRendering.ts';
 import type { DiagnosticAnchorHitbox } from './diagnosticRendering.ts';
-import type { EditorDiagnosticGroup } from './editorDiagnostics.ts';
+import type { EditorDiagnosticGroup, EditorSourceLocationTarget } from './editorDiagnostics.ts';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
+import type { DiagnosticNavigationOutcome } from '../components/DiagnosticLocationAction.tsx';
 import type { EditorCompletionState } from './useCodeEditor.ts';
 import { useI18n } from '../i18n.tsx';
 import {
@@ -20,10 +22,12 @@ import { CodeEditorInput } from './CodeEditorInput.tsx';
 import { CodeEditorLimitStatus } from './CodeEditorLimitStatus.tsx';
 import { CodeEditorGutterLayer, CodeEditorHighlightLayer } from './CodeEditorVisualLayers.tsx';
 import { getEditorDiagnosticAnchorRanges } from './editorDiagnosticAnchors.ts';
+import { getEditorLanguage } from './languageMode.ts';
 
 interface CodeEditorProps {
   editorRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
+  fileName?: string;
   initialText?: string;
   activeLine?: number;
   highlightLine?: number;
@@ -32,18 +36,26 @@ interface CodeEditorProps {
   compactReadOnlyGutter?: boolean;
   limitMessage?: EditorLimitMessage | null;
   diagnostics?: readonly EditorDiagnosticGroup[];
+  sourceFiles?: readonly { readonly id: string; readonly name: string; readonly source: string }[];
+  sourceSnapshot?: WorkspaceSourceSnapshot;
+  onDiagnosticNavigate?: (
+    location: EditorSourceLocationTarget,
+    snapshot: WorkspaceSourceSnapshot,
+  ) => DiagnosticNavigationOutcome;
   completion?: EditorCompletionState | null;
   onCompletionAccept?: (index: number) => boolean;
   onCompletionDismiss?: () => void;
 }
 
 export const CodeEditor = memo(function CodeEditor({
-  editorRef, text, initialText = '', activeLine = 1, highlightLine,
+  editorRef, text, fileName = 'main.c', initialText = '', activeLine = 1, highlightLine,
   readOnly = false, showActiveLine = true, compactReadOnlyGutter = false,
   limitMessage = null, diagnostics = [], completion = null, onCompletionAccept,
-  onCompletionDismiss,
+  onCompletionDismiss, sourceFiles = [], sourceSnapshot, onDiagnosticNavigate,
 }: CodeEditorProps) {
   const { t } = useI18n();
+  const language = readOnly ? 'c' : getEditorLanguage(fileName);
+  const editorCompletion = language === 'c' ? completion : null;
   const viewportRef = useRef<HTMLDivElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   const executionLineRef = useRef<HTMLDivElement>(null);
@@ -63,7 +75,7 @@ export const CodeEditor = memo(function CodeEditor({
   const [focusedDiagnosticLine, setFocusedDiagnosticLine] = useState<number | null>(null);
   const [pinnedDiagnosticLine, setPinnedDiagnosticLine] = useState<number | null>(null);
   const [dismissedDiagnosticLine, setDismissedDiagnosticLine] = useState<number | null>(null);
-  const diagnosticGroups = readOnly ? [] : diagnostics;
+  const diagnosticGroups = readOnly || language !== 'c' ? [] : diagnostics;
   const diagnosticGroupByLine = useMemo(
     () => new Map(diagnosticGroups.map(group => [group.line, group] as const)),
     [diagnosticGroups],
@@ -124,10 +136,14 @@ export const CodeEditor = memo(function CodeEditor({
     overlay: completionOverlay,
   } = useCodeEditorCompletionOverlay({
     editorRef,
-    completion,
-    onCompletionAccept,
+    completion: editorCompletion,
+    onCompletionAccept: language === 'c' ? onCompletionAccept : undefined,
     onCompletionDismiss,
   });
+
+  useEffect(() => {
+    if (language !== 'c') onCompletionDismiss?.();
+  }, [language, onCompletionDismiss]);
 
   const getDiagnosticAnchorHitboxes = useCallback(() => {
     if (diagnosticAnchorHitboxesRef.current) return diagnosticAnchorHitboxesRef.current;
@@ -168,7 +184,14 @@ export const CodeEditor = memo(function CodeEditor({
     }
     gutter.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
     if (diagnosticMarkers) {
-      diagnosticMarkers.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
+      diagnosticMarkers.style.removeProperty('transform');
+      for (const marker of diagnosticMarkers.querySelectorAll<HTMLElement>('.editor-diagnostic-marker')) {
+        const line = Number(marker.dataset.diagnosticLine);
+        if (!Number.isSafeInteger(line)) continue;
+        const top = 8 + (line - 1) * 21 - editor.scrollTop;
+        marker.style.top = `${top}px`;
+        marker.style.visibility = top < 0 || top + 21 > editor.clientHeight ? 'hidden' : '';
+      }
     }
     dismissOffscreenCompletion();
     const activeLine = activeDiagnosticLineRef.current;
@@ -284,7 +307,7 @@ export const CodeEditor = memo(function CodeEditor({
   useLayoutEffect(() => {
     diagnosticAnchorHitboxesRef.current = null;
     syncScroll();
-  }, [text, highlightLine, completion, diagnosticGroups.length, diagnosticAnchorRanges, syncScroll]);
+  }, [text, highlightLine, editorCompletion, diagnosticGroups.length, diagnosticAnchorRanges, syncScroll]);
 
   useLayoutEffect(() => {
     activeDiagnosticLineRef.current = activeDiagnosticGroup?.line ?? null;
@@ -308,8 +331,16 @@ export const CodeEditor = memo(function CodeEditor({
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      if (event.target instanceof Node && diagnosticOverlayRef.current?.contains(event.target)) {
+      const targetIsInOverlay = event.target instanceof Node && diagnosticOverlayRef.current?.contains(event.target);
+      if (targetIsInOverlay) {
         event.preventDefault();
+        if (event.target instanceof Node && diagnosticPopoverRef.current?.contains(event.target)) {
+          const line = activeDiagnosticLineRef.current;
+          const marker = line === null ? null : diagnosticMarkersRef.current?.querySelector<HTMLButtonElement>(
+            `[data-diagnostic-line="${line}"]`,
+          );
+          marker?.focus({ preventScroll: true });
+        }
       }
       close();
     };
@@ -343,6 +374,7 @@ export const CodeEditor = memo(function CodeEditor({
         text={text}
         lineCount={lineCount}
         readOnly={readOnly}
+        language={language}
         highlightLine={highlightLine}
         compactGutterClass={compactGutterClass}
         diagnosticAnchorRanges={diagnosticAnchorRanges}
@@ -353,10 +385,11 @@ export const CodeEditor = memo(function CodeEditor({
       <CodeEditorInput
         editorRef={editorRef}
         className={`editor${readOnly ? ' is-readonly' : ''}${compactGutterClass}`}
-        accessibleLabel={t('editor.codeAreaLabel', { file: 'main.c' })}
+        accessibleLabel={t('editor.codeAreaLabel', { file: fileName })}
         initialText={initialText}
+        language={language}
         readOnly={readOnly}
-        completion={completion}
+        completion={editorCompletion}
         completionPopoverId={completionPopoverId}
         onPointerMove={handleDiagnosticPointerMove}
         onPointerLeave={scheduleDiagnosticClose}
@@ -407,6 +440,12 @@ export const CodeEditor = memo(function CodeEditor({
             setDismissedDiagnosticLine(null);
             setPinnedDiagnosticLine(line);
           }
+        }}
+        sourceFiles={sourceFiles}
+        sourceSnapshot={sourceSnapshot}
+        onNavigateRelatedLocation={(location, snapshot) => {
+          dismissDiagnosticPopover();
+          return onDiagnosticNavigate?.(location, snapshot) ?? 'unavailable';
         }}
       />
       {completionOverlay}

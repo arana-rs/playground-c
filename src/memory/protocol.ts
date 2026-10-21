@@ -10,9 +10,17 @@ import type {
   DebugStaticObjectSnapshot,
 } from '@playground/c11-engine/core';
 import type { RunConfiguration } from '../execution/configuration.ts';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
 
 export type MemoryViewerCommand =
   | {
+    type: 'debug-start'; jobId: number; snapshot: WorkspaceSourceSnapshot;
+    configuration: Pick<RunConfiguration, 'options' | 'debug'>;
+    enableConsole?: boolean;
+    consoleGeneration?: number;
+  }
+  | {
+    /** Backward-compatible single-file command for existing Worker callers. */
     type: 'debug-start'; jobId: number; fileName: string; source: string;
     configuration: Pick<RunConfiguration, 'options' | 'debug'>;
     enableConsole?: boolean;

@@ -22,6 +22,8 @@ interface TerminalSegmentSnapshot {
   readonly text: string;
   readonly role: TerminalRole;
   readonly stream: TerminalSegment['stream'];
+  readonly copyable?: boolean;
+  readonly diagnosticLocations?: ConsoleOutputSegment['diagnosticLocations'];
 }
 
 export interface TerminalPresentationSnapshot {
@@ -39,11 +41,37 @@ function snapshotSegment(segment: TerminalSegment): TerminalSegmentSnapshot {
     text: segment.text,
     role: roleOf(segment),
     stream: segment.stream,
+    ...(segment.copyable === false ? { copyable: false } : {}),
+    ...(segment.diagnosticLocations?.length
+      ? { diagnosticLocations: segment.diagnosticLocations.map(location => ({ ...location })) }
+      : {}),
   };
 }
 
+function sameDiagnosticLocations(
+  left: ConsoleOutputSegment['diagnosticLocations'],
+  right: ConsoleOutputSegment['diagnosticLocations'],
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((location, index) => {
+    const other = right[index];
+    return other !== undefined
+      && location.start === other.start
+      && location.end === other.end
+      && location.file === other.file
+      && location.line === other.line
+      && location.column === other.column
+      && location.sourceId === other.sourceId;
+  });
+}
+
 function sameSegmentMetadata(left: TerminalSegmentSnapshot, right: TerminalSegmentSnapshot): boolean {
-  return left.tone === right.tone && left.role === right.role && left.stream === right.stream;
+  return left.tone === right.tone
+    && left.role === right.role
+    && left.stream === right.stream
+    && left.copyable === right.copyable
+    && sameDiagnosticLocations(left.diagnosticLocations, right.diagnosticLocations);
 }
 
 function appendText(
@@ -145,8 +173,17 @@ export class TerminalPresentation {
     if (segment.role === 'protected') {
       if (text) {
         const previous = this.protectedSegments.at(-1);
-        if (previous?.tone === segment.tone) previous.text += text;
-        else this.protectedSegments.push({ tone: segment.tone, text, role: 'protected', stream: segment.stream });
+        const diagnosticLocations = segment.diagnosticLocations?.length ? segment.diagnosticLocations : undefined;
+        if (!diagnosticLocations && !previous?.diagnosticLocations?.length
+          && previous?.tone === segment.tone && previous.copyable === segment.copyable && previous.stream === segment.stream) previous.text += text;
+        else this.protectedSegments.push({
+          tone: segment.tone,
+          text,
+          role: 'protected',
+          stream: segment.stream,
+          ...(segment.copyable === false ? { copyable: false } : {}),
+          ...(diagnosticLocations ? { diagnosticLocations } : {}),
+        });
       }
       return;
     }
@@ -362,4 +399,11 @@ export class TerminalPresentation {
       protectedSegments: this.protectedSegments.map(segment => ({ ...segment })),
     };
   }
+}
+
+export function getConsoleCopyText(presentation: TerminalPresentationSnapshot): string {
+  return [...presentation.screen, ...presentation.protectedSegments]
+    .filter(segment => segment.copyable !== false)
+    .map(segment => segment.text)
+    .join('');
 }

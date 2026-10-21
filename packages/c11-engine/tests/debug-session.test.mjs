@@ -995,9 +995,6 @@ test('heap inspection publishes ordered actual addresses, respects sizes and dis
   const created = objects(first.events, 'object-create').filter((event) => event.origin === 'heap');
   const deleted = objects(first.events, 'object-delete').filter((event) => event.origin === 'heap');
   const creationsById = new Map(created.map((event) => [event.allocationId, event]));
-  const initialAddresses = created.slice(0, 3).map((event) => event.addressVirtual);
-  assert.ok(initialAddresses[1] < initialAddresses[2] && initialAddresses[2] < initialAddresses[0],
-    'the sample seed forces new allocations before and within address order');
   for (const { blocks } of first.observations) {
     assert.deepEqual(blocks.map(({ address }) => BigInt(address)),
       [...blocks].map(({ address }) => BigInt(address)).sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
@@ -1028,6 +1025,26 @@ test('heap inspection publishes ordered actual addresses, respects sizes and dis
     'free removes the released block from inspection');
   assert.equal(created.length, 4);
   assert.equal(deleted.length, 4);
+});
+
+test('heap bases stay compact while random placement can precede, follow, or fill a gap', () => {
+  const randomValues = [0.99, 0.99, 0.4, 0];
+  let randomIndex = 0;
+  const location = { file: 'heap-compact-placement.test.c', line: 1, column: 1 };
+  const memory = new VirtualMemory([], null, { peakMemoryBytes: 0 }, () => randomValues[randomIndex++] ?? 0);
+  const allocate = () => {
+    const pointer = memory.allocateRaw(1, location);
+    assert.ok(pointer);
+    return memory.describeObject(memory.rootReference(pointer.allocationId), location).addressVirtual;
+  };
+
+  const first = allocate();
+  const after = allocate();
+  assert.deepEqual([first, after], [0x30020n, 0x30060n]);
+  const between = allocate();
+  const before = allocate();
+  assert.deepEqual([first, after, between, before], [0x30020n, 0x30060n, 0x30040n, 0x30000n]);
+  assert.ok([first, after, between, before].every((address) => address % 0x10n === 0n));
 });
 
 test('the virtual layout publishes disjoint Static, Stack and Heap regions with shared guards and capacity', () => {

@@ -1,12 +1,15 @@
-import type { Dispatch, RefObject, SetStateAction } from 'react';
+import type { Dispatch, DragEventHandler, RefObject, SetStateAction } from 'react';
 import { Button, ButtonSpinner } from '../components/arc/button/button.tsx';
 import { ConsolePanel } from '../components/ConsolePanel.tsx';
 import { ExecutionSettings } from '../components/ExecutionSettings.tsx';
 import { LanguageSwitch } from '../components/LanguageSwitch.tsx';
 import { ThemeSwitch } from '../components/arc/theme-switch/theme-switch.tsx';
-import { SelectedFileTab } from '../components/SelectedFileTab.tsx';
+import { WorkspaceFileTabs } from '../components/WorkspaceFileTabs.tsx';
+import { FileDropNotice } from '../components/FileDropNotice.tsx';
+import type { FileDropNoticeState } from '../components/FileDropNotice.tsx';
 import { CodeEditor } from '../editor/CodeEditor.tsx';
-import type { EditorDiagnosticGroup } from '../editor/editorDiagnostics.ts';
+import type { WorkspaceFile } from '../editor/sourcePersistence.ts';
+import type { EditorDiagnosticGroup, EditorSourceLocationTarget } from '../editor/editorDiagnostics.ts';
 import type { EditorLimitMessage } from '../editor/limits.ts';
 import type { EditorCompletionState } from '../editor/useCodeEditor.ts';
 import { SyntaxAnalysisControl } from '../editor/SyntaxAnalysisControl.tsx';
@@ -14,6 +17,7 @@ import type { SyntaxAnalysisMode } from '../editor/syntaxAnalysisPreference.ts';
 import type { SyntaxAnalysisState } from '../editor/syntaxAnalysisController.ts';
 import type { ExecutionSettings as ExecutionSettingsValue } from '../execution/settings.ts';
 import type { RunConfiguration } from '../execution/configuration.ts';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
 import type {
   ConsoleOutputSegment,
   ConsoleStatusTone,
@@ -25,6 +29,8 @@ import { isMacPlatform } from '../keyboardShortcuts.ts';
 import type { ColorTheme } from './useColorTheme.ts';
 import type { useConsoleLayout } from './useConsoleLayout.ts';
 import { useI18n } from '../i18n.tsx';
+import type { DiagnosticNavigationOutcome } from '../components/DiagnosticLocationAction.tsx';
+import type { FileDropTarget } from '../editor/fileDropImport.ts';
 
 const GITHUB_REPOSITORY_URL = 'https://github.com/arana-rs/playground-c';
 const buildCommit = typeof __BUILD_COMMIT__ === 'string' ? __BUILD_COMMIT__ : '';
@@ -39,7 +45,8 @@ interface PlaygroundShellProps {
   memoryViewer: {
     buttonRef: RefObject<HTMLButtonElement | null>;
     open: boolean;
-    source: string | null;
+    document: WorkspaceSourceSnapshot | null;
+    canOpen: boolean;
     configuration: RunConfiguration;
     onOpen: () => void;
     onClose: () => void;
@@ -47,15 +54,31 @@ interface PlaygroundShellProps {
   run: {
     isRunning: boolean;
     showStop: boolean;
+    canRun: boolean;
     onRun: () => void;
   };
   editor: {
     ref: RefObject<HTMLTextAreaElement | null>;
     text: string;
+    fileName: string;
+    persistenceLocked: boolean;
+    files: readonly WorkspaceFile[];
+    activeFileId: string;
+    requestedFileId: string;
+    isComposing: boolean;
+    onSelectFile: (fileId: string) => void;
+    onCreateFile: () => WorkspaceFile | null;
+    onRenameFile: (fileId: string, name: string) => void;
+    onDeleteFile: (fileId: string) => void;
     initialText: string;
     cursor: { line: number; column: number };
     limitMessage: EditorLimitMessage | null;
     diagnostics: readonly EditorDiagnosticGroup[];
+    sourceSnapshot: WorkspaceSourceSnapshot;
+    onDiagnosticNavigate: (
+      location: EditorSourceLocationTarget,
+      snapshot: WorkspaceSourceSnapshot,
+    ) => DiagnosticNavigationOutcome;
     completion: EditorCompletionState | null;
     onCompletionAccept: (index: number) => boolean;
     onCompletionDismiss: () => void;
@@ -68,6 +91,12 @@ interface PlaygroundShellProps {
     statusLabel: string;
     statusTone: ConsoleStatusTone;
     segments: readonly ConsoleOutputSegment[];
+    diagnosticFiles: readonly WorkspaceFile[];
+    diagnosticSnapshot?: WorkspaceSourceSnapshot;
+    onDiagnosticNavigate: (
+      location: EditorSourceLocationTarget,
+      snapshot: WorkspaceSourceSnapshot,
+    ) => DiagnosticNavigationOutcome;
     inputRequestId: number | null;
     inputResetKey: number;
     onSendStdinLine: (line: string) => boolean;
@@ -81,10 +110,21 @@ interface PlaygroundShellProps {
     playbackIntervalMs: MemoryViewerPlaybackInterval;
     onApplyExecutionSettings: Dispatch<SetStateAction<ExecutionSettingsValue>>;
     onPlaybackIntervalChange: (interval: MemoryViewerPlaybackInterval) => void;
+    onLoadDebugExample: () => void;
+    debugExampleDisabled: boolean;
+  };
+  fileDrop: {
+    target: FileDropTarget | null;
+    notice: FileDropNoticeState | null;
+    onDismissNotice: (id: number) => void;
+    onDragEnterCapture: DragEventHandler<HTMLDivElement>;
+    onDragOverCapture: DragEventHandler<HTMLDivElement>;
+    onDragLeaveCapture: DragEventHandler<HTMLDivElement>;
+    onDropCapture: DragEventHandler<HTMLDivElement>;
   };
 }
 
-export function PlaygroundShell({ theme, memoryViewer, run, editor, console: consoleState, footer }: PlaygroundShellProps) {
+export function PlaygroundShell({ theme, memoryViewer, run, editor, console: consoleState, footer, fileDrop }: PlaygroundShellProps) {
   const { t } = useI18n();
   const { layout } = consoleState;
   const { viewportRect, consoleVisible, isResizingConsole, consoleResizerRef, consolePanelRef,
@@ -93,31 +133,33 @@ export function PlaygroundShell({ theme, memoryViewer, run, editor, console: con
     onConsoleResizeKeyDown } = layout;
 
   const { colorTheme, onChange: onChangeColorTheme } = theme;
-  const { buttonRef: memoryViewerButtonRef, open: memoryViewerOpen, source: memoryViewerSource,
-    configuration: executionConfiguration,
+  const { buttonRef: memoryViewerButtonRef, open: memoryViewerOpen, document: memoryViewerDocument,
+    canOpen: canOpenMemoryViewer, configuration: executionConfiguration,
     onOpen: openMemoryViewer, onClose: closeMemoryViewer } = memoryViewer;
-  const { isRunning, showStop, onRun } = run;
-  const { ref, text, initialText, cursor, limitMessage, diagnostics, completion,
+  const { isRunning, showStop, canRun, onRun } = run;
+  const { ref, text, fileName, files, activeFileId, requestedFileId, isComposing,
+    persistenceLocked,
+    onSelectFile, onCreateFile, onRenameFile, onDeleteFile,
+    initialText, cursor, limitMessage, diagnostics, sourceSnapshot, onDiagnosticNavigate, completion,
     onCompletionAccept, onCompletionDismiss, syntaxMode, syntaxState, onSyntaxModeChange } = editor;
   const { statusLabel: consoleStatusLabel, statusTone: consoleStatusTone, segments: consoleSegments,
     inputRequestId, inputResetKey, onSendStdinLine, onSendStdinEOF, timeoutReport, copyFeedback,
-    onCopyTimeoutReport } = consoleState;
+    onCopyTimeoutReport, diagnosticFiles, diagnosticSnapshot } = consoleState;
   const { executionSettings, playbackIntervalMs, onApplyExecutionSettings,
-    onPlaybackIntervalChange } = footer;
+    onPlaybackIntervalChange, onLoadDebugExample, debugExampleDisabled } = footer;
 
   return (
-    <div className={`playground${isResizingConsole ? ' is-resizing-console' : ''}${playgroundRows.compactKeyboard ? ' is-keyboard-compact' : ''}`} style={playgroundStyle}>
+    <div
+      className={`playground${isResizingConsole ? ' is-resizing-console' : ''}${playgroundRows.compactKeyboard ? ' is-keyboard-compact' : ''}`}
+      style={playgroundStyle}
+      onDragEnterCapture={fileDrop.onDragEnterCapture}
+      onDragOverCapture={fileDrop.onDragOverCapture}
+      onDragLeaveCapture={fileDrop.onDragLeaveCapture}
+      onDropCapture={fileDrop.onDropCapture}
+    >
       <header className="header">
-        <span>Playground for C</span>
-        <div className="header-actions">
-          <ThemeSwitch
-            className="theme-toggle-button"
-            theme={colorTheme === 'github-dark' ? 'dark' : 'light'}
-            label={t(colorTheme === 'github-dark' ? 'theme.switchToLight' : 'theme.switchToDark')}
-            title={t(colorTheme === 'github-dark' ? 'theme.switchToLight' : 'theme.switchToDark')}
-            onThemeChange={onChangeColorTheme}
-          />
-          <LanguageSwitch />
+        <div className="header-brand">
+          <span>Playground for C</span>
           <Button
             ref={memoryViewerButtonRef}
             className="memory-viewer-open-button"
@@ -127,6 +169,9 @@ export function PlaygroundShell({ theme, memoryViewer, run, editor, console: con
             aria-label={t('memoryViewer.open')}
             aria-haspopup="dialog"
             aria-expanded={memoryViewerOpen}
+            aria-description={canOpenMemoryViewer ? undefined : t('run.entryRequired')}
+            title={canOpenMemoryViewer ? undefined : t('run.entryRequired')}
+            disabled={!canOpenMemoryViewer}
             onClick={openMemoryViewer}
             leadingIcon={(
               <svg className="run-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -138,9 +183,32 @@ export function PlaygroundShell({ theme, memoryViewer, run, editor, console: con
             {t('memoryViewer.title')}
           </Button>
         </div>
+        <div className="header-actions">
+          <ThemeSwitch
+            className="theme-toggle-button"
+            theme={colorTheme === 'github-dark' ? 'dark' : 'light'}
+            label={t(colorTheme === 'github-dark' ? 'theme.switchToLight' : 'theme.switchToDark')}
+            title={t(colorTheme === 'github-dark' ? 'theme.switchToLight' : 'theme.switchToDark')}
+            onThemeChange={onChangeColorTheme}
+          />
+          <LanguageSwitch />
+        </div>
       </header>
-      <div className="file-tabs">
-        <SelectedFileTab fileName="main.c" />
+      <div
+        className={`file-tabs${persistenceLocked ? ' is-workspace-locked' : ''}${!persistenceLocked && fileDrop.target === 'tabs' ? ' is-file-drop-target' : ''}`}
+        data-file-drop-zone="tabs"
+      >
+        <WorkspaceFileTabs
+          files={files}
+          activeFileId={activeFileId}
+          requestedFileId={requestedFileId}
+          isComposing={isComposing}
+          persistenceLocked={persistenceLocked}
+          onSelectFile={onSelectFile}
+          onCreateFile={onCreateFile}
+          onRenameFile={onRenameFile}
+          onDeleteFile={onDeleteFile}
+        />
         <Button
           className="run-button"
           variant="secondary"
@@ -149,7 +217,9 @@ export function PlaygroundShell({ theme, memoryViewer, run, editor, console: con
           aria-keyshortcuts={`${isMacPlatform() ? 'Meta' : 'Control'}+Enter`}
           aria-busy={isRunning || undefined}
           aria-label={t(isRunning ? 'run.stop' : 'run.label')}
-          aria-description={isRunning ? t('run.stopDescription') : undefined}
+          aria-description={isRunning ? t('run.stopDescription') : canRun ? undefined : t('run.entryRequired')}
+          title={isRunning || canRun ? undefined : t('run.entryRequired')}
+          disabled={!isRunning && !canRun}
           onClick={onRun}
           leadingIcon={
             isRunning && !showStop ? <ButtonSpinner /> : (
@@ -161,15 +231,27 @@ export function PlaygroundShell({ theme, memoryViewer, run, editor, console: con
         >
           {t(showStop ? 'run.stop' : 'run.label')}
         </Button>
+        {persistenceLocked && (
+          <WorkspacePersistenceNotice />
+        )}
       </div>
-      <main className="editor-pane">
+        <main
+        id="editor-pane"
+          data-file-drop-zone="editor"
+          className={`editor-pane${syntaxMode === 'off' ? ' is-diagnostics-off' : ''}${!persistenceLocked && fileDrop.target === 'editor' ? ' is-file-drop-target' : ''}`}
+      >
         <CodeEditor
           editorRef={ref}
           text={text}
+          fileName={fileName}
+          readOnly={persistenceLocked}
           initialText={initialText}
           activeLine={cursor.line}
           limitMessage={limitMessage}
           diagnostics={diagnostics}
+          sourceFiles={files}
+          sourceSnapshot={sourceSnapshot}
+          onDiagnosticNavigate={onDiagnosticNavigate}
           completion={completion}
           onCompletionAccept={onCompletionAccept}
           onCompletionDismiss={onCompletionDismiss}
@@ -212,6 +294,9 @@ export function PlaygroundShell({ theme, memoryViewer, run, editor, console: con
         statusLabel={consoleStatusLabel}
         statusTone={consoleStatusTone}
         segments={consoleSegments}
+        diagnosticFiles={diagnosticFiles}
+        diagnosticSnapshot={diagnosticSnapshot}
+        onDiagnosticNavigate={onDiagnosticNavigate}
         inputRequestId={inputRequestId}
         onSendStdinLine={onSendStdinLine}
         onSendStdinEOF={onSendStdinEOF}
@@ -248,6 +333,8 @@ export function PlaygroundShell({ theme, memoryViewer, run, editor, console: con
             playbackIntervalMs={playbackIntervalMs}
             onApply={onApplyExecutionSettings}
             onPlaybackIntervalChange={onPlaybackIntervalChange}
+            onLoadDebugExample={onLoadDebugExample}
+            debugExampleDisabled={debugExampleDisabled}
           />
           <a
             className="github-link"
@@ -280,14 +367,39 @@ export function PlaygroundShell({ theme, memoryViewer, run, editor, console: con
         </div>
         <span className="footer-cursor">{t('editor.cursorPosition', { line: cursor.line, column: cursor.column })}</span>
       </footer>
-      {memoryViewerSource !== null && (
+      {!persistenceLocked && fileDrop.target !== null && (
+        <div className={`file-drop-indicator file-drop-indicator--${fileDrop.target}`} role="status" aria-live="polite" aria-atomic="true">
+          <svg className="file-drop-indicator__icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path d="M3.5 2.5h5l3 3v8h-8zM8.5 2.5v3h3M8 7v4m-1.5-1.5L8 11l1.5-1.5" />
+          </svg>
+          <span className="file-drop-indicator__copy">
+            <span>{t('fileDrop.dropHint')}</span>
+            {fileDrop.target === 'page' && <span className="file-drop-indicator__detail">{t('fileDrop.dropTargetHint')}</span>}
+          </span>
+        </div>
+      )}
+      <FileDropNotice notice={fileDrop.notice} onDismiss={fileDrop.onDismissNotice} />
+      {memoryViewerDocument !== null && (
         <MemoryViewer
-          source={memoryViewerSource}
+          document={memoryViewerDocument}
           configuration={executionConfiguration}
           playbackIntervalMs={playbackIntervalMs}
           onClose={closeMemoryViewer}
         />
       )}
+    </div>
+  );
+}
+
+export function WorkspacePersistenceNotice() {
+  const { t } = useI18n();
+  return (
+    <div className="workspace-persistence-notice" role="status" aria-live="polite">
+      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <path d="M8 1.8 14.3 13H1.7L8 1.8Z" />
+        <path d="M8 5.3v3.4m0 2.1h.01" />
+      </svg>
+      <span>{t('workspace.unsupportedFormat')}</span>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useId, useRef } from 'react';
+import { useCallback, useEffect, useId, useRef } from 'react';
 import type { RefObject } from 'react';
 import type { EditorCompletionState } from './useCodeEditor.ts';
 import { getEditorCaretGeometry } from './caretGeometry.ts';
@@ -50,6 +50,46 @@ export function useCodeEditorCompletionOverlay({
     popover.style.left = `${Math.max(4, Math.min(requestedLeft, maxLeft))}px`;
     popover.style.top = `${Math.max(4, Math.min(requestedTop, maxTop))}px`;
   }, [editorRef]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    let frame: number | null = null;
+    let paddingTransitionActive = false;
+    const updateWhileTransitioning = () => {
+      if (!paddingTransitionActive) {
+        frame = null;
+        return;
+      }
+      positionPopover();
+      frame = window.requestAnimationFrame(updateWhileTransitioning);
+    };
+    const onTransitionRun = (event: TransitionEvent) => {
+      if (event.propertyName !== 'padding-left') return;
+      paddingTransitionActive = true;
+      positionPopover();
+      if (frame === null) frame = window.requestAnimationFrame(updateWhileTransitioning);
+    };
+    const onTransitionFinish = (event: TransitionEvent) => {
+      if (event.propertyName !== 'padding-left') return;
+      paddingTransitionActive = false;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = null;
+      positionPopover();
+    };
+
+    editor.addEventListener('transitionrun', onTransitionRun);
+    editor.addEventListener('transitionend', onTransitionFinish);
+    editor.addEventListener('transitioncancel', onTransitionFinish);
+    return () => {
+      paddingTransitionActive = false;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      editor.removeEventListener('transitionrun', onTransitionRun);
+      editor.removeEventListener('transitionend', onTransitionFinish);
+      editor.removeEventListener('transitioncancel', onTransitionFinish);
+    };
+  }, [editorRef, positionPopover]);
 
   const dismissOffscreen = useCallback(() => {
     const editor = editorRef.current;

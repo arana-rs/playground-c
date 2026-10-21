@@ -3,6 +3,7 @@ import { MemoryViewerController } from './MemoryViewerController.ts';
 import type { MemoryViewerState } from './MemoryViewerController.ts';
 import { RUN_CONFIGURATION } from '../execution/configuration.ts';
 import type { RunConfiguration } from '../execution/configuration.ts';
+import type { WorkspaceSourceSnapshot } from '../execution/documentSnapshot.ts';
 
 export type { DebugAggregateSnapshot, DebugArraySnapshot, DebugScalarSnapshot, DebugStaticObjectSnapshot } from '@playground/c11-engine/core';
 export type { DebugHeapObjectSnapshot } from '@playground/c11-engine/core';
@@ -29,22 +30,22 @@ export type MemoryViewerHookValue = MemoryViewerState & MemoryViewerActions;
 
 /** Starts one frozen-source debug session on mount and owns its Worker/timers until unmount. */
 export function useMemoryViewer(
-  source: string,
+  document: WorkspaceSourceSnapshot,
   configuration: RunConfiguration = RUN_CONFIGURATION,
   enableConsole = true,
   playbackIntervalMs = configuration.memoryViewer.playIntervalMs,
 ): MemoryViewerHookValue {
-  const frozenSource = useRef(source);
+  const frozenDocument = useRef(document);
   const controllerRef = useRef<MemoryViewerController | null>(null);
   if (!controllerRef.current) {
-    controllerRef.current = new MemoryViewerController(frozenSource.current, { configuration, enableConsole, playbackIntervalMs });
+    controllerRef.current = new MemoryViewerController(frozenDocument.current, { configuration, enableConsole, playbackIntervalMs });
   }
   const controller = controllerRef.current;
   const [state, setState] = useState<MemoryViewerState>(controller.state);
 
   useEffect(() => {
     const unsubscribe = controller.subscribe(setState);
-    controller.start(frozenSource.current);
+    controller.start(frozenDocument.current);
     return () => {
       unsubscribe();
       controller.dispose();

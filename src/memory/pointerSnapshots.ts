@@ -155,7 +155,8 @@ export function resolveMemoryViewerPointerTarget(
         && element.kind === 'pointer')
     : undefined;
   const aggregatePointer = identity.kind === 'aggregate-member-pointer'
-    ? aggregates.find(aggregate => aggregate.rootId === identity.rootId)
+    ? aggregates.find(aggregate => aggregate.rootId === identity.rootId
+      && aggregate.members.some(member => member.key === identity.memberKey && member.kind === 'pointer'))
       ?.members.find(member => member.key === identity.memberKey && member.kind === 'pointer')
     : undefined;
   const pointerStatus = pointer?.status ?? arrayElementPointer?.pointerStatus ?? aggregatePointer?.pointerStatus;
